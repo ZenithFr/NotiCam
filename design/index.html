@@ -18,20 +18,32 @@
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%}
+  /* The page is exactly one viewport tall and never scrolls: the phone is fitted
+     to whatever space is left (`fitDevice()`), so the *entire* screen is always
+     visible no matter how short the preview pane is. Centring with
+     `align-items:center` used to clip the TOP of the phone in short panes. */
   body{
     background:radial-gradient(1200px 700px at 30% -10%, #1b1b22 0%, #0a0a0c 55%, #060607 100%);
     color:#fff;
     font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
-    display:flex;align-items:center;justify-content:center;gap:64px;
-    padding:40px 32px;min-height:100%;
+    display:flex;align-items:stretch;justify-content:center;gap:44px;
+    padding:20px;height:100vh;height:100dvh;overflow:hidden;
   }
 
   /* ─────────── phone shell ─────────── */
+  /* The slot is a plain flex box; the phone inside is absolutely positioned and
+     scaled, so the fit is never circular (a transformed child cannot size it). */
+  .phone-slot{
+    position:relative;flex:1 1 auto;min-width:0;min-height:0;height:100%;
+  }
   .device{
-    position:relative;width:390px;height:844px;border-radius:56px;
+    position:absolute;left:50%;top:50%;
+    width:390px;height:844px;border-radius:56px;
+    transform:translate(-50%,-50%) scale(var(--phone-scale,1));
+    transform-origin:center center;
     background:#000;
     box-shadow:0 0 0 11px #16161a, 0 0 0 13px #2c2c32, 0 40px 90px -20px rgba(0,0,0,.9), 0 0 140px rgba(120,140,255,.06);
-    overflow:hidden;flex:0 0 auto;
+    overflow:hidden;
   }
   .island{
     position:absolute;top:11px;left:50%;transform:translateX(-50%);
@@ -45,10 +57,21 @@
   .status .icons{display:flex;gap:5px;align-items:center;opacity:.95}
 
   /* ─────────── camera column ─────────── */
-  .camera{position:absolute;inset:0;display:flex;flex-direction:column}
+  /* Layout contract (mirrors CameraScreen.kt): the chrome is laid out *above*
+     and *below* the 4:3 frame in a flex column. Nothing is painted over the
+     framebuffer — no absolute-positioned toolbar, no scrim across the scene. */
+  .camera{position:absolute;inset:0;display:flex;flex-direction:column;padding-top:48px}
 
+  /* The stage gets whatever height the fixed chrome does not use (the CSS twin
+     of `Modifier.weight(1f)`), and `fitStage()` sizes the frame to exactly 4:3
+     inside it — never stretched, never overlapping. */
+  .stage{
+    flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;
+    background:#000;overflow:hidden;
+  }
   .viewfinder{
-    position:relative;width:100%;aspect-ratio:4/3;flex:0 0 auto;overflow:hidden;background:#111;
+    position:relative;flex:0 0 auto;width:100%;height:auto;aspect-ratio:4/3;
+    overflow:hidden;background:#111;
   }
   .viewfinder img{
     position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
@@ -74,12 +97,11 @@
   }
   .reticle.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
 
-  /* ─────────── top bar ─────────── */
+  /* ─────────── top bar (in flow, above the frame) ─────────── */
   .topbar{
-    position:absolute;top:0;left:0;right:0;z-index:30;display:flex;align-items:center;
-    padding:48px var(--gutter) 6px;gap:8px;pointer-events:none;
+    position:relative;z-index:30;display:flex;align-items:center;
+    height:56px;flex:0 0 auto;padding:0 var(--gutter);gap:8px;
   }
-  .topbar > *{pointer-events:auto}
   .iconbtn{
     width:44px;height:44px;border:0;border-radius:50%;display:grid;place-items:center;
     background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
@@ -127,15 +149,13 @@
   }
   .slider:active .knob{box-shadow:0 0 0 9px rgba(255,255,255,.16),0 1px 4px rgba(0,0,0,.5)}
 
-  .grow{flex:1}
-
   /* ─────────── bottom chrome ─────────── */
   .bottom{
     position:relative;padding:18px 24px 34px;display:flex;flex-direction:column;align-items:center;
   }
   .bottom::before{
-    content:"";position:absolute;left:0;right:0;top:-90px;height:130px;pointer-events:none;
-    background:linear-gradient(to top, #000 0%, rgba(0,0,0,.7) 45%, rgba(0,0,0,0) 100%);
+    content:"";position:absolute;left:0;right:0;top:0;height:100%;pointer-events:none;
+    background:linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,.55) 30%, #000 100%);
   }
   .bottom > *{position:relative}
 
@@ -228,7 +248,11 @@
   .dial svg.ticks{position:absolute;inset:0}
 
   /* ─────────── side spec panel ─────────── */
-  .spec{max-width:340px;color:rgba(255,255,255,.72);font-size:13px;line-height:1.6}
+  .spec{
+    flex:0 1 360px;max-width:360px;max-height:100%;overflow:auto;
+    color:rgba(255,255,255,.72);font-size:13px;line-height:1.6;
+    overscroll-behavior:contain;
+  }
   .spec h1{font-size:24px;letter-spacing:-.02em;color:#fff;margin:0 0 4px;font-weight:600}
   .spec h1 span{color:var(--yellow)}
   .spec p.lede{margin:0 0 22px;color:rgba(255,255,255,.5);font-size:13px}
@@ -250,14 +274,21 @@
     color:rgba(255,255,255,.7)
   }
   @media (max-width:1080px){
-    body{flex-direction:column;gap:36px;padding:24px 16px 60px}
-    .spec{max-width:390px}
-    .device{transform:scale(.92);transform-origin:top center}
+    body{flex-direction:column;gap:18px;padding:16px}
+    /* the phone keeps the roomy part of a narrow pane; the notes scroll */
+    .phone-slot{flex:1 1 auto;order:1}
+    .spec{flex:0 0 auto;order:2;max-width:560px;max-height:30%;margin:0 auto;width:100%}
+  }
+  /* On a short pane the app preview wins: the notes are supplementary, the phone
+     is the deliverable. */
+  @media (max-height:760px){
+    .spec{display:none}
   }
 </style>
 </head>
 <body>
 
+<div class="phone-slot" id="phoneSlot">
 <div class="device" id="device">
   <div class="island"></div>
   <div class="status">
@@ -270,7 +301,17 @@
   </div>
 
   <div class="camera">
-    <!-- viewfinder -->
+    <!-- top chrome: flash · status · pro (outside the 4:3 region) -->
+  <div class="topbar">
+    <button class="iconbtn" id="flash" aria-label="Flash"></button>
+    <div class="spacer"></div>
+    <div class="pillstatus" id="status">Ready</div>
+    <div class="spacer"></div>
+    <button class="iconbtn" id="pro" aria-label="Pro controls"></button>
+  </div>
+
+    <!-- viewfinder: measured to exactly 4:3 (1440x1080 sensor) -->
+    <div class="stage" id="stage">
     <div class="viewfinder" id="viewfinder">
       <img src="sample_portrait.jpg" alt="Live bokeh preview" />
       <div class="grid" id="grid">
@@ -278,6 +319,7 @@
       </div>
       <div class="reticle" id="reticle"></div>
       <div class="bloom" id="bloom"></div>
+    </div>
     </div>
 
     <!-- lens chips -->
@@ -295,8 +337,6 @@
       </div>
       <span class="value" id="quickApValue">ƒ 1.8</span>
     </div>
-
-    <div class="grow"></div>
 
     <!-- bottom chrome -->
     <div class="bottom">
@@ -358,14 +398,7 @@
     </div>
   </div>
 
-  <!-- top bar floats above the viewfinder -->
-  <div class="topbar">
-    <button class="iconbtn" id="flash" aria-label="Flash"></button>
-    <div class="spacer"></div>
-    <div class="pillstatus" id="status">Ready</div>
-    <div class="spacer"></div>
-    <button class="iconbtn" id="pro" aria-label="Pro controls"></button>
-  </div>
+  <!-- top bar was here: it now lives inside .camera, above the frame -->
 
   <div class="dial" id="dial">
     <svg class="ticks" viewBox="0 0 236 236" id="dialTicks"></svg>
@@ -377,17 +410,19 @@
 
   <img class="flyer" id="flyer" src="sample_portrait.jpg" alt="" />
 </div>
+</div><!-- /phone-slot -->
 
 <div class="spec">
   <h1>NotiCam <span>· Apple Camera</span></h1>
-  <p class="lede">Interactive mock of the new <code>res/layout/activity_main.xml</code> + drawable set. Everything below is clickable.</p>
+  <p class="lede">Interactive mock of the shipping <b>Jetpack Compose</b> screen (<code>CameraScreen.kt</code> + <code>ui/components/*</code>). Everything below is clickable. Tuned for the CMF Phone 2 Pro at 1080 × 2392.</p>
 
   <h2>What the redesign changes</h2>
   <ul>
     <li><span class="dot" style="background:#ffd60a"></span><div><b>System yellow selection.</b> Mode names and the ƒ dial are the only coloured elements — the old Nothing-red accents and neon pills are gone.</div></li>
     <li><span class="dot" style="background:rgba(255,255,255,.55)"></span><div><b>Glass, not cards.</b> 55% #1C1C1E capsules with a 0.5dp hairline instead of the heavy acrylic slabs and full-width dark bars.</div></li>
     <li><span class="dot" style="background:#fff"></span><div><b>Real Apple shutter.</b> 4dp ring + gap + disc, compresses on press, ring pulse + haptic on capture.</div></li>
-    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div><b>Viewfinder first.</b> The framebuffer is no longer boxed in under a 88dp header — the chrome floats over it and only the lens chips touch the frame.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div><b>Never over the scene.</b> Top bar, lens chips, ƒ row and shutter row are laid out <i>outside</i> the 4:3 framebuffer in one column, so no control can ever sit on top of the image. Open <b>Pro</b> and watch the frame give up height instead of being covered.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.35)"></span><div><b>No stretch, no crop.</b> The sensor streams 1440 × 1080; the box is measured to exactly 4:3 and the composite shader letterboxes as a second guarantee.</div></li>
     <li><span class="dot" style="background:#ff453a"></span><div><b>One-tap reach.</b> Flash, Pro sheet, tap-to-focus, pinch-zoom and the ƒ ladder all live where the thumb already is.</div></li>
   </ul>
 
@@ -408,7 +443,7 @@
     <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div>Open <b>Pro</b> → glass sheet slides up, button becomes a white ✕.</div></li>
   </ul>
 
-  <p class="hint">Static preview only — the shipping chrome is native Android views, not a WebView. Dimensions mirror the dp values in <kbd>dimens.xml</kbd> at a 390 × 844px viewport.</p>
+  <p class="hint">Static preview only — the shipping chrome is Jetpack Compose, not a WebView. Dimensions mirror <code>CameraSpacing</code> / <code>DeviceProfile</code>; press animations use spring specs, which is why nothing clips while it scales.</p>
 </div>
 
 <script>
@@ -450,6 +485,59 @@
   };
 
   const $ = id => document.getElementById(id);
+
+  // ── device fitting ───────────────────────────────────────────────────────
+  // The mock is drawn at its true size (390 x 844 CSS px) and scaled to fit
+  // whatever box the preview pane gives it, so the whole screen is always
+  // visible — top bar through shutter row — at any pane size.
+  const PHONE_W = 390, PHONE_H = 844, PHONE_RING = 15;
+  let phoneScale = 1;
+
+  function fitDevice() {
+    const slot = $("phoneSlot"), device = $("device");
+    if (!slot || !device) return;
+    // clientWidth/Height are layout px (unaffected by the transform we set).
+    const w = slot.clientWidth, h = slot.clientHeight;
+    if (!w || !h) return;
+    const s = Math.min(
+      (w - 8) / (PHONE_W + PHONE_RING * 2),
+      (h - 8) / (PHONE_H + PHONE_RING * 2),
+      1
+    );
+    phoneScale = Math.max(0.2, s);
+    device.style.setProperty("--phone-scale", phoneScale.toFixed(4));
+  }
+
+  // Screen px -> phone-local px (the reverse of `transform: scale()`).
+  const toLocal = v => v / (phoneScale || 1);
+
+  // ── frame fitting: 4:3 inside whatever space the chrome leaves ────────────
+  function fitStage() {
+    const stage = $("stage"), frame = $("viewfinder");
+    if (!stage || !frame) return;
+    // Layout px on purpose: getBoundingClientRect() would return *scaled* px.
+    const w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    const fw = Math.min(w, (h * 4) / 3);
+    frame.style.width = fw + "px";
+    frame.style.height = (fw * 3) / 4 + "px";
+  }
+
+  function relayout() {
+    fitDevice();
+    // The stage size only changes after the new scale is applied.
+    requestAnimationFrame(fitStage);
+  }
+
+  addEventListener("resize", relayout);
+  addEventListener("orientationchange", relayout);
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(relayout);
+    ro.observe($("phoneSlot"));
+    ro.observe($("stage"));
+  }
+  addEventListener("load", relayout);
+  relayout();
   const el = {
     flash: $("flash"), pro: $("pro"), status: $("status"), flip: $("flip"),
     sheet: $("sheet"), done: $("doneBtn"), grid: $("grid"),
@@ -671,7 +759,9 @@
   // ── tap to focus ─────────────────────────────────────────────────────────
   el.viewfinder.addEventListener("pointerdown", e => {
     const r = el.viewfinder.getBoundingClientRect();
-    const x = e.clientX - r.left, y = e.clientY - r.top;
+    // The phone is scaled by `fitDevice()`, so screen deltas must be divided
+    // back down to the phone's own coordinate space.
+    const x = toLocal(e.clientX - r.left), y = toLocal(e.clientY - r.top);
     el.reticle.style.left = x + "px";
     el.reticle.style.top = y + "px";
     el.reticle.classList.remove("show");
@@ -704,10 +794,13 @@
     const dr = $("device").getBoundingClientRect();
     const sr = el.shutter.getBoundingClientRect();
     const gr = el.gallery.getBoundingClientRect();
-    const sx = sr.left - dr.left + sr.width / 2;
-    const sy = sr.top - dr.top + sr.height / 2;
-    const gx = gr.left - dr.left + gr.width / 2;
-    const gy = gr.top - dr.top + gr.height / 2;
+    // Phone-local coordinates (see toLocal): the flyer lives inside .device and
+    // is not affected by the phone's transform, so scale must be divided out.
+    const sx = toLocal(sr.left - dr.left + sr.width / 2);
+    const sy = toLocal(sr.top - dr.top + sr.height / 2);
+    const gx = toLocal(gr.left - dr.left + gr.width / 2);
+    const gy = toLocal(gr.top - dr.top + gr.height / 2);
+    const galleryW = toLocal(gr.width);
 
     el.flyer.style.left = (sx - 48) + "px";
     el.flyer.style.top = (sy - 48) + "px";
@@ -718,7 +811,7 @@
       [
         { transform: "scale(.72)", opacity: 0, offset: 0 },
         { transform: "scale(1)", opacity: 1, offset: .28 },
-        { transform: `translate(${gx - sx}px, ${gy - sy}px) scale(${gr.width / 96})`, opacity: 1, offset: 1 }
+        { transform: `translate(${gx - sx}px, ${gy - sy}px) scale(${galleryW / 96})`, opacity: 1, offset: 1 }
       ],
       { duration: 470, easing: "cubic-bezier(.25,.9,.3,1)", fill: "forwards" }
     );

@@ -2,10 +2,10 @@
 layout(local_size_x = 16, local_size_y = 16) in;
 
 // Bindings:
-// 0: Sharp Original Color (RGBA8, 1440x1080)
+// 0: Sharp Original Color (RGBA8, sensor resolution — 1440x1080 preview / 4080x3072 still)
 // 1: Blurred Background (RGBA8, working resolution)
-// 2: Full-Res Alpha Matte (R8, 1440x1080)
-// 3: Present Surface Target (RGBA8, upright e.g. 1080x1440)
+// 2: Full-Res Alpha Matte (R8)
+// 3: Present Surface Target (RGBA8 — e.g. 1080x810 or 810x1080)
 
 layout(binding = 0) uniform sampler2D uOriginalColor;
 layout(binding = 1) uniform sampler2D uBlurredColor;
@@ -13,28 +13,61 @@ layout(binding = 2) uniform sampler2D uAlpha;
 layout(binding = 3, rgba8) writeonly uniform image2D uOutPresent;
 
 layout(push_constant) uniform CompositePushConstants {
-    uint outWidth;       // 1080 (upright viewport width)
-    uint outHeight;      // 1440 (upright viewport height)
-    int rotate90;        // 1 to apply 90 deg clockwise sensor rotation
+    uint outWidth;       // present surface width in px
+    uint outHeight;      // present surface height in px
+    int rotate90;        // 1 = present the landscape sensor upright (portrait)
 } pc;
 
 void main() {
     ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= pc.outWidth || coord.y >= pc.outHeight) {
+    if (coord.x >= int(pc.outWidth) || coord.y >= int(pc.outHeight)) {
         return;
     }
 
-    vec2 uv;
+    vec2 outSize = vec2(float(pc.outWidth), float(pc.outHeight));
+
+    // ── Framing ─────────────────────────────────────────────────────────────
+    // The viewfinder box and the sensor frame rarely share an exact aspect
+    // ratio (e.g. 4:3 sensor vs. a 1080x810 or a rounded screen area). Stretch
+    // mapping a 4:3 frame into an arbitrary box is what makes the preview look
+    // "zoomed/warped", so instead we fit-preserve the source aspect ratio and
+    // leave the remainder black. When the aspects match (the normal case) the
+    // two branches below are no-ops.
+    ivec2 srcTexels = textureSize(uOriginalColor, 0);
+    float srcAspect = float(max(srcTexels.x, 1)) / float(max(srcTexels.y, 1));
     if (pc.rotate90 != 0) {
-        // Map upright screen coordinates [0..1080, 0..1440]
-        // to sensor coordinates [0..1440, 0..1080] rotated 90 deg clockwise:
-        // sensor_x = (outHeight - 1 - y) / outHeight
-        // sensor_y = x / outWidth
-        float outU = (float(coord.x) + 0.5) / float(pc.outWidth);
-        float outV = (float(coord.y) + 0.5) / float(pc.outHeight);
-        uv = vec2(1.0 - outV, outU);
-    } else {
-        uv = (vec2(coord) + 0.5) / vec2(pc.outWidth, pc.outHeight);
+        srcAspect = 1.0 / srcAspect;
+    }
+    float outAspect = outSize.x / outSize.y;
+
+    // Normalised coordinate inside the surface.
+    vec2 uv = (vec2(coord) + 0.5) / outSize;
+
+    if (outAspect > srcAspect) {
+        // Surface is wider than the frame → pillarbox (bars left/right).
+        float used = srcAspect / outAspect;
+        float x = (uv.x - 0.5) / used + 0.5;
+        if (x < 0.0 || x > 1.0) {
+            imageStore(uOutPresent, coord, vec4(0.0, 0.0, 0.0, 1.0));
+            return;
+        }
+        uv.x = x;
+    } else if (outAspect < srcAspect) {
+        // Surface is taller than the frame → letterbox (bars top/bottom).
+        float used = outAspect / srcAspect;
+        float y = (uv.y - 0.5) / used + 0.5;
+        if (y < 0.0 || y > 1.0) {
+            imageStore(uOutPresent, coord, vec4(0.0, 0.0, 0.0, 1.0));
+            return;
+        }
+        uv.y = y;
+    }
+
+    // ── Orientation ─────────────────────────────────────────────────────────
+    if (pc.rotate90 != 0) {
+        // Map upright screen coordinates [0..1]² onto sensor coordinates
+        // rotated 90° clockwise: sensor_x = 1 - v, sensor_y = u
+        uv = vec2(1.0 - uv.y, uv.x);
     }
 
     vec4 sharpRgba = texture(uOriginalColor, uv);

@@ -1,99 +1,77 @@
 #!/usr/bin/env bash
-set -e
+#
+# NotiCam build entry point.
+#
+# The app is now a Gradle + Kotlin + Compose project. This script is a thin,
+# opinionated wrapper that runs the checks Gradle cannot run in a bare sandbox
+# and then hands over to Gradle:
+#
+#   1. tools/verify_ui.py     — resources, braces, imports, Compose member refs
+#   2. glslc                  — jni/shaders/*.comp → assets/shaders/*.spv
+#   3. ./gradlew assembleDebug (or `gradle` if there is no wrapper)
+#
+# Usage:
+#   ./build.sh              debug APK
+#   ./build.sh release      release APK (unsigned unless you add a keystore)
+#   ./build.sh check        verification only, no APK
+set -euo pipefail
 
-# Prefer JDK 17 if installed to avoid D8 bug on JDK 21 inner class attributes
-if [ -d "/home/zenith/.local/share/mise/installs/java/temurin-17.0.21+9/bin" ]; then
-    export PATH="/home/zenith/.local/share/mise/installs/java/temurin-17.0.21+9/bin:$PATH"
+if [ -d "/home/zenith/.local/share/mise/installs/java/temurin-17.0.21+9" ]; then
+    export JAVA_HOME="/home/zenith/.local/share/mise/installs/java/temurin-17.0.21+9"
+    export PATH="$JAVA_HOME/bin:$PATH"
 fi
 
-BUILD_TOOLS_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/home/zenith/Android/Sdk}}"
-NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-/home/zenith/Work/android-ndk-r27b}}"
-BUILD_TOOLS="$BUILD_TOOLS_DIR/build-tools/34.0.0"
-PLATFORM="$BUILD_TOOLS_DIR/platforms/android-35/android.jar"
-FRAMEWORK_AIDL="$BUILD_TOOLS_DIR/platforms/android-35/framework.aidl"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TASK="${1:-debug}"
 
-echo "=== Cleaning previous build artifacts ==="
-rm -rf "$ROOT_DIR/build"
-rm -rf "$ROOT_DIR/gen"
-mkdir -p "$ROOT_DIR/build/classes"
-mkdir -p "$ROOT_DIR/build/dex"
-mkdir -p "$ROOT_DIR/gen"
+cd "$ROOT_DIR"
 
-echo "=== Compiling AIDL interfaces ==="
-"$BUILD_TOOLS/aidl" -I"$ROOT_DIR/src" -p"$FRAMEWORK_AIDL" -o"$ROOT_DIR/gen" "$ROOT_DIR/src/com/zenith/auxcam/IAuxCamCallback.aidl"
-"$BUILD_TOOLS/aidl" -I"$ROOT_DIR/src" -p"$FRAMEWORK_AIDL" -o"$ROOT_DIR/gen" "$ROOT_DIR/src/com/zenith/auxcam/IAuxCamService.aidl"
-
-echo "=== Compiling Android Resources ==="
-"$BUILD_TOOLS/aapt2" compile --dir "$ROOT_DIR/res" -o "$ROOT_DIR/build/res.zip"
-"$BUILD_TOOLS/aapt2" link -I "$PLATFORM" \
-    --manifest "$ROOT_DIR/AndroidManifest.xml" \
-    -o "$ROOT_DIR/build/auxcam_unaligned.apk" \
-    --java "$ROOT_DIR/gen" \
-    "$ROOT_DIR/build/res.zip" \
-    --auto-add-overlay
-
-echo "=== Compiling SPIR-V Compute Shaders ==="
-mkdir -p "$ROOT_DIR/assets/shaders"
-for f in "$ROOT_DIR"/jni/shaders/*.comp; do
-    if [ -f "$f" ]; then
-        base=$(basename "$f" .comp)
-        /usr/bin/glslc "$f" -o "$ROOT_DIR/assets/shaders/$base.spv"
-    fi
-done
-
-echo "=== Running CoC Unit Hazard & Calibration Verification ==="
-python3 "$ROOT_DIR/tests/test_coc_units.py"
-
-echo "=== Verifying UI resource graph (ids, @refs, XML, Java syntax) ==="
+echo "=== Verifying UI (resources · braces · imports · Compose refs) ==="
 python3 "$ROOT_DIR/tools/verify_ui.py"
 
-echo "=== Compiling Native C++ with NDK ==="
-if [ -d "$ROOT_DIR/jni" ]; then
-    "$NDK_DIR/ndk-build" -C "$ROOT_DIR/jni" NDK_OUT="$ROOT_DIR/build/ndk-out" NDK_LIBS_OUT="$ROOT_DIR/lib"
-    # Ensure TFLite C/JNI binaries remain present alongside engine
-    if [ -d "$ROOT_DIR/tflite_extracted/jni/arm64-v8a" ]; then
-        cp -n "$ROOT_DIR"/tflite_extracted/jni/arm64-v8a/*.so "$ROOT_DIR/lib/arm64-v8a/" 2>/dev/null || true
-    fi
+echo "=== Verifying CoC unit calibration ==="
+if [ -f "$ROOT_DIR/tests/test_coc_units.py" ]; then
+    python3 "$ROOT_DIR/tests/test_coc_units.py"
 fi
 
-echo "=== Compiling Java Source Files ==="
-javac -source 17 -target 17 -encoding UTF-8 \
-    -cp "$PLATFORM:$ROOT_DIR/libs/*" \
-    -d "$ROOT_DIR/build/classes" \
-    $(find "$ROOT_DIR/src" "$ROOT_DIR/gen" -name "*.java")
-
-echo "=== Running D8 DEX compiler ==="
-"$BUILD_TOOLS/d8" \
-    --lib "$PLATFORM" \
-    --output "$ROOT_DIR/build/dex" \
-    $(find "$ROOT_DIR/build/classes" -name "*.class") \
-    "$ROOT_DIR"/libs/*.jar
-
-echo "=== Packaging APK ==="
-cd "$ROOT_DIR/build/dex"
-zip -u "$ROOT_DIR/build/auxcam_unaligned.apk" classes*.dex
-cd "$ROOT_DIR"
-if [ -d "$ROOT_DIR/lib" ]; then
-    zip -u -r "$ROOT_DIR/build/auxcam_unaligned.apk" lib/
-fi
-if [ -d "$ROOT_DIR/assets" ]; then
-    zip -0 -u -r "$ROOT_DIR/build/auxcam_unaligned.apk" assets/
+echo "=== Compiling SPIR-V compute shaders ==="
+GLSLC_BIN="${GLSLC:-glslc}"
+mkdir -p "$ROOT_DIR/assets/shaders"
+if command -v "$GLSLC_BIN" >/dev/null 2>&1; then
+    for f in "$ROOT_DIR"/jni/shaders/*.comp; do
+        [ -f "$f" ] || continue
+        base="$(basename "$f" .comp)"
+        "$GLSLC_BIN" "$f" -o "$ROOT_DIR/assets/shaders/$base.spv"
+        echo "  · $base.spv"
+    done
+else
+    echo "  ! glslc not found — set GLSLC=/path/to/glslc or pass -PskipShaders to Gradle"
+    echo "    (continuing: committed .spv files, if any, will be used)"
 fi
 
-echo "=== Zipalign ==="
-"$BUILD_TOOLS/zipalign" -f -p 4 "$ROOT_DIR/build/auxcam_unaligned.apk" "$ROOT_DIR/build/auxcam_aligned.apk"
-
-echo "=== Signing APK ==="
-KEYSTORE="${DEBUG_KEYSTORE:-$HOME/.android/debug.keystore}"
-if [ ! -f "$KEYSTORE" ]; then
-    mkdir -p "$(dirname "$KEYSTORE")"
-    keytool -genkeypair -v -keystore "$KEYSTORE" -alias androiddebugkey -dname "CN=Android Debug,O=Android,C=US" -validity 10000 -keypass android -storepass android -storetype JKS
+if [ "$TASK" = "check" ]; then
+    echo "=== Verification only — done ==="
+    exit 0
 fi
-"$BUILD_TOOLS/apksigner" sign \
-    --ks "$KEYSTORE" \
-    --ks-pass pass:android \
-    --key-pass pass:android \
-    "$ROOT_DIR/build/auxcam_aligned.apk"
 
-echo "=== Build Complete: $ROOT_DIR/build/auxcam_aligned.apk ==="
+echo "=== Gradle build ($TASK) ==="
+if [ -x "$ROOT_DIR/gradlew" ]; then
+    GRADLE_CMD="$ROOT_DIR/gradlew"
+elif command -v gradle >/dev/null 2>&1; then
+    GRADLE_CMD="gradle"
+    echo "  ! no ./gradlew in the repo — falling back to the system gradle."
+    echo "    Generate a wrapper with: gradle wrapper --gradle-version 8.9"
+else
+    echo "  ✗ Neither ./gradlew nor gradle is installed." >&2
+    echo "    Install Gradle 8.9+ (or add a wrapper) and re-run." >&2
+    exit 1
+fi
+
+case "$TASK" in
+    debug)   "$GRADLE_CMD" assembleDebug ;;
+    release) "$GRADLE_CMD" assembleRelease ;;
+    *)       "$GRADLE_CMD" "$TASK" ;;
+esac
+
+echo "=== Build Complete ==="
+echo "APK: $ROOT_DIR/app/build/outputs/apk/${TASK}/"
