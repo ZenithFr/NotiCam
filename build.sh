@@ -40,6 +40,9 @@ done
 echo "=== Running CoC Unit Hazard & Calibration Verification ==="
 python3 "$ROOT_DIR/tests/test_coc_units.py"
 
+echo "=== Verifying UI resource graph (ids, @refs, XML, Java syntax) ==="
+python3 "$ROOT_DIR/tools/verify_ui.py"
+
 echo "=== Compiling Native C++ with NDK ==="
 if [ -d "$ROOT_DIR/jni" ]; then
     "$NDK_DIR/ndk-build" -C "$ROOT_DIR/jni" NDK_OUT="$ROOT_DIR/build/ndk-out" NDK_LIBS_OUT="$ROOT_DIR/lib"

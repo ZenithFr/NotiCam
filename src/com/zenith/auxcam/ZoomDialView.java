@@ -101,28 +101,28 @@ public class ZoomDialView extends View {
         float density = getResources().getDisplayMetrics().density;
 
         mBgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        mBgPaint.setColor(0xE0101014); // Dark frosted acrylic
+        mBgPaint.setColor(0xE6141416); // iOS dark glass (90% #1C1C1E)
         mBgPaint.setStyle(Paint.Style.FILL);
 
         mBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        mBorderPaint.setColor(0x30FFFFFF);
+        mBorderPaint.setColor(0x1FFFFFFF);
         mBorderPaint.setStyle(Paint.Style.STROKE);
         mBorderPaint.setStrokeWidth(1.2f * density);
 
         mTickNormalPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        mTickNormalPaint.setColor(0x50FFFFFF);
+        mTickNormalPaint.setColor(0x3DFFFFFF);
         mTickNormalPaint.setStyle(Paint.Style.STROKE);
         mTickNormalPaint.setStrokeWidth(1.5f * density);
         mTickNormalPaint.setStrokeCap(Paint.Cap.ROUND);
 
         mTickBoldPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        mTickBoldPaint.setColor(0xCCFFFFFF);
+        mTickBoldPaint.setColor(0xE6FFFFFF);
         mTickBoldPaint.setStyle(Paint.Style.STROKE);
         mTickBoldPaint.setStrokeWidth(2.5f * density);
         mTickBoldPaint.setStrokeCap(Paint.Cap.ROUND);
 
         mNeedlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        mNeedlePaint.setColor(0xFFFF2A2A); // Signature Nothing Red
+        mNeedlePaint.setColor(0xFFFFD60A); // iOS systemYellow selection tick
         mNeedlePaint.setStyle(Paint.Style.STROKE);
         mNeedlePaint.setStrokeWidth(3.0f * density);
         mNeedlePaint.setStrokeCap(Paint.Cap.ROUND);
@@ -130,13 +130,16 @@ public class ZoomDialView extends View {
         mTextLargePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         mTextLargePaint.setColor(0xFFFFFFFF);
         mTextLargePaint.setTextAlign(Paint.Align.CENTER);
-        mTextLargePaint.setTextSize(36.0f * density);
-        mTextLargePaint.setFakeBoldText(true);
+        mTextLargePaint.setTextSize(34.0f * density);
+        mTextLargePaint.setFakeBoldText(false);
+        mTextLargePaint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL));
+        mTextLargePaint.setLetterSpacing(0.02f);
 
         mTextSubPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         mTextSubPaint.setColor(0x99FFFFFF);
         mTextSubPaint.setTextAlign(Paint.Align.CENTER);
-        mTextSubPaint.setTextSize(12.0f * density);
+        mTextSubPaint.setTextSize(11.0f * density);
+        mTextSubPaint.setLetterSpacing(0.06f);
 
         try {
             mVibrator = (Vibrator) getContext().getSystemService(Context.VIBRATOR_SERVICE);
@@ -217,7 +220,7 @@ public class ZoomDialView extends View {
             canvas.drawLine(x1, y1, x2, y2, isMajor ? mTickBoldPaint : mTickNormalPaint);
         }
 
-        // 3. Draw Nothing Red Indicator Needle at current zoom position
+        // 3. Draw the yellow zoom pointer over the tick ring
         // Map zoom ratio across top arc (-90 deg center, sweeping -150 to -30)
         float zoomNorm = (mMaxZoom > mMinZoom) ? ((mZoomRatio - mMinZoom) / (mMaxZoom - mMinZoom)) : 0.0f;
         float needleAngleDeg = 270.0f + ((zoomNorm - 0.5f) * 160.0f);
@@ -240,7 +243,7 @@ public class ZoomDialView extends View {
             displayMultiplier = 2.0f;
         }
         float effectiveZoom = mZoomRatio * displayMultiplier;
-        String zoomStr = String.format(Locale.US, "%.1fx", effectiveZoom);
+        String zoomStr = String.format(Locale.US, "%.1f×", effectiveZoom);
 
         float textY = cy + (6.0f * density);
         canvas.drawText(zoomStr, cx, textY, mTextLargePaint);
@@ -253,15 +256,15 @@ public class ZoomDialView extends View {
     private String getFocalEquivalentString(float effectiveZoom) {
         if ("2".equals(mCameraId)) {
             int mm = Math.round(15.0f * (effectiveZoom / 0.6f));
-            return mm + "mm equiv";
+            return mm + " MM";
         } else if ("3".equals(mCameraId)) {
             int mm = Math.round(50.0f * (effectiveZoom / 2.0f));
-            return mm + "mm equiv (Optical)";
+            return mm + " MM · OPTICAL";
         } else if ("1".equals(mCameraId)) {
-            return "24mm Selfie";
+            return "24 MM · SELFIE";
         } else {
             int mm = Math.round(24.0f * effectiveZoom);
-            return mm + "mm equiv";
+            return mm + " MM";
         }
     }
 

@@ -1,0 +1,766 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>NotiCam · Apple Camera UI preview</title>
+<style>
+  :root{
+    --label:#fff;
+    --label-2:rgba(255,255,255,.65);
+    --label-3:rgba(255,255,255,.4);
+    --sep:rgba(255,255,255,.12);
+    --glass:rgba(28,28,30,.55);
+    --glass-strong:rgba(20,20,22,.9);
+    --yellow:#ffd60a;
+    --red:#ff453a;
+    --gutter:16px;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;height:100%}
+  body{
+    background:radial-gradient(1200px 700px at 30% -10%, #1b1b22 0%, #0a0a0c 55%, #060607 100%);
+    color:#fff;
+    font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    display:flex;align-items:center;justify-content:center;gap:64px;
+    padding:40px 32px;min-height:100%;
+  }
+
+  /* ─────────── phone shell ─────────── */
+  .device{
+    position:relative;width:390px;height:844px;border-radius:56px;
+    background:#000;
+    box-shadow:0 0 0 11px #16161a, 0 0 0 13px #2c2c32, 0 40px 90px -20px rgba(0,0,0,.9), 0 0 140px rgba(120,140,255,.06);
+    overflow:hidden;flex:0 0 auto;
+  }
+  .island{
+    position:absolute;top:11px;left:50%;transform:translateX(-50%);
+    width:112px;height:31px;border-radius:20px;background:#000;z-index:40;
+  }
+  .status{
+    position:absolute;top:0;left:0;right:0;height:48px;z-index:35;
+    display:flex;align-items:center;justify-content:space-between;
+    padding:0 26px;font-size:14px;font-weight:600;letter-spacing:.01em;pointer-events:none;
+  }
+  .status .icons{display:flex;gap:5px;align-items:center;opacity:.95}
+
+  /* ─────────── camera column ─────────── */
+  .camera{position:absolute;inset:0;display:flex;flex-direction:column}
+
+  .viewfinder{
+    position:relative;width:100%;aspect-ratio:4/3;flex:0 0 auto;overflow:hidden;background:#111;
+  }
+  .viewfinder img{
+    position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
+    /* landscape crop out of the portrait sample, like the sensor's 1440x1080 stream */
+    object-position:50% 32%;
+  }
+  .grid{position:absolute;inset:0;opacity:0;transition:opacity .2s;pointer-events:none}
+  .grid.on{opacity:1}
+  .grid i{position:absolute;background:rgba(255,255,255,.25)}
+  .grid .v1{left:33.33%;top:0;bottom:0;width:.5px}
+  .grid .v2{left:66.66%;top:0;bottom:0;width:.5px}
+  .grid .h1{top:33.33%;left:0;right:0;height:.5px}
+  .grid .h2{top:66.66%;left:0;right:0;height:.5px}
+  .bloom{position:absolute;inset:0;background:#fff;opacity:0;pointer-events:none}
+  .reticle{
+    position:absolute;width:72px;height:72px;border:1.6px solid var(--yellow);border-radius:4px;
+    transform:translate(-50%,-50%) scale(.7);opacity:0;pointer-events:none;
+    transition:transform .26s cubic-bezier(.2,1.4,.4,1),opacity .18s;
+  }
+  .reticle::after{
+    content:"";position:absolute;left:50%;top:50%;width:4.4px;height:4.4px;border-radius:50%;
+    background:var(--yellow);transform:translate(-50%,-50%);
+  }
+  .reticle.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+
+  /* ─────────── top bar ─────────── */
+  .topbar{
+    position:absolute;top:0;left:0;right:0;z-index:30;display:flex;align-items:center;
+    padding:48px var(--gutter) 6px;gap:8px;pointer-events:none;
+  }
+  .topbar > *{pointer-events:auto}
+  .iconbtn{
+    width:44px;height:44px;border:0;border-radius:50%;display:grid;place-items:center;
+    background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    box-shadow:inset 0 0 0 .5px var(--sep);
+    color:#fff;cursor:pointer;transition:transform .16s ease,background .16s ease;
+  }
+  .iconbtn:active{transform:scale(.9);background:rgba(255,255,255,.16)}
+  .iconbtn.white{background:#fff;color:#000;box-shadow:none}
+  .spacer{flex:1}
+  .pillstatus{
+    font-size:11px;letter-spacing:.04em;color:var(--label-2);
+    padding:7px 12px;border-radius:12px;background:rgba(0,0,0,.4);
+    backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    white-space:nowrap;max-width:216px;overflow:hidden;text-overflow:ellipsis;
+  }
+
+  /* ─────────── lens chips ─────────── */
+  .lensrow{display:flex;justify-content:center;gap:10px;margin-top:14px}
+  .chip{
+    width:42px;height:42px;border-radius:50%;border:0;cursor:pointer;
+    display:grid;place-items:center;font-size:12px;font-weight:600;letter-spacing:.02em;
+    color:#fff;background:rgba(28,28,30,.55);box-shadow:inset 0 0 0 .5px var(--sep);
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+    transition:background .18s ease,color .18s ease,transform .16s ease;
+  }
+  .chip:active{transform:scale(.92)}
+  .chip.sel{background:#fff;color:#000;box-shadow:none}
+
+  /* ─────────── quick aperture (portrait) ─────────── */
+  .quickap{
+    display:none;align-items:center;gap:6px;padding:0 24px;margin-top:2px;
+  }
+  .quickap.on{display:flex}
+  .quickap .aperture-ico{opacity:.7;display:flex}
+  .quickap .value{width:52px;text-align:right;font-size:13px;font-weight:500}
+
+  /* iOS style slider */
+  .slider{position:relative;flex:1;height:34px;display:flex;align-items:center;cursor:pointer}
+  .slider .track{position:absolute;left:0;right:0;height:4px;border-radius:2px;background:rgba(255,255,255,.24)}
+  .slider .fill{position:absolute;left:0;height:4px;border-radius:2px;background:#fff}
+  .slider .knob{
+    position:absolute;width:20px;height:20px;border-radius:50%;background:#fff;
+    box-shadow:0 0 0 6px rgba(0,0,0,.14),0 1px 4px rgba(0,0,0,.5);
+    transform:translateX(-50%);transition:box-shadow .15s;
+  }
+  .slider:active .knob{box-shadow:0 0 0 9px rgba(255,255,255,.16),0 1px 4px rgba(0,0,0,.5)}
+
+  .grow{flex:1}
+
+  /* ─────────── bottom chrome ─────────── */
+  .bottom{
+    position:relative;padding:18px 24px 34px;display:flex;flex-direction:column;align-items:center;
+  }
+  .bottom::before{
+    content:"";position:absolute;left:0;right:0;top:-90px;height:130px;pointer-events:none;
+    background:linear-gradient(to top, #000 0%, rgba(0,0,0,.7) 45%, rgba(0,0,0,0) 100%);
+  }
+  .bottom > *{position:relative}
+
+  .sheet{
+    width:100%;background:var(--glass-strong);border-radius:24px;
+    box-shadow:inset 0 0 0 .5px rgba(255,255,255,.16);
+    padding:14px 18px 16px;margin-bottom:16px;
+    backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+    transform:translateY(14px);opacity:0;pointer-events:none;
+    transition:transform .26s cubic-bezier(.2,.8,.2,1),opacity .2s;
+    max-height:0;overflow:hidden;padding-top:0;padding-bottom:0;margin-bottom:0;
+  }
+  .sheet.open{
+    transform:none;opacity:1;pointer-events:auto;
+    max-height:420px;padding-top:14px;padding-bottom:16px;margin-bottom:16px;
+  }
+  .sheet-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .section{
+    font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--label-3);
+  }
+  .rowlabel{display:flex;align-items:center;gap:7px}
+  .rowlabel .val{font-size:13px;font-weight:600;margin-left:auto}
+  .done{background:none;border:0;color:var(--yellow);font-size:13px;font-weight:600;cursor:pointer;padding:6px 0 6px 12px}
+  .ticks{display:flex;justify-content:space-between;font-size:9px;color:var(--label-3);margin:0 0 10px;padding:0 2px}
+  .divider{height:1px;background:var(--sep);margin:0 0 12px}
+  .toggles{display:flex;gap:8px}
+  .toggle{
+    flex:1;height:34px;border:0;border-radius:17px;cursor:pointer;font-size:12px;font-weight:600;
+    color:#fff;background:rgba(28,28,30,.55);box-shadow:inset 0 0 0 .5px var(--sep);
+    transition:background .18s,color .18s,transform .12s;
+  }
+  .toggle:active{transform:scale(.96)}
+  .toggle.on{background:#fff;color:#000;box-shadow:none}
+  .telemetry{
+    margin-top:12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;
+    color:var(--label-3);letter-spacing:.02em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+
+  .modes{display:flex;justify-content:center;margin-top:4px}
+  .mode{
+    background:none;border:0;cursor:pointer;color:rgba(255,255,255,.4);
+    font-size:12px;font-weight:600;letter-spacing:.075em;text-transform:uppercase;
+    padding:8px 12px;transition:color .2s,transform .2s;
+  }
+  .mode.sel{color:var(--yellow)}
+  .mode.sel:active{transform:scale(.94)}
+
+  .shutterrow{display:flex;align-items:center;width:100%;margin-top:10px;padding:0 10px}
+  .gallery{
+    width:52px;height:52px;border-radius:10px;overflow:hidden;position:relative;cursor:pointer;
+    background:rgba(255,255,255,.08);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.2);
+    display:grid;place-items:center;transition:transform .2s;
+  }
+  .gallery img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .2s}
+  .gallery.has img{opacity:1}
+  .gallery.has .ph{opacity:0}
+  .gallery .ph{display:flex;opacity:.4}
+
+  .shutter{
+    width:72px;height:72px;border-radius:50%;border:0;background:none;cursor:pointer;position:relative;
+    display:grid;place-items:center;padding:0;
+  }
+  .shutter .ring{
+    position:absolute;inset:0;border-radius:50%;border:4px solid #fff;transition:opacity .12s;
+  }
+  .shutter .disc{
+    width:57px;height:57px;border-radius:50%;background:#fff;
+    transition:transform .12s cubic-bezier(.2,.8,.2,1);transform:scale(1);
+  }
+  .shutter:active .disc{transform:scale(.86)}
+  .shutter .pulse{
+    position:absolute;inset:0;border-radius:50%;border:2px solid #fff;opacity:0;pointer-events:none;
+  }
+
+  .flyer{
+    position:absolute;width:96px;height:96px;border-radius:12px;object-fit:cover;
+    opacity:0;pointer-events:none;z-index:50;will-change:transform,opacity;
+  }
+
+  /* orbit dial overlay */
+  .dial{
+    position:absolute;left:50%;top:44%;width:236px;height:236px;transform:translate(-50%,-50%) scale(.92);
+    border-radius:50%;background:rgba(20,20,22,.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);
+    backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+    display:grid;place-items:center;opacity:0;pointer-events:none;transition:opacity .24s,transform .24s;z-index:45;
+  }
+  .dial.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .dial .big{font-size:34px;font-weight:500;letter-spacing:.02em}
+  .dial .sub{font-size:11px;letter-spacing:.06em;color:rgba(255,255,255,.6);margin-top:2px;text-align:center}
+  .dial svg.ticks{position:absolute;inset:0}
+
+  /* ─────────── side spec panel ─────────── */
+  .spec{max-width:340px;color:rgba(255,255,255,.72);font-size:13px;line-height:1.6}
+  .spec h1{font-size:24px;letter-spacing:-.02em;color:#fff;margin:0 0 4px;font-weight:600}
+  .spec h1 span{color:var(--yellow)}
+  .spec p.lede{margin:0 0 22px;color:rgba(255,255,255,.5);font-size:13px}
+  .spec h2{
+    font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:rgba(255,255,255,.4);
+    margin:22px 0 10px;font-weight:600;
+  }
+  .spec ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:9px}
+  .spec li{display:flex;gap:10px;align-items:flex-start}
+  .spec li b{color:#fff;font-weight:600}
+  .dot{width:14px;height:14px;border-radius:50%;flex:0 0 auto;margin-top:3px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.2)}
+  .swatches{display:flex;gap:8px;flex-wrap:wrap}
+  .sw{width:56px}
+  .sw i{display:block;height:36px;border-radius:8px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.14)}
+  .sw span{display:block;font-size:9px;color:rgba(255,255,255,.4);margin-top:5px;letter-spacing:.02em}
+  .hint{font-size:11px;color:rgba(255,255,255,.35);margin-top:18px;border-top:1px solid rgba(255,255,255,.08);padding-top:14px}
+  kbd{
+    font:inherit;font-size:11px;background:rgba(255,255,255,.08);border-radius:5px;padding:1px 6px;
+    color:rgba(255,255,255,.7)
+  }
+  @media (max-width:1080px){
+    body{flex-direction:column;gap:36px;padding:24px 16px 60px}
+    .spec{max-width:390px}
+    .device{transform:scale(.92);transform-origin:top center}
+  }
+</style>
+</head>
+<body>
+
+<div class="device" id="device">
+  <div class="island"></div>
+  <div class="status">
+    <span>9:41</span>
+    <span class="icons">
+      <svg width="17" height="11" viewBox="0 0 17 11" fill="#fff"><rect x="0" y="7.5" width="3" height="3.5" rx="1"/><rect x="4.5" y="5.2" width="3" height="5.8" rx="1"/><rect x="9" y="2.8" width="3" height="8.2" rx="1"/><rect x="13.5" y="0" width="3" height="11" rx="1"/></svg>
+      <svg width="16" height="11" viewBox="0 0 16 11" fill="#fff"><path d="M8 9.6 5.6 7.2a3.4 3.4 0 0 1 4.8 0L8 9.6Zm0-3.2a6.4 6.4 0 0 0-4.5 1.9l-1.2-1.2a8.1 8.1 0 0 1 11.4 0l-1.2 1.2A6.4 6.4 0 0 0 8 6.4Zm0-3.2A9.5 9.5 0 0 0 1.3 6L.1 4.8a11.2 11.2 0 0 1 15.8 0L14.7 6A9.5 9.5 0 0 0 8 3.2Z"/></svg>
+      <svg width="25" height="12" viewBox="0 0 25 12" fill="none"><rect x=".5" y=".5" width="21" height="11" rx="3.5" stroke="#fff" opacity=".4"/><rect x="2" y="2" width="15" height="8" rx="2" fill="#fff"/><path d="M23 4v4c1-.4 1.4-1 1.4-2S24 4.4 23 4Z" fill="#fff" opacity=".5"/></svg>
+    </span>
+  </div>
+
+  <div class="camera">
+    <!-- viewfinder -->
+    <div class="viewfinder" id="viewfinder">
+      <img src="sample_portrait.jpg" alt="Live bokeh preview" />
+      <div class="grid" id="grid">
+        <i class="v1"></i><i class="v2"></i><i class="h1"></i><i class="h2"></i>
+      </div>
+      <div class="reticle" id="reticle"></div>
+      <div class="bloom" id="bloom"></div>
+    </div>
+
+    <!-- lens chips -->
+    <div class="lensrow">
+      <button class="chip sel" id="chip1">1×</button>
+      <button class="chip" id="chip2">2×</button>
+      <button class="chip" id="chip5">5×</button>
+    </div>
+
+    <!-- portrait quick aperture -->
+    <div class="quickap" id="quickap">
+      <span class="aperture-ico" id="icoAperture1"></span>
+      <div class="slider" id="quickApSlider">
+        <div class="track"></div><div class="fill"></div><div class="knob"></div>
+      </div>
+      <span class="value" id="quickApValue">ƒ 1.8</span>
+    </div>
+
+    <div class="grow"></div>
+
+    <!-- bottom chrome -->
+    <div class="bottom">
+      <div class="sheet" id="sheet">
+        <div class="sheet-head">
+          <span class="section">Pro controls</span>
+          <button class="done" id="doneBtn">Done</button>
+        </div>
+
+        <div class="rowlabel" style="margin-bottom:2px">
+          <span class="aperture-ico" id="icoAperture2"></span>
+          <span class="section" style="flex:1">Aperture</span>
+          <span class="val" id="sheetApValue">ƒ 1.8</span>
+        </div>
+        <div class="slider" id="sheetApSlider">
+          <div class="track"></div><div class="fill"></div><div class="knob"></div>
+        </div>
+        <div class="ticks"><span>1.4</span><span>2.5</span><span>4.5</span><span>8</span><span>16</span></div>
+
+        <div class="rowlabel">
+          <span class="section" style="flex:1">Exposure</span>
+          <span class="val" id="evValue">0 EV</span>
+        </div>
+        <div class="slider" id="evSlider">
+          <div class="track"></div><div class="fill"></div><div class="knob"></div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="toggles">
+          <button class="toggle" id="tGrid">Grid</button>
+          <button class="toggle" id="tRaw">RAW</button>
+          <button class="toggle" id="tTimer">Timer</button>
+        </div>
+
+        <div class="telemetry" id="telemetry">VIEWFINDER · 30 FPS · DEPTH · 30 FPS · Δt 0.0 ms</div>
+      </div>
+
+      <div class="modes" id="modes">
+        <button class="mode sel" data-mode="photo">Photo</button>
+        <button class="mode" data-mode="portrait">Portrait</button>
+        <button class="mode" data-mode="pro">Pro</button>
+      </div>
+
+      <div class="shutterrow">
+        <div class="gallery" id="gallery">
+          <span class="ph" id="galleryPh"></span>
+          <img id="galleryImg" src="sample_portrait.jpg" alt="" />
+        </div>
+        <div class="spacer"></div>
+        <button class="shutter" id="shutter" aria-label="Take photo">
+          <span class="ring"></span>
+          <span class="disc"></span>
+          <span class="pulse" id="pulse"></span>
+        </button>
+        <div class="spacer"></div>
+        <button class="iconbtn" id="flip" aria-label="Switch lens"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- top bar floats above the viewfinder -->
+  <div class="topbar">
+    <button class="iconbtn" id="flash" aria-label="Flash"></button>
+    <div class="spacer"></div>
+    <div class="pillstatus" id="status">Ready</div>
+    <div class="spacer"></div>
+    <button class="iconbtn" id="pro" aria-label="Pro controls"></button>
+  </div>
+
+  <div class="dial" id="dial">
+    <svg class="ticks" viewBox="0 0 236 236" id="dialTicks"></svg>
+    <div>
+      <div class="big" id="dialZoom">1.0×</div>
+      <div class="sub" id="dialSub">24 MM</div>
+    </div>
+  </div>
+
+  <img class="flyer" id="flyer" src="sample_portrait.jpg" alt="" />
+</div>
+
+<div class="spec">
+  <h1>NotiCam <span>· Apple Camera</span></h1>
+  <p class="lede">Interactive mock of the new <code>res/layout/activity_main.xml</code> + drawable set. Everything below is clickable.</p>
+
+  <h2>What the redesign changes</h2>
+  <ul>
+    <li><span class="dot" style="background:#ffd60a"></span><div><b>System yellow selection.</b> Mode names and the ƒ dial are the only coloured elements — the old Nothing-red accents and neon pills are gone.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.55)"></span><div><b>Glass, not cards.</b> 55% #1C1C1E capsules with a 0.5dp hairline instead of the heavy acrylic slabs and full-width dark bars.</div></li>
+    <li><span class="dot" style="background:#fff"></span><div><b>Real Apple shutter.</b> 4dp ring + gap + disc, compresses on press, ring pulse + haptic on capture.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div><b>Viewfinder first.</b> The framebuffer is no longer boxed in under a 88dp header — the chrome floats over it and only the lens chips touch the frame.</div></li>
+    <li><span class="dot" style="background:#ff453a"></span><div><b>One-tap reach.</b> Flash, Pro sheet, tap-to-focus, pinch-zoom and the ƒ ladder all live where the thumb already is.</div></li>
+  </ul>
+
+  <h2>Tokens</h2>
+  <div class="swatches">
+    <div class="sw"><i style="background:#ffd60a"></i><span>systemYellow</span></div>
+    <div class="sw"><i style="background:#fff"></i><span>label</span></div>
+    <div class="sw"><i style="background:rgba(255,255,255,.65)"></i><span>label 65%</span></div>
+    <div class="sw"><i style="background:rgba(28,28,30,.55)"></i><span>glass 55%</span></div>
+    <div class="sw"><i style="background:#141416"></i><span>sheet</span></div>
+  </div>
+
+  <h2>Try</h2>
+  <ul>
+    <li><span class="dot" style="background:#ffd60a"></span><div>Tap the viewfinder → yellow AE/AF reticle (drives <code>focusAt()</code>).</div></li>
+    <li><span class="dot" style="background:#fff"></span><div>Press the shutter → bloom, ring pulse, and the frame flies into the gallery.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.4)"></span><div>Switch to <b>Portrait</b> → the ƒ ladder appears in the bottom bar.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div>Open <b>Pro</b> → glass sheet slides up, button becomes a white ✕.</div></li>
+  </ul>
+
+  <p class="hint">Static preview only — the shipping chrome is native Android views, not a WebView. Dimensions mirror the dp values in <kbd>dimens.xml</kbd> at a 390 × 844px viewport.</p>
+</div>
+
+<script>
+(() => {
+  // ── SF Symbols-ish icons, matching res/drawable/*.xml ─────────────────────
+  const svg = (body, size = 20, viewBox = "0 0 24 24") =>
+    `<svg width="${size}" height="${size}" viewBox="${viewBox}" fill="none">${body}</svg>`;
+
+  const ICONS = {
+    flashOff: svg(`
+      <path fill="rgba(255,255,255,.6)" d="M13.4 2.2 6.1 13h4.8l-1.3 8.8 7.5-10.9h-4.9l3.1-8.7Z"/>
+      <path stroke="rgba(255,255,255,.6)" stroke-width="1.5" stroke-linecap="round" d="M4.2 3.6 19.8 20.4"/>`),
+    flashAuto: svg(`
+      <path fill="#fff" d="M9.9 2.2 3 12.6h4.6L6.4 20.8 13.2 10.8H8.6L11.4 2.2Z"/>
+      <path stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+            d="M14.6 21 17.6 13l3 8M15.6 18.4h4"/>`),
+    flashOn: svg(`<path fill="#fff" d="M13.4 2.2 6.1 13h4.8l-1.3 8.8 7.5-10.9h-4.9l3.1-8.7Z"/>`),
+    sliders: svg(`
+      <path stroke="#fff" stroke-width="1.7" stroke-linecap="round"
+            d="M3.2 6.5h3.4M11.4 6.5h9.4M3.2 12h10.2M18.2 12h2.6M3.2 17.5h5.2M13.2 17.5h7.6"/>
+      <circle cx="9" cy="6.5" r="2.1" stroke="#fff" stroke-width="1.7"/>
+      <circle cx="15.8" cy="12" r="2.1" stroke="#fff" stroke-width="1.7"/>
+      <circle cx="10.8" cy="17.5" r="2.1" stroke="#fff" stroke-width="1.7"/>`),
+    close: svg(`<path stroke="currentColor" stroke-width="1.9" stroke-linecap="round" d="M6.2 6.2 17.8 17.8M17.8 6.2 6.2 17.8"/>`),
+    flip: svg(`
+      <path stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+            d="M5.9 9.4A7.6 7.6 0 0 1 13.3 4.1M10.6 2.4l3.1 1.8-2.5 2.7"/>
+      <path stroke="#fff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+            d="M18.1 14.6A7.6 7.6 0 0 1 10.7 19.9M13.4 21.6l-3.1-1.8 2.5-2.7"/>`),
+    gallery: svg(`
+      <rect x="4.2" y="5.4" width="15.6" height="13.2" rx="1.2" stroke="rgba(255,255,255,.65)" stroke-width="1.5"/>
+      <path stroke="rgba(255,255,255,.65)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"
+            d="M5.4 16.8 9.9 12.3l3 3 2.4-2.1 3.3 3.3"/>
+      <circle cx="15.4" cy="8.6" r="1.5" fill="rgba(255,255,255,.65)"/>`, 22),
+    aperture: svg(`
+      <circle cx="12" cy="12" r="8.6" stroke="#fff" stroke-width="1.5"/>
+      <path stroke="#fff" stroke-width="1.3" stroke-linecap="round"
+            d="M12 12l6.9-4.1M18.9 7.9l-.7 8.2M18.2 16.1l-7.6 4.2M10.6 20.3 4.4 15M4.4 15 6 6.9M6 6.9 13.9 4.1"/>`, 15)
+  };
+
+  const $ = id => document.getElementById(id);
+  const el = {
+    flash: $("flash"), pro: $("pro"), status: $("status"), flip: $("flip"),
+    sheet: $("sheet"), done: $("doneBtn"), grid: $("grid"),
+    viewfinder: $("viewfinder"), reticle: $("reticle"), bloom: $("bloom"),
+    shutter: $("shutter"), pulse: $("pulse"), gallery: $("gallery"),
+    flyer: $("flyer"), dial: $("dial"), dialZoom: $("dialZoom"),
+    dialSub: $("dialSub"), quickap: $("quickap"),
+    tGrid: $("tGrid"), tRaw: $("tRaw"), tTimer: $("tTimer"),
+    sheetApSlider: $("sheetApSlider"), quickApSlider: $("quickApSlider"),
+    evSlider: $("evSlider"), telemetry: $("telemetry")
+  };
+
+  el.flash.innerHTML = ICONS.flashOff;
+  el.pro.innerHTML = ICONS.sliders;
+  el.flip.innerHTML = ICONS.flip;
+  $("galleryPh").innerHTML = ICONS.gallery;
+  $("icoAperture1").innerHTML = ICONS.aperture;
+  $("icoAperture2").innerHTML = ICONS.aperture;
+
+  // ── state ────────────────────────────────────────────────────────────────
+  const state = {
+    flash: 0,             // 0 off, 1 auto, 2 on
+    mode: "photo",
+    sheetOpen: false,
+    zoom: 1,
+    apertureIndex: 2,     // FSTOPS[2] = 1.8
+    ev: 0
+  };
+
+  const FSTOPS = [1.4,1.6,1.8,2.0,2.2,2.5,2.8,3.2,3.5,4.0,4.5,5.0,5.6,6.3,7.1,8.0,9.0,10,11,13,14,16];
+
+  // ── flash cycle ──────────────────────────────────────────────────────────
+  const FLASH = [
+    { icon: ICONS.flashOff, label: "Flash off" },
+    { icon: ICONS.flashAuto, label: "Auto flash" },
+    { icon: ICONS.flashOn, label: "Flash on" }
+  ];
+  el.flash.addEventListener("click", () => {
+    state.flash = (state.flash + 1) % 3;
+    el.flash.innerHTML = FLASH[state.flash].icon;
+    el.flash.animate(
+      [{ transform: "scale(.86)" }, { transform: "scale(1)" }],
+      { duration: 240, easing: "cubic-bezier(.2,.9,.3,1.2)" }
+    );
+    el.status.textContent = FLASH[state.flash].label;
+    // mirrors mService.setFlashMode(state.flash)
+  });
+
+  // ── pro sheet ────────────────────────────────────────────────────────────
+  function setSheet(open) {
+    state.sheetOpen = open;
+    el.sheet.classList.toggle("open", open);
+    if (open) {
+      el.pro.classList.add("white");
+      el.pro.innerHTML = ICONS.close;
+    } else {
+      el.pro.classList.remove("white");
+      el.pro.innerHTML = ICONS.sliders;
+    }
+    updateQuickAperture();
+  }
+  el.pro.addEventListener("click", () => setSheet(!state.sheetOpen));
+  el.done.addEventListener("click", () => setSheet(false));
+
+  // ── modes ────────────────────────────────────────────────────────────────
+  function setMode(mode) {
+    if (state.mode === mode) return;
+    state.mode = mode;
+    document.querySelectorAll(".mode").forEach(b => {
+      const on = b.dataset.mode === mode;
+      b.classList.toggle("sel", on);
+      if (on) b.animate(
+        [{ transform: "scale(.92)" }, { transform: "scale(1)" }],
+        { duration: 220, easing: "cubic-bezier(.2,.9,.3,1)" }
+      );
+    });
+    updateQuickAperture();
+  }
+  document.getElementById("modes").addEventListener("click", e => {
+    const b = e.target.closest(".mode");
+    if (b) setMode(b.dataset.mode);
+  });
+
+  function updateQuickAperture() {
+    el.quickap.classList.toggle("on", state.mode === "portrait" && !state.sheetOpen);
+  }
+
+  // ── sliders ──────────────────────────────────────────────────────────────
+  function setupSlider(root, { min, max, value, onChange }) {
+    const fill = root.querySelector(".fill");
+    const knob = root.querySelector(".knob");
+    let v = value;
+
+    function paint() {
+      const t = (v - min) / (max - min);
+      fill.style.width = (t * 100) + "%";
+      knob.style.left = (t * 100) + "%";
+    }
+    function setFromEvent(e) {
+      const rect = root.getBoundingClientRect();
+      const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+      const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      const next = Math.round(min + t * (max - min));
+      if (next !== v) { v = next; paint(); onChange(v); }
+      else { paint(); }
+    }
+    let dragging = false;
+    root.addEventListener("pointerdown", e => {
+      dragging = true; root.setPointerCapture(e.pointerId); setFromEvent(e);
+    });
+    root.addEventListener("pointermove", e => { if (dragging) setFromEvent(e); });
+    root.addEventListener("pointerup", () => { dragging = false; });
+    root.addEventListener("pointercancel", () => { dragging = false; });
+    paint();
+    return { paint: () => paint(), get value() { return v; } };
+  }
+
+  function fmtFstop(f) {
+    return f >= 9.95 ? Math.round(f).toString() : f.toFixed(1);
+  }
+
+  let quickAp, sheetAp, evSlider;
+
+  function syncAperture(index, source) {
+    state.apertureIndex = Math.max(0, Math.min(FSTOPS.length - 1, index));
+    const label = "ƒ " + fmtFstop(FSTOPS[state.apertureIndex]);
+    $("quickApValue").textContent = label;
+    $("sheetApValue").textContent = label;
+    if (source !== "sheet") sheetAp.paint();
+    if (source !== "quick") quickAp.paint();
+  }
+
+  sheetAp = setupSlider(el.sheetApSlider, {
+    min: 0, max: 21, value: state.apertureIndex,
+    onChange: v => syncAperture(v, "sheet")
+  });
+  quickAp = setupSlider(el.quickApSlider, {
+    min: 0, max: 21, value: state.apertureIndex,
+    onChange: v => syncAperture(v, "quick")
+  });
+
+  // the two sliders share state; force both onto the same value on load
+  syncAperture(2, null);
+
+  evSlider = setupSlider(el.evSlider, {
+    min: 0, max: 24, value: 12,
+    onChange: v => {
+      const steps = v - 12;
+      const ev = steps / 3;
+      $("evValue").textContent = Math.abs(ev) < 0.05
+        ? "0 EV"
+        : (ev > 0 ? "+" : "−") + Math.abs(ev).toFixed(1) + " EV";
+    }
+  });
+
+  // ── toggles ──────────────────────────────────────────────────────────────
+  el.tGrid.addEventListener("click", () => {
+    el.tGrid.classList.toggle("on");
+    el.grid.classList.toggle("on", el.tGrid.classList.contains("on"));
+  });
+  el.tRaw.addEventListener("click", () => el.tRaw.classList.toggle("on"));
+  el.tTimer.addEventListener("click", () => {
+    const order = [null, 3, 10];
+    const cur = el.tTimer.dataset.step ? Number(el.tTimer.dataset.step) : 0;
+    const next = (cur + 1) % 3;
+    el.tTimer.dataset.step = next;
+    el.tTimer.textContent = next === 0 ? "Timer" : order[next] + "s";
+    el.tTimer.classList.toggle("on", next !== 0);
+  });
+
+  // ── zoom chips ───────────────────────────────────────────────────────────
+  const chips = [["chip1", 1], ["chip2", 2], ["chip5", 5]];
+  const MM = z => Math.round(24 * z);
+
+  function setZoom(z) {
+    state.zoom = z;
+    chips.forEach(([id, val]) => {
+      const b = $(id);
+      const on = Math.abs(val - z) < 0.08;
+      b.classList.toggle("sel", on);
+    });
+    el.dialZoom.textContent = z.toFixed(1) + "×";
+    el.dialSub.textContent = MM(z) + " MM";
+    drawTicks(z);
+    showDial();
+  }
+  chips.forEach(([id, val]) => $(id).addEventListener("click", () => setZoom(val)));
+
+  // ── orbit dial ───────────────────────────────────────────────────────────
+  const ticksG = $("dialTicks");
+  function drawTicks(z) {
+    let out = "";
+    const norm = (z - 1) / (5 - 1);
+    for (let i = 0; i < 48; i++) {
+      const a = (i / 48) * Math.PI * 2 - Math.PI / 2;
+      const cardinal = i % 12 === 0, major = i % 6 === 0;
+      const len = cardinal ? 10 : major ? 7 : 4.5;
+      const r1 = 114 - len, r2 = 114;
+      out += `<line x1="${118 + Math.cos(a) * r1}" y1="${118 + Math.sin(a) * r1}"
+                    x2="${118 + Math.cos(a) * r2}" y2="${118 + Math.sin(a) * r2}"
+                    stroke="${major ? "rgba(255,255,255,.9)" : "rgba(255,255,255,.24)"}"
+                    stroke-width="${major ? 2.5 : 1.5}" stroke-linecap="round"/>`;
+    }
+    const na = (270 + (norm - 0.5) * 160) * Math.PI / 180;
+    out += `<line x1="${118 + Math.cos(na) * 96}" y1="${118 + Math.sin(na) * 96}"
+                  x2="${118 + Math.cos(na) * 114}" y2="${118 + Math.sin(na) * 114}"
+                  stroke="#ffd60a" stroke-width="3" stroke-linecap="round"/>`;
+    ticksG.innerHTML = out;
+  }
+  drawTicks(1);
+
+  let dialTimer;
+  function showDial() {
+    el.dial.classList.add("show");
+    clearTimeout(dialTimer);
+    dialTimer = setTimeout(() => el.dial.classList.remove("show"), 2200);
+  }
+
+  // ── tap to focus ─────────────────────────────────────────────────────────
+  el.viewfinder.addEventListener("pointerdown", e => {
+    const r = el.viewfinder.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    el.reticle.style.left = x + "px";
+    el.reticle.style.top = y + "px";
+    el.reticle.classList.remove("show");
+    void el.reticle.offsetWidth;
+    el.reticle.classList.add("show");
+    clearTimeout(el.reticle._t);
+    el.reticle._t = setTimeout(() => el.reticle.classList.remove("show"), 1400);
+  });
+
+  // ── shutter: bloom → ring pulse → fly to gallery ─────────────────────────
+  const galleryImg = $("galleryImg");
+
+  el.shutter.addEventListener("click", () => {
+    // 1. shutter bloom, confined to the scene
+    el.bloom.animate(
+      [{ opacity: 0 }, { opacity: .9, offset: .18 }, { opacity: 0 }],
+      { duration: 300, easing: "ease-out" }
+    );
+
+    // 2. expanding ring
+    el.pulse.animate(
+      [
+        { opacity: .6, transform: "scale(1)", borderWidth: "2px" },
+        { opacity: 0, transform: "scale(1.28)", borderWidth: "2px" }
+      ],
+      { duration: 420, easing: "cubic-bezier(.2,.8,.2,1)" }
+    );
+
+    // 3. fly the captured frame into the gallery tile
+    const dr = $("device").getBoundingClientRect();
+    const sr = el.shutter.getBoundingClientRect();
+    const gr = el.gallery.getBoundingClientRect();
+    const sx = sr.left - dr.left + sr.width / 2;
+    const sy = sr.top - dr.top + sr.height / 2;
+    const gx = gr.left - dr.left + gr.width / 2;
+    const gy = gr.top - dr.top + gr.height / 2;
+
+    el.flyer.style.left = (sx - 48) + "px";
+    el.flyer.style.top = (sy - 48) + "px";
+    el.flyer.style.transform = "scale(.72)";
+    el.flyer.style.opacity = "1";
+
+    const anim = el.flyer.animate(
+      [
+        { transform: "scale(.72)", opacity: 0, offset: 0 },
+        { transform: "scale(1)", opacity: 1, offset: .28 },
+        { transform: `translate(${gx - sx}px, ${gy - sy}px) scale(${gr.width / 96})`, opacity: 1, offset: 1 }
+      ],
+      { duration: 470, easing: "cubic-bezier(.25,.9,.3,1)", fill: "forwards" }
+    );
+
+    anim.onfinish = () => {
+      el.flyer.style.opacity = "0";
+      el.gallery.classList.add("has");
+      el.gallery.animate(
+        [{ transform: "scale(.82)" }, { transform: "scale(1)" }],
+        { duration: 320, easing: "cubic-bezier(.2,.9,.3,1.1)" }
+      );
+      el.status.textContent = "Saved to Photos";
+    };
+  });
+
+  // ── flip lens ────────────────────────────────────────────────────────────
+  let lensIndex = 0;
+  el.flip.addEventListener("click", () => {
+    lensIndex = (lensIndex + 1) % 3;
+    setZoom(1);
+    el.flip.animate(
+      [{ transform: "scale(.86) rotate(0deg)" }, { transform: "scale(1) rotate(180deg)" }],
+      { duration: 280, easing: "cubic-bezier(.2,.9,.3,1)" }
+    );
+    el.status.textContent = ["Lens 1/3", "Lens 2/3", "Lens 3/3"][lensIndex];
+  });
+
+  // ── live-ish telemetry, exactly what StatsRunnable writes ────────────────
+  setInterval(() => {
+    if (!el.sheet.classList.contains("open")) return;
+    const fps = (29.4 + Math.random() * .8).toFixed(0);
+    el.telemetry.textContent =
+      `VIEWFINDER · ${fps} FPS · DEPTH · ${fps} FPS · Δt ${(Math.random() * .2).toFixed(1)} ms`;
+  }, 1200);
+
+  // keyboard: space fires the shutter, like the hardware key on a phone
+  window.addEventListener("keydown", e => {
+    if (e.code === "Space") { e.preventDefault(); el.shutter.click(); }
+    if (e.code === "KeyG") el.tGrid.click();
+    if (e.code === "KeyP") el.pro.click();
+  });
+})();
+</script>
+</body>
+</html>

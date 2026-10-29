@@ -1,479 +1,550 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  NotiCam · Apple Camera-style viewfinder chrome (iOS 18/26 language)
+
+  Composition (vertical, spacer absorbs the letterbox under the 4:3 sensor view)
+  ────────────────────────────────────────────────────────────────────────────
+  ┌──────────────────────────────────────────┐
+  │ (flash)         status pill        (pro) │  ← floats over the viewfinder
+  │                                          │
+  │              4:3 VIEWFINDER              │
+  │           (Vulkan bokeh present)         │
+  │                                          │
+  │              1×   2×   5×                │  ← lens chips, hugging the frame
+  │        ƒ ───────●──────────────  1.8     │  ← Portrait-only quick aperture
+  │                                          │
+  │            PRO SHEET (slide-up)          │
+  │          PHOTO  PORTRAIT  PRO            │  ← systemYellow selection
+  │        (gallery)   ◉    (lens switch)    │
+  └──────────────────────────────────────────┘
+-->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="@color/ios_black">
 
-    <!-- 1. Central Native 4:3 Viewfinder Viewport -->
-    <FrameLayout
-        android:id="@+id/viewfinder_container"
+    <!-- ══════════════════════════ CAMERA COLUMN ══════════════════════════ -->
+    <LinearLayout
+        android:id="@+id/camera_column"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="88dp">
+        android:layout_height="match_parent"
+        android:orientation="vertical">
 
-        <com.zenith.auxcam.AutoFitSurfaceView
-            android:id="@+id/surface_view"
+        <!-- ─────────────── 1. VIEWFINDER ─────────────── -->
+        <FrameLayout
+            android:id="@+id/viewfinder_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_gravity="center" />
+            android:layout_gravity="top|center_horizontal"
+            android:clickable="true"
+            android:focusable="false">
 
-        <com.zenith.auxcam.FocusOverlayView
-            android:id="@+id/focus_overlay"
+            <com.zenith.auxcam.AutoFitSurfaceView
+                android:id="@+id/surface_view"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center" />
+
+            <!-- Focus reticle + rule-of-thirds grid -->
+            <com.zenith.auxcam.FocusOverlayView
+                android:id="@+id/focus_overlay"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <!-- Shutter bloom, confined to the scene -->
+            <View
+                android:id="@+id/capture_flash"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:background="@color/ios_white"
+                android:alpha="0"
+                android:clickable="false"
+                android:focusable="false" />
+        </FrameLayout>
+
+        <!-- ─────────────── 2. LENS CHIPS ─────────────── -->
+        <LinearLayout
+            android:id="@+id/zoom_row"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:layout_gravity="center_horizontal"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="14dp">
+
+            <TextView
+                android:id="@+id/btn_zoom_1"
+                style="@style/Ios.Text.Lens"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
+                android:layout_marginEnd="10dp"
+                android:background="@drawable/ios_circle_white_ripple"
+                android:text="@string/lens_1x"
+                android:textColor="@color/ios_label_on_white" />
+
+            <TextView
+                android:id="@+id/btn_zoom_2"
+                style="@style/Ios.Text.Lens"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
+                android:layout_marginEnd="10dp"
+                android:background="@drawable/ios_circle_ripple"
+                android:text="@string/lens_2x"
+                android:textColor="@color/ios_label" />
+
+            <TextView
+                android:id="@+id/btn_zoom_5"
+                style="@style/Ios.Text.Lens"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
+                android:background="@drawable/ios_circle_ripple"
+                android:text="@string/lens_5x"
+                android:textColor="@color/ios_label" />
+        </LinearLayout>
+
+        <!-- ─────────── 3. PORTRAIT QUICK APERTURE ─────────── -->
+        <LinearLayout
+            android:id="@+id/row_aperture_quick"
             android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-    </FrameLayout>
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingLeft="@dimen/ios_gutter_wide"
+            android:paddingRight="@dimen/ios_gutter_wide"
+            android:layout_marginTop="2dp"
+            android:visibility="gone">
 
-    <!-- 2. Nothing OS 5 Top Bar (Frosted Glass Acrylic Pills & Controls) -->
+            <ImageView
+                android:layout_width="15dp"
+                android:layout_height="15dp"
+                android:src="@drawable/ic_aperture"
+                android:alpha="0.7"
+                android:layout_marginEnd="6dp"
+                android:contentDescription="@string/aperture" />
+
+            <SeekBar
+                android:id="@+id/sb_aperture_quick"
+                android:layout_width="0dp"
+                android:layout_height="34dp"
+                android:layout_weight="1"
+                android:max="21"
+                android:progress="2"
+                android:maxHeight="4dp"
+                android:minHeight="4dp"
+                android:splitTrack="false"
+                android:progressDrawable="@drawable/ios_slider_track"
+                android:thumb="@drawable/ios_slider_thumb" />
+
+            <TextView
+                android:id="@+id/tv_aperture_quick"
+                style="@style/Ios.Text.Value"
+                android:layout_width="52dp"
+                android:layout_height="wrap_content"
+                android:gravity="end"
+                android:text="ƒ 1.8" />
+        </LinearLayout>
+
+        <!-- Absorbs the letterbox between the 4:3 sensor view and the toolbar -->
+        <Space
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <!-- ─────────────── 4. BOTTOM CHROME ─────────────── -->
+        <LinearLayout
+            android:id="@+id/bottom_controls"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center_horizontal"
+            android:background="@drawable/ios_toolbar_scrim"
+            android:paddingLeft="@dimen/ios_gutter_wide"
+            android:paddingRight="@dimen/ios_gutter_wide"
+            android:paddingTop="18dp"
+            android:paddingBottom="10dp">
+
+            <!-- ───── PRO SHEET (expands the toolbar upward) ───── -->
+            <LinearLayout
+                android:id="@+id/drawer_pro_controls"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="@drawable/ios_card_glass"
+                android:paddingLeft="18dp"
+                android:paddingRight="18dp"
+                android:paddingTop="14dp"
+                android:paddingBottom="16dp"
+                android:layout_marginBottom="16dp"
+                android:visibility="gone">
+
+                <!-- Sheet header -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="10dp">
+
+                    <TextView
+                        style="@style/Ios.Text.Section"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="@string/pro_controls" />
+
+                    <TextView
+                        android:id="@+id/btn_pro_done"
+                        android:layout_width="wrap_content"
+                        android:layout_height="32dp"
+                        android:gravity="center"
+                        android:paddingLeft="12dp"
+                        android:paddingRight="2dp"
+                        android:background="?android:attr/selectableItemBackgroundBorderless"
+                        android:text="@string/sheet_done"
+                        android:textColor="@color/ios_yellow"
+                        android:textSize="@dimen/ios_text_label"
+                        android:fontFamily="sans-serif-medium" />
+                </LinearLayout>
+
+                <!-- Aperture: drives the physical CoC of the bokeh engine -->
+                <LinearLayout
+                    android:id="@+id/row_aperture"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:layout_marginBottom="6dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <ImageView
+                            android:layout_width="16dp"
+                            android:layout_height="16dp"
+                            android:src="@drawable/ic_aperture"
+                            android:alpha="0.75"
+                            android:layout_marginEnd="7dp"
+                            android:contentDescription="@string/aperture" />
+
+                        <TextView
+                            style="@style/Ios.Text.Section"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/aperture" />
+
+                        <TextView
+                            android:id="@+id/tv_aperture_value"
+                            style="@style/Ios.Text.Value"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="ƒ 1.8" />
+                    </LinearLayout>
+
+                    <SeekBar
+                        android:id="@+id/sb_aperture"
+                        android:layout_width="match_parent"
+                        android:layout_height="34dp"
+                        android:max="21"
+                        android:progress="2"
+                        android:maxHeight="4dp"
+                        android:minHeight="4dp"
+                        android:splitTrack="false"
+                        android:progressDrawable="@drawable/ios_slider_track"
+                        android:thumb="@drawable/ios_slider_thumb" />
+
+                    <!-- Aperture ladder labels, like the iPhone Portrait dial -->
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:layout_marginTop="0dp"
+                        android:layout_marginBottom="8dp">
+
+                        <TextView style="@style/Ios.Text.Caption" android:layout_width="0dp"
+                            android:layout_height="wrap_content" android:layout_weight="1"
+                            android:text="1.4" android:textSize="9sp" />
+                        <TextView style="@style/Ios.Text.Caption" android:layout_width="wrap_content"
+                            android:layout_height="wrap_content" android:text="2.5"
+                            android:textSize="9sp" />
+                        <TextView style="@style/Ios.Text.Caption" android:layout_width="0dp"
+                            android:layout_height="wrap_content" android:layout_weight="1"
+                            android:gravity="center" android:text="4.5" android:textSize="9sp" />
+                        <TextView style="@style/Ios.Text.Caption" android:layout_width="wrap_content"
+                            android:layout_height="wrap_content" android:text="8"
+                            android:textSize="9sp" />
+                        <TextView style="@style/Ios.Text.Caption" android:layout_width="0dp"
+                            android:layout_height="wrap_content" android:layout_weight="1"
+                            android:gravity="end" android:text="16" android:textSize="9sp" />
+                    </LinearLayout>
+                </LinearLayout>
+
+                <!-- Exposure compensation -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <TextView
+                            style="@style/Ios.Text.Section"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="@string/exposure_compensation" />
+
+                        <TextView
+                            android:id="@+id/tv_ev_label"
+                            style="@style/Ios.Text.Value"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="0 EV" />
+                    </LinearLayout>
+
+                    <SeekBar
+                        android:id="@+id/sb_ev"
+                        android:layout_width="match_parent"
+                        android:layout_height="34dp"
+                        android:max="24"
+                        android:progress="12"
+                        android:maxHeight="4dp"
+                        android:minHeight="4dp"
+                        android:splitTrack="false"
+                        android:progressDrawable="@drawable/ios_slider_track"
+                        android:thumb="@drawable/ios_slider_thumb" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="match_parent"
+                    android:layout_height="1dp"
+                    android:background="@drawable/ios_divider"
+                    android:layout_marginBottom="12dp" />
+
+                <!-- Grid · RAW · Timer -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center">
+
+                    <Button
+                        android:id="@+id/btn_grid"
+                        style="@style/Ios.Pill"
+                        android:layout_width="0dp"
+                        android:layout_height="34dp"
+                        android:layout_weight="1"
+                        android:text="@string/grid"
+                        android:layout_marginEnd="8dp" />
+
+                    <Button
+                        android:id="@+id/btn_raw"
+                        style="@style/Ios.Pill"
+                        android:layout_width="0dp"
+                        android:layout_height="34dp"
+                        android:layout_weight="1"
+                        android:text="@string/raw"
+                        android:layout_marginEnd="8dp" />
+
+                    <Button
+                        android:id="@+id/btn_hq"
+                        style="@style/Ios.Pill"
+                        android:layout_width="0dp"
+                        android:layout_height="34dp"
+                        android:layout_weight="1"
+                        android:text="@string/timer" />
+                </LinearLayout>
+
+                <!-- Live engine telemetry -->
+                <TextView
+                    android:id="@+id/tv_telemetry"
+                    style="@style/Ios.Text.Telemetry"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="12dp"
+                    android:maxLines="2"
+                    android:ellipsize="end"
+                    android:text="VIEWFINDER · idle" />
+            </LinearLayout>
+
+            <!-- ───── MODE CAROUSEL ───── -->
+            <LinearLayout
+                android:id="@+id/mode_carousel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:layout_marginTop="4dp">
+
+                <TextView
+                    android:id="@+id/mode_photo"
+                    style="@style/Ios.Text.Mode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mode_photo"
+                    android:textColor="@color/ios_yellow" />
+
+                <TextView
+                    android:id="@+id/mode_portrait"
+                    style="@style/Ios.Text.Mode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mode_portrait"
+                    android:textColor="@color/ios_label_tertiary" />
+
+                <TextView
+                    android:id="@+id/mode_hq"
+                    style="@style/Ios.Text.Mode"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/mode_hq"
+                    android:textColor="@color/ios_label_tertiary" />
+            </LinearLayout>
+
+            <!-- ───── SHUTTER ROW ───── -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="10dp"
+                android:paddingLeft="10dp"
+                android:paddingRight="10dp">
+
+                <!-- Gallery thumbnail: shows the real captured bokeh frame -->
+                <FrameLayout
+                    android:id="@+id/gallery_button"
+                    android:layout_width="@dimen/ios_gallery_size"
+                    android:layout_height="@dimen/ios_gallery_size"
+                    android:background="@drawable/ios_gallery_thumb"
+                    android:clipToOutline="true"
+                    android:contentDescription="@string/gallery">
+
+                    <ImageView
+                        android:id="@+id/iv_gallery_thumb"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:scaleType="centerCrop"
+                        android:contentDescription="@string/gallery" />
+
+                    <ImageView
+                        android:id="@+id/iv_gallery_placeholder"
+                        android:layout_width="22dp"
+                        android:layout_height="22dp"
+                        android:layout_gravity="center"
+                        android:src="@drawable/ic_gallery_placeholder"
+                        android:contentDescription="@string/gallery" />
+                </FrameLayout>
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <!-- Apple shutter: ring + disc, compresses on press -->
+                <com.zenith.auxcam.ShutterButton
+                    android:id="@+id/btn_shutter"
+                    android:layout_width="@dimen/ios_shutter_size"
+                    android:layout_height="@dimen/ios_shutter_size"
+                    android:contentDescription="@string/shutter" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <ImageButton
+                    android:id="@+id/btn_switch_cam"
+                    style="@style/Ios.IconButton"
+                    android:src="@drawable/ic_camera_flip"
+                    android:contentDescription="@string/switch_lens" />
+            </LinearLayout>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ══════════════════════════ TOP BAR ══════════════════════════ -->
     <LinearLayout
         android:id="@+id/top_bar"
         android:layout_width="match_parent"
-        android:layout_height="60dp"
+        android:layout_height="wrap_content"
         android:layout_gravity="top"
-        android:layout_marginTop="0dp"
-        android:paddingTop="28dp"
-        android:paddingLeft="14dp"
-        android:paddingRight="14dp"
-        android:paddingEnd="48dp"
         android:orientation="horizontal"
-        android:gravity="center_vertical">
+        android:gravity="center_vertical"
+        android:paddingLeft="@dimen/ios_gutter"
+        android:paddingRight="@dimen/ios_gutter"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
 
-        <!-- Flash Toggle (Vector Drawable) -->
+        <!-- Flash: off → auto → on -->
         <ImageButton
             android:id="@+id/btn_flash"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:padding="8dp"
-            android:scaleType="centerInside"
+            style="@style/Ios.IconButton"
+            android:layout_width="@dimen/ios_control_touch"
+            android:layout_height="@dimen/ios_control_touch"
             android:src="@drawable/ic_flash_off"
-            android:background="@drawable/nothing_icon_btn_bg"
-            android:contentDescription="Flash Toggle"
-            android:layout_marginEnd="8dp" />
-
-        <!-- EIS Steady Mode Toggle (Action / Super EIS Mode) -->
-        <Button
-            android:id="@+id/btn_eis"
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
-            android:text="EIS"
-            android:textColor="#FFFFFF"
-            android:textSize="11sp"
-            android:textStyle="bold"
-            android:background="@drawable/nothing_pill_bg"
-            android:layout_marginEnd="8dp" />
-
-        <!-- 2x Optical Telephoto Quick Toggle (Camera 3 7.10mm Glass) -->
-        <Button
-            android:id="@+id/btn_tele_toggle"
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
-            android:text="TELE"
-            android:textColor="#99FFFFFF"
-            android:textSize="11sp"
-            android:textStyle="bold"
-            android:background="@drawable/nothing_pill_bg"
-            android:layout_marginEnd="8dp" />
-
-        <!-- Pro Controls Chevron Drawer Toggle (Vector Drawable) -->
-        <ImageButton
-            android:id="@+id/btn_drawer"
-            android:layout_width="38dp"
-            android:layout_height="38dp"
-            android:padding="9dp"
-            android:scaleType="centerInside"
-            android:src="@drawable/ic_chevron_down"
-            android:background="@drawable/nothing_icon_btn_bg"
-            android:contentDescription="Pro Controls Drawer"
-            android:layout_marginEnd="8dp" />
+            android:contentDescription="@string/flash_off" />
 
         <View
             android:layout_width="0dp"
             android:layout_height="1dp"
             android:layout_weight="1" />
 
-        <!-- Aspect Ratio Pill (4:3 Native Sensor) -->
-        <Button
-            android:id="@+id/btn_aspect"
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
-            android:text="4:3"
-            android:textColor="#FFFFFF"
-            android:textSize="11sp"
-            android:textStyle="bold"
-            android:background="@drawable/nothing_pill_bg"
-            android:layout_marginEnd="8dp" />
-
-        <!-- RAW Sensor Output Pill -->
-        <Button
-            android:id="@+id/btn_raw"
-            android:layout_width="wrap_content"
-            android:layout_height="32dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:paddingLeft="12dp"
-            android:paddingRight="12dp"
-            android:text="RAW"
-            android:textColor="#000000"
-            android:textSize="10sp"
-            android:textStyle="bold"
-            android:background="@drawable/nothing_pill_active" />
-
-    </LinearLayout>
-
-    <!-- 3. Nothing OS 5 Pro Quick Drawer (Frosted Matte Glass Card) -->
-    <LinearLayout
-        android:id="@+id/drawer_pro_controls"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:layout_marginTop="88dp"
-        android:layout_marginLeft="16dp"
-        android:layout_marginRight="16dp"
-        android:background="@drawable/nothing_glass_card"
-        android:padding="16dp"
-        android:orientation="vertical"
-        android:visibility="gone">
-
-        <!-- Title & Status with Nothing Red Accent Dot -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="14dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="●"
-                android:textColor="#FF2A2A"
-                android:textSize="10sp"
-                android:layout_marginEnd="6dp" />
-
-            <TextView
-                android:id="@+id/tv_title"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="NOTICAM PRO"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:letterSpacing="0.08" />
-
-            <TextView
-                android:id="@+id/tv_status"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Ready"
-                android:textColor="#88FFFFFF"
-                android:textSize="11sp" />
-        </LinearLayout>
-
-        <!-- Horizontal Minimalist EV Dial / Slider -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="14dp">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="EV"
-                android:textColor="#B3FFFFFF"
-                android:textSize="11sp"
-                android:textStyle="bold"
-                android:layout_marginEnd="10dp" />
-
-            <SeekBar
-                android:id="@+id/sb_ev"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:max="24"
-                android:progress="12"
-                android:maxHeight="3dp"
-                android:minHeight="3dp"
-                android:splitTrack="false"
-                android:progressDrawable="@drawable/nothing_seekbar_track"
-                android:thumb="@drawable/nothing_seekbar_thumb" />
-
-            <TextView
-                android:id="@+id/tv_ev_label"
-                android:layout_width="60dp"
-                android:layout_height="wrap_content"
-                android:text="0.0 EV"
-                android:textColor="#FFFFFF"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:gravity="end" />
-        </LinearLayout>
-
-        <!-- Manual Shutter & ISO Frosted Buttons Row -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center">
-
-            <Button
-                android:id="@+id/btn_shutter_speed"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:text="S: Auto"
-                android:textColor="#FFFFFF"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:background="@drawable/nothing_pill_bg"
-                android:layout_marginEnd="10dp" />
-
-            <Button
-                android:id="@+id/btn_iso"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:text="ISO: Auto"
-                android:textColor="#FFFFFF"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:background="@drawable/nothing_pill_bg" />
-        </LinearLayout>
-
-    </LinearLayout>
-
-    <!-- 4. Nothing OS 5 Bottom Controls & Chrome (Frosted Acrylic Dark Glass) -->
-    <LinearLayout
-        android:id="@+id/bottom_controls"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom"
-        android:orientation="vertical"
-        android:gravity="center_horizontal"
-        android:paddingBottom="24dp"
-        android:background="#D00B0B0E">
-
-        <!-- Nothing Floating Zoom Indicator Badge -->
+        <!-- Engine status (Shizuku / session state) -->
         <TextView
-            android:id="@+id/tv_zoom_badge"
+            android:id="@+id/tv_status"
+            style="@style/Ios.Text.Caption"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:background="@drawable/nothing_pill_bg"
-            android:paddingLeft="14dp"
-            android:paddingRight="14dp"
-            android:paddingTop="5dp"
-            android:paddingBottom="5dp"
-            android:text="1.0x"
-            android:textColor="#FFFFFF"
-            android:textSize="12sp"
-            android:textStyle="bold"
-            android:letterSpacing="0.04"
-            android:clickable="true"
-            android:focusable="true"
-            android:layout_marginBottom="12dp" />
+            android:maxWidth="216dp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:paddingLeft="12dp"
+            android:paddingRight="12dp"
+            android:paddingTop="7dp"
+            android:paddingBottom="7dp"
+            android:background="@drawable/ios_status_pill"
+            android:text="@string/status_connecting"
+            android:textColor="@color/ios_label_secondary" />
 
-        <!-- Nothing Circular Lens Selector Pills (.6 | 1x | 2 | SAT) -->
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center"
-            android:layout_marginBottom="16dp">
+        <View
+            android:layout_width="0dp"
+            android:layout_height="1dp"
+            android:layout_weight="1" />
 
-            <Button
-                android:id="@+id/btn_uw"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:padding="0dp"
-                android:text=".6"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:background="@drawable/nothing_lens_pill_normal"
-                android:layout_marginEnd="12dp" />
-
-            <Button
-                android:id="@+id/btn_wide"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:padding="0dp"
-                android:text="1x"
-                android:textColor="#000000"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:background="@drawable/nothing_lens_pill_selected"
-                android:layout_marginEnd="12dp" />
-
-            <Button
-                android:id="@+id/btn_tele"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:padding="0dp"
-                android:text="2"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:background="@drawable/nothing_lens_pill_normal"
-                android:layout_marginEnd="12dp" />
-
-            <Button
-                android:id="@+id/btn_sat"
-                android:layout_width="44dp"
-                android:layout_height="44dp"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:padding="0dp"
-                android:text="SAT"
-                android:textColor="#FFFFFF"
-                android:textSize="11sp"
-                android:textStyle="bold"
-                android:background="@drawable/nothing_lens_pill_normal" />
-        </LinearLayout>
-
-        <!-- Nothing Mode Carousel (PHOTO | 50M PRO | VIDEO | PORTRAIT) -->
-        <LinearLayout
-            android:id="@+id/mode_carousel"
-            android:layout_width="match_parent"
-            android:layout_height="32dp"
-            android:orientation="horizontal"
-            android:gravity="center"
-            android:layout_marginBottom="20dp">
-
-            <TextView
-                android:id="@+id/mode_photo"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="PHOTO"
-                android:textColor="#FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:letterSpacing="0.05"
-                android:paddingLeft="14dp"
-                android:paddingRight="14dp" />
-
-            <TextView
-                android:id="@+id/mode_pro"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="50M PRO"
-                android:textColor="#66FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:letterSpacing="0.05"
-                android:paddingLeft="14dp"
-                android:paddingRight="14dp" />
-
-            <TextView
-                android:id="@+id/mode_video"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="VIDEO"
-                android:textColor="#66FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:letterSpacing="0.05"
-                android:paddingLeft="14dp"
-                android:paddingRight="14dp" />
-
-            <TextView
-                android:id="@+id/mode_portrait"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="PORTRAIT"
-                android:textColor="#66FFFFFF"
-                android:textSize="13sp"
-                android:textStyle="bold"
-                android:letterSpacing="0.05"
-                android:paddingLeft="14dp"
-                android:paddingRight="14dp" />
-        </LinearLayout>
-
-        <!-- Bottom Shutter Row (Gallery Thumbnail | Nothing Shutter | Camera Switch) -->
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="80dp"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingLeft="28dp"
-            android:paddingRight="28dp">
-
-            <!-- Gallery Thumbnail Preview (Last Captured Photo) -->
-            <ImageView
-                android:id="@+id/iv_gallery_thumb"
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:background="@drawable/gallery_thumb_bg"
-                android:scaleType="centerCrop"
-                android:contentDescription="Gallery" />
-
-            <View
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
-
-            <!-- Nothing OS Concentric Shutter Button -->
-            <Button
-                android:id="@+id/btn_shutter"
-                android:layout_width="76dp"
-                android:layout_height="76dp"
-                android:minWidth="0dp"
-                android:minHeight="0dp"
-                android:background="@drawable/nothing_shutter_photo" />
-
-            <View
-                android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
-
-            <!-- Camera Switch / Flip Button (Crisp Vector Icon - No Emoji) -->
-            <ImageButton
-                android:id="@+id/btn_switch_cam"
-                android:layout_width="52dp"
-                android:layout_height="52dp"
-                android:scaleType="centerInside"
-                android:src="@drawable/ic_camera_flip"
-                android:background="@drawable/nothing_icon_btn_bg"
-                android:contentDescription="Switch Camera" />
-
-        </LinearLayout>
-
+        <!-- Pro controls sheet toggle -->
+        <ImageButton
+            android:id="@+id/btn_pro"
+            style="@style/Ios.IconButton"
+            android:layout_width="@dimen/ios_control_touch"
+            android:layout_height="@dimen/ios_control_touch"
+            android:src="@drawable/ic_sliders"
+            android:contentDescription="@string/pro_controls" />
     </LinearLayout>
 
-    <!-- 5. Capture Flyer overlay for flying-thumbnail animation -->
+    <!-- ══════════════════════ TRANSIENT OVERLAYS ══════════════════════ -->
+
+    <!-- Flying thumbnail on capture (gallery hand-off) -->
     <ImageView
         android:id="@+id/iv_capture_flyer"
-        android:layout_width="80dp"
-        android:layout_height="80dp"
+        android:layout_width="64dp"
+        android:layout_height="64dp"
         android:layout_gravity="center"
         android:scaleType="centerCrop"
         android:visibility="invisible"
-        android:elevation="10dp" />
+        android:elevation="8dp" />
 
-    <!-- 6. Casino-Chip Radial Zoom Dial View Overlay -->
+    <!-- Orbiting zoom dial (pinch / drag) -->
     <com.zenith.auxcam.ZoomDialView
         android:id="@+id/zoom_dial"
-        android:layout_width="240dp"
-        android:layout_height="240dp"
+        android:layout_width="236dp"
+        android:layout_height="236dp"
         android:layout_gravity="center"
         android:visibility="invisible"
         android:elevation="12dp" />

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="@color/ios_surface_glass_pressed">
+    <item android:drawable="@drawable/ios_capsule_glass" />
+    <item android:id="@android:id/mask">
+        <shape android:shape="rectangle">
+            <solid android:color="#FFFFFFFF" />
+            <corners android:radius="@dimen/ios_capsule_radius" />
+        </shape>
+    </item>
+</ripple>

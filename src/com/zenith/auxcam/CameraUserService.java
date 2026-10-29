@@ -8,6 +8,8 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.graphics.Rect;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
 import android.os.Handler;
@@ -16,6 +18,7 @@ import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
+import android.util.Range;
 import android.view.Surface;
 
 import java.lang.reflect.Field;
@@ -42,6 +45,33 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     private CaptureRequest.Builder mPreviewRequestBuilder;
     private long mShutterCommandNs = 0;
+
+    // ─── Live camera controls (flash / exposure / zoom / focus / lens) ───────
+    private static final int FLASH_OFF = 0;
+    private static final int FLASH_AUTO = 1;
+    private static final int FLASH_ON = 2;
+
+    private int mFlashMode = FLASH_OFF;
+    private int mEvSteps = 0;
+    private float mZoomRatio = 1.0f;
+    private float mMaxDigitalZoom = 1.0f;
+    private Rect mActiveArray;
+    private Rect mCropRegion;
+    private Rect mAfRegion;
+    private Range<Integer> mCompensationRange;
+    private String mPhysicalId;
+
+    private int mColorW = 1440, mColorH = 1080;
+    private int mDepthW = 448, mDepthH = 288;
+    private int mStillW = 4080, mStillH = 3072;
+
+    private final Runnable mAfResetRunnable = new Runnable() {
+        @Override
+        public void run() {
+            mAfRegion = null;
+            refreshRepeatingRequest();
+        }
+    };
 
     // Sparse frame statistics
     private long mLastColorFrameTimeNs = 0;
@@ -177,6 +207,14 @@ public class CameraUserService extends IAuxCamService.Stub {
         mDepthSurface = depthSurface;
         mStillSurface = stillSurface;
 
+        mColorW = colorW;
+        mColorH = colorH;
+        mDepthW = depthW;
+        mDepthH = depthH;
+        mStillW = stillW;
+        mStillH = stillH;
+        mPhysicalId = colorPhysicalId;
+
         // Guard against Doze idle
         PowerManager pm = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
         if (pm != null && pm.isDeviceIdleMode()) {
@@ -202,6 +240,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             notifyError("CameraManager unavailable");
             return false;
         }
+
+        loadCameraCharacteristics(cm);
 
         try {
             cm.openCamera(CAMERA_ID, new DeviceStateCallback(this, colorPhysicalId), mCameraHandler);
@@ -257,8 +297,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             mPreviewRequestBuilder.addTarget(mDepthSurface);
 
             mPreviewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
-            mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
-            mPreviewRequestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+            applyPreviewControls(mPreviewRequestBuilder);
 
             mStatsWindowStartMs = SystemClock.elapsedRealtime();
             mColorFrameCount = 0;
@@ -283,6 +322,258 @@ public class CameraUserService extends IAuxCamService.Stub {
         }
     }
 
+    // ══════════════════════════ LIVE CONTROLS ══════════════════════════
+
+    /** Reads the sensor geometry used by zoom / focus / exposure mapping. */
+    private void loadCameraCharacteristics(CameraManager cm) {
+        try {
+            CameraCharacteristics chars = cm.getCameraCharacteristics(CAMERA_ID);
+            mActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            mCompensationRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
+            Float maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
+            mMaxDigitalZoom = (maxZoom != null && maxZoom > 1.0f) ? maxZoom : 1.0f;
+            recomputeCropRegion();
+            Log.i(TAG, "Characteristics: activeArray=" + mActiveArray
+                    + " maxDigitalZoom=" + mMaxDigitalZoom
+                    + " evRange=" + mCompensationRange);
+        } catch (Throwable t) {
+            Log.w(TAG, "Could not read camera characteristics: " + t);
+        }
+    }
+
+    /** SCALER_CROP_REGION for the current digital zoom, centred on the sensor. */
+    private void recomputeCropRegion() {
+        if (mActiveArray == null || mActiveArray.width() <= 0 || mActiveArray.height() <= 0) {
+            mCropRegion = null;
+            return;
+        }
+        float z = Math.max(1.0f, Math.min(mMaxDigitalZoom, mZoomRatio));
+        int w = Math.round(mActiveArray.width() / z);
+        int h = Math.round(mActiveArray.height() / z);
+        w = Math.max(2, w - (w % 2));
+        h = Math.max(2, h - (h % 2));
+        int cx = mActiveArray.centerX();
+        int cy = mActiveArray.centerY();
+        Rect r = new Rect(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2);
+        r.left = Math.max(r.left, mActiveArray.left);
+        r.top = Math.max(r.top, mActiveArray.top);
+        r.right = Math.min(r.right, mActiveArray.right);
+        r.bottom = Math.min(r.bottom, mActiveArray.bottom);
+        mCropRegion = r;
+    }
+
+    private int clampedEvSteps() {
+        if (mCompensationRange == null) return mEvSteps;
+        return Math.max(mCompensationRange.getLower(),
+                Math.min(mCompensationRange.getUpper(), mEvSteps));
+    }
+
+    private void applyCropAndExposure(CaptureRequest.Builder b) {
+        try {
+            if (mCropRegion != null) {
+                b.set(CaptureRequest.SCALER_CROP_REGION, mCropRegion);
+            }
+            if (mCompensationRange != null) {
+                b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, clampedEvSteps());
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "applyCropAndExposure: " + t);
+        }
+    }
+
+    private void applyPreviewControls(CaptureRequest.Builder b) {
+        applyCropAndExposure(b);
+        try {
+            b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+            b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
+            if (mAfRegion != null) {
+                b.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[]{
+                        new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+            } else {
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "applyPreviewControls: " + t);
+        }
+    }
+
+    private void applyStillFlash(CaptureRequest.Builder b) {
+        try {
+            switch (mFlashMode) {
+                case FLASH_ON:
+                    b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH);
+                    break;
+                case FLASH_AUTO:
+                    b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON_AUTO_FLASH);
+                    break;
+                default:
+                    b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                    b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
+                    break;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "applyStillFlash: " + t);
+        }
+    }
+
+    /** Re-submits the repeating preview request after a control change. */
+    private void refreshRepeatingRequest() {
+        if (mCaptureSession == null || mPreviewRequestBuilder == null) return;
+        try {
+            applyPreviewControls(mPreviewRequestBuilder);
+            mCaptureSession.setRepeatingRequest(mPreviewRequestBuilder.build(),
+                    new CaptureCallback(this), mCameraHandler);
+        } catch (Throwable t) {
+            Log.w(TAG, "refreshRepeatingRequest failed: " + t);
+        }
+    }
+
+    @Override
+    public void setFlashMode(final int mode) {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                mFlashMode = mode;
+                Log.i(TAG, "Flash mode -> " + mode + " (0=off, 1=auto, 2=on)");
+            }
+        });
+    }
+
+    @Override
+    public void setEvCompensation(final int steps) {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                mEvSteps = steps;
+                Log.i(TAG, "EV compensation -> " + clampedEvSteps() + " steps");
+                refreshRepeatingRequest();
+            }
+        });
+    }
+
+    @Override
+    public void setZoom(final float ratio) {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                mZoomRatio = Math.max(1.0f, ratio);
+                recomputeCropRegion();
+                Log.i(TAG, "Zoom -> " + mZoomRatio + "x, crop=" + mCropRegion);
+                refreshRepeatingRequest();
+            }
+        });
+    }
+
+    @Override
+    public void focusAt(final float sensorNormX, final float sensorNormY) {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                Rect base = (mCropRegion != null) ? mCropRegion : mActiveArray;
+                if (base == null) return;
+
+                float nx = Math.max(0.0f, Math.min(1.0f, sensorNormX));
+                float ny = Math.max(0.0f, Math.min(1.0f, sensorNormY));
+                int halfW = Math.max(2, Math.round(base.width() * 0.09f));
+                int halfH = Math.max(2, Math.round(base.height() * 0.09f));
+                int cx = base.left + Math.round(nx * base.width());
+                int cy = base.top + Math.round(ny * base.height());
+
+                Rect region = new Rect(cx - halfW, cy - halfH, cx + halfW, cy + halfH);
+                region.left = Math.max(base.left, region.left);
+                region.top = Math.max(base.top, region.top);
+                region.right = Math.min(base.right, region.right);
+                region.bottom = Math.min(base.bottom, region.bottom);
+                mAfRegion = region;
+
+                Log.i(TAG, "Tap-to-focus region=" + region + " (crop=" + base + ")");
+                refreshRepeatingRequest();
+                triggerAfScan(region);
+
+                mCameraHandler.removeCallbacks(mAfResetRunnable);
+                mCameraHandler.postDelayed(mAfResetRunnable, 2000);
+            }
+        });
+    }
+
+    /** One-shot AF/AE scan at the tapped region (does not touch the repeating request). */
+    private void triggerAfScan(Rect region) {
+        if (mCameraDevice == null || mCaptureSession == null
+                || mColorSurface == null || mDepthSurface == null) {
+            return;
+        }
+        try {
+            CaptureRequest.Builder af = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            af.addTarget(mColorSurface);
+            af.addTarget(mDepthSurface);
+            af.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
+            af.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+            af.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+            MeteringRectangle[] meters = new MeteringRectangle[]{
+                    new MeteringRectangle(region, MeteringRectangle.METERING_WEIGHT_MAX)};
+            af.set(CaptureRequest.CONTROL_AF_REGIONS, meters);
+            af.set(CaptureRequest.CONTROL_AE_REGIONS, meters);
+            af.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
+            applyCropAndExposure(af);
+            mCaptureSession.capture(af.build(), null, mCameraHandler);
+        } catch (Throwable t) {
+            Log.w(TAG, "triggerAfScan failed: " + t);
+        }
+    }
+
+    @Override
+    public void setPhysicalLens(final String physicalId) {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                String target = (physicalId == null) ? "" : physicalId;
+                if (target.equals(mPhysicalId)) return;
+                restartWithLens(target);
+            }
+        });
+    }
+
+    /** Tears the device down and re-opens it pinned to another physical sensor. */
+    private void restartWithLens(String physicalId) {
+        Log.i(TAG, "Switching physical lens to '" + physicalId + "'");
+        try {
+            if (mCaptureSession != null) {
+                try {
+                    mCaptureSession.stopRepeating();
+                } catch (Throwable ignore) {
+                    // session already gone
+                }
+                mCaptureSession.close();
+                mCaptureSession = null;
+            }
+            if (mCameraDevice != null) {
+                mCameraDevice.close();
+                mCameraDevice = null;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "Lens switch teardown: " + t);
+        }
+
+        mZoomRatio = 1.0f;
+        recomputeCropRegion();
+        mAfRegion = null;
+
+        boolean ok = openStereoSession(
+                mColorSurface, mColorW, mColorH,
+                mDepthSurface, mDepthW, mDepthH,
+                mStillSurface, mStillW, mStillH,
+                physicalId);
+        if (!ok) {
+            notifyError("Lens unavailable");
+        }
+    }
+
     @Override
     public void triggerStill(long shutterCommandNs, boolean highQualityNr) {
         triggerStillWithZsl(shutterCommandNs, highQualityNr, true);
@@ -304,6 +595,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl);
             stillBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
             stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            applyCropAndExposure(stillBuilder);
+            applyStillFlash(stillBuilder);
             if (highQualityNr) {
                 stillBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY);
                 stillBuilder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY);

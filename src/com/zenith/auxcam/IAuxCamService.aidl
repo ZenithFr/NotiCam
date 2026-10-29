@@ -10,7 +10,20 @@ interface IAuxCamService {
         in Surface depthSurface, int depthW, int depthH,
         in Surface stillSurface, int stillW, int stillH,
         String colorPhysicalId);
+
     void triggerStill(long shutterCommandNs, boolean highQualityNr);
     void triggerStillWithZsl(long shutterCommandNs, boolean highQualityNr, boolean enableZsl);
     void closeSession();
+
+    // ── Live camera controls (Apple Camera chrome) ──────────────────────────
+    /** 0 = off, 1 = auto, 2 = on (fires on the still request). */
+    void setFlashMode(int mode);
+    /** Exposure compensation in AE steps (clamped to the sensor range). */
+    void setEvCompensation(int steps);
+    /** Digital zoom, 1.0 = 1x. Applied as SCALER_CROP_REGION to preview + still. */
+    void setZoom(float ratio);
+    /** Tap-to-focus at normalised sensor coordinates (0..1, landscape sensor). */
+    void focusAt(float sensorNormX, float sensorNormY);
+    /** Re-opens the camera pinned to another physical sensor ("0" = auto). */
+    void setPhysicalLens(String physicalId);
 }

@@ -24,6 +24,37 @@ AuxCam unlocks synchronized multi-camera ISP streaming directly through a privil
 
 ---
 
+## 🎛️ Capture UI (Apple Camera language)
+
+The viewfinder chrome was rebuilt from the ground up around the iOS Camera /
+Portrait UI. Tokens, components and the full interaction map live in
+[`design/DESIGN.md`](design/DESIGN.md); a clickable mock of the shipping layout
+lives in [`design/index.html`](design/index.html).
+
+| | Before | After |
+|---|---|---|
+| **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: floating glass controls, one accent (`#FFD60A`) |
+| **Viewfinder** | Pushed down by an 88 dp header, boxed in | Floats to the top edge; chrome overlays the scene |
+| **Modes** | `PHOTO · 50M PRO · VIDEO · PORTRAIT` white/grey text | `PHOTO · PORTRAIT · PRO` with a systemYellow selection |
+| **Shutter** | Static layered drawable | Custom `ShutterButton`: compresses on press, ring pulse + haptic |
+| **Flash** | Painted but inert | Cycles off → auto → on and sets `CONTROL_AE_MODE` on the still request |
+| **Zoom** | Dead pill badges | Lens chips + pinch + orbit dial → real `SCALER_CROP_REGION` |
+| **Aperture** | — | 22-stop ƒ ladder (Portrait) driving the physical CoC of the bokeh engine |
+| **Focus** | Static yellow square | Spring-in AE/AF reticle with a hardware focus scan at the tap |
+| **Pro controls** | Chevron drawer with dead EV/ISO/shutter buttons | Glass sheet: ƒ, EV (±4 EV), Grid, RAW, Timer, live telemetry |
+| **Gallery** | Always-empty tile | Real bokeh frame decoded from the capture, plus a fly-to-gallery animation |
+
+Highlights of the implementation:
+
+- **`res/values/`** — `colors.xml`, `dimens.xml`, `styles.xml` design tokens (8-pt grid, iOS type scale).
+- **`res/drawable/ios_*`** — glass capsules/circles, ripples, iOS slider track & knob, toolbar scrim.
+- **`ShutterButton`** — ring/gap/disc anatomy with press compression and capture pulse.
+- **`FocusOverlayView`** — rule-of-thirds grid + spring-in focus reticle.
+- **`CameraUserService`** — new AIDL surface (`setFlashMode`, `setEvCompensation`, `setZoom`, `focusAt`, `setPhysicalLens`) mapping 1:1 onto Camera2 controls.
+- **`tools/verify_ui.py`** — resource-graph + Java syntax gate, now part of `build.sh`.
+
+---
+
 ## 🏗️ Architecture
 
 ```
@@ -74,7 +105,12 @@ auxcam-app/
 │       ├── gather.comp
 │       ├── composite.comp
 │       └── convert.comp
-├── res/                       # Android UI layouts, drawables, strings
+├── res/                       # Apple Camera design system (layout, drawables, tokens)
+│   ├── layout/activity_main.xml
+│   ├── drawable/ios_*.xml     # glass capsules, ripples, iOS slider, icons
+│   └── values/                # colors.xml, dimens.xml, styles.xml, strings.xml
+├── design/                    # DESIGN.md + clickable UI mock (index.html)
+├── tools/verify_ui.py         # UI resource-graph & Java syntax gate
 ├── assets/                    # Precompiled SPIR-V shaders & assets
 ├── libs/                      # JAR dependencies (Shizuku, TensorFlow Lite)
 ├── lib/                       # Native compiled shared libraries (arm64-v8a)
