@@ -176,7 +176,10 @@ fun CameraScreen(
                 BottomBar(
                     state = state,
                     actions = actions,
-                    onShutterCenter = { shutterCenter = it },
+                    onShutterCenter = {
+                        shutterCenter = it
+                        android.util.Log.i("NotiCam/Screen", "shutterCenter at (${it.x}, ${it.y})")
+                    },
                     onGalleryCenter = { galleryCenter = it },
                     modifier = Modifier.padding(top = 10.dp, bottom = 8.dp),
                 )

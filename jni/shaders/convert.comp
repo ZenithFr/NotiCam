@@ -40,9 +40,9 @@ void main() {
     // npu_x in [0, 384], npu_y in [0, 512]
     if (coord.x < pc.npuWidth && coord.y < pc.npuHeight) {
         vec2 npuUv = (vec2(coord) + 0.5) / vec2(pc.npuWidth, pc.npuHeight);
-        // 90 deg rotation mapping:
-        // upright_x corresponds to sensor_y, upright_y corresponds to 1.0 - sensor_x
-        vec2 sensorUv = vec2(1.0 - npuUv.y, npuUv.x);
+        // 90 deg clockwise rotation mapping to align sensor coordinates upright in portrait:
+        // sensor_x corresponds to npuUv.y, sensor_y corresponds to 1.0 - npuUv.x
+        vec2 sensorUv = vec2(npuUv.y, 1.0 - npuUv.x);
         vec4 npuRgba = texture(uCameraYuv, sensorUv);
         imageStore(uOutNpuInput, coord, npuRgba);
     }

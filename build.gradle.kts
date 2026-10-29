@@ -13,9 +13,7 @@ plugins {
 android {
     namespace = "com.zenith.auxcam"
     compileSdk = 35
-    // Uses whichever NDK the SDK manager installed (r27b+ is expected). Pin it
-    // here only if you keep multiple NDK revisions side by side.
-    // ndkVersion = "27.1.12297006"
+    ndkVersion = "27.1.12297006"
 
     defaultConfig {
         applicationId = "com.zenith.auxcam"

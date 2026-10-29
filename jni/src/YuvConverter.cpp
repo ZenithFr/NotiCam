@@ -108,6 +108,11 @@ bool YuvConverter::initConversionSampler() {
 bool YuvConverter::importHardwareBuffer(AHardwareBuffer* buffer, VkImage* outImage, VkDeviceMemory* outMemory, VkImageView* outView) {
     AHardwareBuffer_Desc desc;
     AHardwareBuffer_describe(buffer, &desc);
+    static bool loggedOnce = false;
+    if (!loggedOnce) {
+        LOGI("AHB import: %ux%u stride=%u format=0x%x usage=0x%llx", desc.width, desc.height, desc.stride, desc.format, (unsigned long long)desc.usage);
+        loggedOnce = true;
+    }
 
     VkAndroidHardwareBufferPropertiesANDROID hwbProps{};
     hwbProps.sType = VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID;

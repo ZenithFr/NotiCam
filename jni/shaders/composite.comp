@@ -66,8 +66,8 @@ void main() {
     // ── Orientation ─────────────────────────────────────────────────────────
     if (pc.rotate90 != 0) {
         // Map upright screen coordinates [0..1]² onto sensor coordinates
-        // rotated 90° clockwise: sensor_x = 1 - v, sensor_y = u
-        uv = vec2(1.0 - uv.y, uv.x);
+        // rotated 90° clockwise (upright on physical device): sensor_x = v, sensor_y = 1 - u
+        uv = vec2(uv.y, 1.0 - uv.x);
     }
 
     vec4 sharpRgba = texture(uOriginalColor, uv);

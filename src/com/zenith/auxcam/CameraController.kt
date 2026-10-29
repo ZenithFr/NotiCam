@@ -40,8 +40,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
-/** The four JNI entry points, implemented by [MainActivity]. */
+/** Native JNI entry points, implemented by [MainActivity]. */
 interface NativeBridge {
     fun initEngine(surface: Surface, width: Int, height: Int): Boolean
     fun renderFrame(
@@ -50,7 +51,10 @@ interface NativeBridge {
         depthW: Int,
         depthH: Int,
         fStop: Float,
+        targetFarFieldPx: Float,
     ): Boolean
+
+    fun setCameraOpticalParams(focalMm: Float, sensorWidthMm: Float, baseFStop: Float)
 
     fun processStill(
         buffer: HardwareBuffer,
@@ -147,6 +151,7 @@ class CameraController(
 
     private var service: IAuxCamService? = null
     private var surfaceHolder: SurfaceHolder? = null
+    private val stillCaptureInProgress = AtomicBoolean(false)
 
     @Volatile
     private var latestDepth: ByteArray? = null
@@ -417,11 +422,12 @@ class CameraController(
 
         try {
             svc.setCallback(object : IAuxCamCallback.Stub() {
-                override fun onSessionReady() = post { onSessionReady() }
-                override fun onSessionError(msg: String?) = post { onSessionError(msg) }
-                override fun onStillCaptured() = post { onStillCaptured() }
-                override fun onStats(colorFps: Float, depthFps: Float, dt: Float) =
-                    post { onStats(colorFps, depthFps, dt) }
+                override fun onSessionReady() { post { this@CameraController.onSessionReady() } }
+                override fun onSessionError(msg: String?) { post { this@CameraController.onSessionError(msg) } }
+                override fun onStillCaptured() { post { this@CameraController.onStillCaptured() } }
+                override fun onStats(colorFps: Float, depthFps: Float, dt: Float) {
+                    post { this@CameraController.onStats(colorFps, depthFps, dt) }
+                }
             })
 
             val ok = svc.openStereoSession(
@@ -430,7 +436,14 @@ class CameraController(
                 still.surface, DeviceProfile.STILL_WIDTH, DeviceProfile.STILL_HEIGHT,
                 currentLens,
             )
-            update { it.copy(status = if (ok) "Starting engine…" else "Session failed") }
+            update { it.copy(status = if (ok) "Starting engine…" else "Retrying session…") }
+            if (!ok) {
+                main.postDelayed({
+                    if (service != null && surfaceHolder?.surface?.isValid == true) {
+                        startStereoSession()
+                    }
+                }, 800L)
+            }
         } catch (e: RemoteException) {
             Log.e(TAG, "openStereoSession failed", e)
             update { it.copy(status = "Remote error") }
@@ -485,18 +498,25 @@ class CameraController(
     // ═══════════════════════════ IMAGE STREAMS ═══════════════════════════════
 
     private fun onColorImage(reader: ImageReader) {
+        if (stillCaptureInProgress.get()) {
+            val dropped = reader.acquireLatestImage()
+            dropped?.close()
+            return
+        }
         val t0 = SystemClock.elapsedRealtimeNanos()
         val image = reader.acquireLatestImage() ?: return
         try {
             val buffer = image.hardwareBuffer
             if (buffer != null) {
                 try {
+                    val targetFarFieldPx = 15.0f * (1.8f / state.fStop)
                     native.renderFrame(
                         buffer,
                         latestDepth,
                         DeviceProfile.DEPTH_WIDTH,
                         DeviceProfile.DEPTH_HEIGHT,
                         state.fStop,
+                        targetFarFieldPx,
                     )
                 } catch (t: Throwable) {
                     Log.e(TAG, "renderFrame error: ${t.message}")
@@ -543,6 +563,7 @@ class CameraController(
 
                 if (state.raw) dumpRawPlanes(image, dir, stamp)
 
+                val targetFarFieldPx = 15.0f * (1.8f / state.fStop)
                 val timestamps = LongArray(3)
                 native.processStill(
                     buffer,
@@ -550,7 +571,7 @@ class CameraController(
                     DeviceProfile.DEPTH_WIDTH,
                     DeviceProfile.DEPTH_HEIGHT,
                     state.fStop,
-                    15f,
+                    targetFarFieldPx,
                     outPath,
                     timestamps,
                 )
@@ -577,6 +598,7 @@ class CameraController(
         } catch (t: Throwable) {
             Log.e(TAG, "still processing failed", t)
         } finally {
+            stillCaptureInProgress.set(false)
             image.close()
         }
 
@@ -659,9 +681,13 @@ class CameraController(
 
     private fun triggerCapture(highQuality: Boolean, enableZsl: Boolean) {
         val svc = service ?: run {
+            Log.e(TAG, "triggerCapture failed: service is null")
             update { it.copy(status = "Camera not ready") }
             return
         }
+        Log.i(TAG, "triggerCapture: highQuality=$highQuality, enableZsl=$enableZsl")
+        stillCaptureInProgress.set(true)
+        main.postDelayed({ stillCaptureInProgress.set(false) }, 2500L)
         shutterClickNs = SystemClock.elapsedRealtimeNanos()
         update {
             it.copy(
@@ -672,6 +698,7 @@ class CameraController(
         try {
             svc.triggerStillWithZsl(shutterClickNs, highQuality, enableZsl)
         } catch (e: RemoteException) {
+            stillCaptureInProgress.set(false)
             Log.e(TAG, "triggerStill failed", e)
         }
     }
@@ -800,6 +827,7 @@ class CameraController(
     }
 
     override fun onShutterClick() {
+        Log.i(TAG, "onShutterClick called, sessionReady=${state.sessionReady}")
         if (state.timerSeconds > 0) {
             startTimerCapture(state.timerSeconds)
         } else {
@@ -828,6 +856,12 @@ class CameraController(
         currentLens = physicalLenses[nextIndex]
         lensSwitching = true
         lastSentZoom = 1f
+        // Optical constants: 1x Wide (5.56mm, 8.16mm, f/1.88) vs 2x Tele (11.12mm, 5.80mm, f/2.40)
+        if (nextIndex == 1) {
+            native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
+        } else {
+            native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
+        }
         update {
             it.copy(
                 zoom = 1f,
@@ -839,8 +873,17 @@ class CameraController(
         try {
             service?.setPhysicalLens(currentLens)
         } catch (e: RemoteException) {
-            Log.w(TAG, "setPhysicalLens failed")
+            Log.w(TAG, "setPhysicalLens failed: fallback to 1x")
             lensSwitching = false
+            currentLens = physicalLenses[0]
+            native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
+            update {
+                it.copy(
+                    zoom = 1f,
+                    lensIndex = 0,
+                    status = "1x (Wide)",
+                )
+            }
         }
     }
 

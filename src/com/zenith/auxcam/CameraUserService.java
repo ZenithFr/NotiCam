@@ -216,14 +216,6 @@ public class CameraUserService extends IAuxCamService.Stub {
         mStillH = stillH;
         mPhysicalId = colorPhysicalId;
 
-        // Guard against Doze idle
-        PowerManager pm = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);
-        if (pm != null && pm.isDeviceIdleMode()) {
-            Log.w(TAG, "Device is in idle/doze mode! Waiting for wake...");
-            notifyError("Device is in idle/doze mode");
-            return false;
-        }
-
         Context shellContext = mContext;
         try {
             Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
@@ -716,14 +708,18 @@ public class CameraUserService extends IAuxCamService.Stub {
         @Override
         public void onDisconnected(CameraDevice camera) {
             Log.w(TAG, "Camera disconnected");
-            camera.close();
+            try { camera.close(); } catch (Throwable ignored) {}
+            mService.mCameraDevice = null;
+            mService.mCaptureSession = null;
             mService.notifyError("Camera disconnected");
         }
 
         @Override
         public void onError(CameraDevice camera, int error) {
             Log.e(TAG, "Camera device error: " + error);
-            camera.close();
+            try { camera.close(); } catch (Throwable ignored) {}
+            mService.mCameraDevice = null;
+            mService.mCaptureSession = null;
             mService.notifyError("Camera error code: " + error);
         }
     }

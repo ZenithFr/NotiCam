@@ -80,7 +80,16 @@ class MainActivity : ComponentActivity(), NativeBridge {
         depthW: Int,
         depthH: Int,
         fStop: Float,
-    ): Boolean = nativeRenderFrame(buffer, depth, depthW, depthH, fStop)
+        targetFarFieldPx: Float,
+    ): Boolean = nativeRenderFrame(buffer, depth, depthW, depthH, fStop, targetFarFieldPx)
+
+    override fun setCameraOpticalParams(focalMm: Float, sensorWidthMm: Float, baseFStop: Float) {
+        try {
+            nativeSetCameraOpticalParams(focalMm, sensorWidthMm, baseFStop)
+        } catch (t: UnsatisfiedLinkError) {
+            Log.w(TAG, "optical params unavailable: ${t.message}")
+        }
+    }
 
     override fun processStill(
         buffer: HardwareBuffer,
@@ -126,7 +135,14 @@ class MainActivity : ComponentActivity(), NativeBridge {
         depthW: Int,
         depthH: Int,
         fStop: Float,
+        targetFarFieldPx: Float,
     ): Boolean
+
+    private external fun nativeSetCameraOpticalParams(
+        focalMm: Float,
+        sensorWidthMm: Float,
+        baseFStop: Float,
+    )
 
     private external fun nativeProcessStillBokeh(
         buffer: HardwareBuffer,

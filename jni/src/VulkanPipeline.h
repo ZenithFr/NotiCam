@@ -22,10 +22,24 @@ public:
     }
 
     // Renders one full frame: Camera YUV AHB + DPE Disparity Y8 -> Native Window
-    bool renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop);
+    bool renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop, float targetFarFieldPx = 15.0f);
+
+    struct OpticalParams {
+        float focalLengthMm = 5.56f;
+        float sensorWidthMm = 8.16f;
+        float baseFStop = 1.88f;
+    } mOpticalParams;
+
+    void setCameraOpticalParams(float focalMm, float sensorWidthMm, float baseFStop) {
+        mOpticalParams.focalLengthMm = focalMm;
+        mOpticalParams.sensorWidthMm = sensorWidthMm;
+        mOpticalParams.baseFStop = baseFStop;
+    }
 
     // Process still bokeh on 4080x3072 AHardwareBuffer using 1020x768 gather & 4080x3072 composite
     bool processStillBokeh(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop, float targetFarFieldPx, const char* outFilePath = nullptr, int64_t* outTimestamps = nullptr);
+
+    void updateSurface(ANativeWindow* newWindow, uint32_t width, uint32_t height);
 
 private:
     bool createInstance();

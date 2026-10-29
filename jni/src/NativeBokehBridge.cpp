@@ -22,22 +22,26 @@ Java_com_zenith_auxcam_MainActivity_nativeInitEngine(
         return JNI_FALSE;
     }
 
-    gPipeline = std::make_unique<VulkanPipeline>();
-    if (!gPipeline->init(window, static_cast<uint32_t>(width), static_cast<uint32_t>(height))) {
-        LOGE("VulkanPipeline initialization failed");
-        gPipeline.reset();
-        ANativeWindow_release(window);
-        return JNI_FALSE;
+    if (!gPipeline) {
+        gPipeline = std::make_unique<VulkanPipeline>();
+        if (!gPipeline->init(window, static_cast<uint32_t>(width), static_cast<uint32_t>(height))) {
+            LOGE("VulkanPipeline initialization failed");
+            gPipeline.reset();
+            ANativeWindow_release(window);
+            return JNI_FALSE;
+        }
+    } else {
+        gPipeline->updateSurface(window, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
     }
 
     ANativeWindow_release(window);
-    LOGI("Native bokeh engine initialized successfully");
+    LOGI("Native bokeh engine initialized/updated successfully");
     return JNI_TRUE;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeRenderFrame(
-        JNIEnv* env, jobject thiz, jobject hardwareBufferObj, jbyteArray depthY8Array, jint depthW, jint depthH, jfloat fStop) {
+        JNIEnv* env, jobject thiz, jobject hardwareBufferObj, jbyteArray depthY8Array, jint depthW, jint depthH, jfloat fStop, jfloat targetFarFieldPx) {
     if (!gPipeline) return JNI_FALSE;
 
     AHardwareBuffer* hardwareBuffer = AHardwareBuffer_fromHardwareBuffer(env, hardwareBufferObj);
@@ -56,7 +60,8 @@ Java_com_zenith_auxcam_MainActivity_nativeRenderFrame(
             reinterpret_cast<const uint8_t*>(depthBytes),
             static_cast<uint32_t>(depthW),
             static_cast<uint32_t>(depthH),
-            fStop
+            fStop,
+            targetFarFieldPx
     );
 
     if (depthBytes != nullptr) {
@@ -64,6 +69,14 @@ Java_com_zenith_auxcam_MainActivity_nativeRenderFrame(
     }
 
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeSetCameraOpticalParams(
+        JNIEnv* env, jobject thiz, jfloat focalMm, jfloat sensorWidthMm, jfloat baseFStop) {
+    if (gPipeline) {
+        gPipeline->setCameraOpticalParams(focalMm, sensorWidthMm, baseFStop);
+    }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

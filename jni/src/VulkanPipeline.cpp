@@ -64,6 +64,9 @@ bool VulkanPipeline::init(ANativeWindow* window, uint32_t previewWidth, uint32_t
     if (mInitialized) return true;
 
     mWindow = window;
+    if (mWindow) {
+        ANativeWindow_acquire(mWindow);
+    }
     mWidth = previewWidth;
     mHeight = previewHeight;
 
@@ -343,6 +346,75 @@ bool VulkanPipeline::recreateSwapchain() {
     return true;
 }
 
+void VulkanPipeline::updateSurface(ANativeWindow* newWindow, uint32_t width, uint32_t height) {
+    if (mDevice == VK_NULL_HANDLE) return;
+    std::lock_guard<std::mutex> lock(mQueueMutex);
+    vkDeviceWaitIdle(mDevice);
+
+    if (mSetCompPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetCompPreview);
+        mSetCompPreview = VK_NULL_HANDLE;
+    }
+    if (mViewPreviewOut != VK_NULL_HANDLE) {
+        vkDestroyImageView(mDevice, mViewPreviewOut, nullptr);
+        mViewPreviewOut = VK_NULL_HANDLE;
+    }
+    if (mImgPreviewOut != VK_NULL_HANDLE) {
+        vkDestroyImage(mDevice, mImgPreviewOut, nullptr);
+        mImgPreviewOut = VK_NULL_HANDLE;
+    }
+    if (mMemPreviewOut != VK_NULL_HANDLE) {
+        vkFreeMemory(mDevice, mMemPreviewOut, nullptr);
+        mMemPreviewOut = VK_NULL_HANDLE;
+    }
+    if (mPreviewCmdPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(mDevice, mPreviewCmdPool, nullptr);
+        mPreviewCmdPool = VK_NULL_HANDLE;
+    }
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        if (mImageAvailableSemaphores[i] != VK_NULL_HANDLE) {
+            vkDestroySemaphore(mDevice, mImageAvailableSemaphores[i], nullptr);
+            mImageAvailableSemaphores[i] = VK_NULL_HANDLE;
+        }
+        if (mRenderFinishedSemaphores[i] != VK_NULL_HANDLE) {
+            vkDestroySemaphore(mDevice, mRenderFinishedSemaphores[i], nullptr);
+            mRenderFinishedSemaphores[i] = VK_NULL_HANDLE;
+        }
+        if (mRenderFences[i] != VK_NULL_HANDLE) {
+            vkDestroyFence(mDevice, mRenderFences[i], nullptr);
+            mRenderFences[i] = VK_NULL_HANDLE;
+        }
+        mPreviewCmds[i] = VK_NULL_HANDLE;
+    }
+    if (mSwapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(mDevice, mSwapchain, nullptr);
+        mSwapchain = VK_NULL_HANDLE;
+    }
+    if (mSurface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(mInstance, mSurface, nullptr);
+        mSurface = VK_NULL_HANDLE;
+    }
+    if (mWindow) {
+        ANativeWindow_release(mWindow);
+        mWindow = nullptr;
+    }
+    mWindow = newWindow;
+    if (mWindow) {
+        ANativeWindow_acquire(mWindow);
+    }
+    mWidth = width;
+    mHeight = height;
+    mSwapchainInitialized = false;
+    mCurrentFrame = 0;
+
+    if (mWindow) {
+        if (!mStillBokehInitialized) initStillBokehResources(720, 540);
+        createSwapchain(mWindow);
+        initPreviewResources();
+    }
+    LOGI("updateSurface complete (%ux%u)", width, height);
+}
+
 bool VulkanPipeline::initPreviewResources() {
     if (!mSwapchainInitialized || !mStillBokehInitialized) return false;
 
@@ -417,7 +489,7 @@ bool VulkanPipeline::initPreviewResources() {
     return true;
 }
 
-bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop) {
+bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop, float targetFarFieldPx) {
     if (!mInitialized || !colorBuffer) return false;
 
     // The SurfaceView can be re-measured at any time (Compose layout pass, inset
@@ -656,7 +728,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
-    CocPushConstants pcCoc{ mStillW, mStillH, 5.56f, fStop, 8.16f, 0.6f, 15.0f, 720.0f };
+    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, 720.0f };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
     CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90 };
 
@@ -1327,7 +1399,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
-    CocPushConstants pcCoc{ mStillW, mStillH, 5.56f, fStop, 8.16f, 0.6f, targetFarFieldPx, 720.0f };
+    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, 720.0f };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
     CompositePushConstants pcComp{ mFullW, mFullH, 0 };
 
@@ -1523,6 +1595,10 @@ void VulkanPipeline::destroy() {
     if (mInstance != VK_NULL_HANDLE) {
         vkDestroyInstance(mInstance, nullptr);
         mInstance = VK_NULL_HANDLE;
+    }
+    if (mWindow) {
+        ANativeWindow_release(mWindow);
+        mWindow = nullptr;
     }
     mInitialized = false;
     LOGI("VulkanPipeline destroyed");

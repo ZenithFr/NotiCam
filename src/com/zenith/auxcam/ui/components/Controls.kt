@@ -57,6 +57,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -677,7 +678,6 @@ fun BottomBar(
             Spacer(Modifier.weight(1f))
 
             ShutterButton(
-                mode = state.mode,
                 recording = false,
                 enabled = state.sessionReady,
                 pulse = state.capturePulse,
