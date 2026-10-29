@@ -37,13 +37,14 @@ the shipping layout lives in [`design/index.html`](design/index.html).
 | **Stack** | `Activity` + `FrameLayout` + hand-written `View` subclasses | `ComponentActivity` → `CameraController` → `CameraScreen`; one immutable `CameraUiState` |
 | **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: floating glass controls, one accent (`#FFD60A`) |
 | **Layout** | Absolute chrome painted over the preview | `Column`: top bar → `weight(1f)` frame → chips → ƒ row → bottom bar. **Nothing can overlap the 4:3 framebuffer** |
-| **Preview geometry** | 4:3 view, swapchain frozen at first size → stretched image | Frame measured to `previewAspect`, swapchain recreated on extent change, `composite.comp` aspect-fits as a second guarantee |
-| **Motion** | `ValueAnimator` + interpolators, several controls clipped mid-animation | Compose springs, oversized paint boxes, `clip = false` everywhere it can matter |
+| **Preview geometry** | 4:3 landscape view (sideways), swapchain frozen at first size → stretched image | `composite.comp` rotates the sensor frame 90° CW → 3:4 portrait, upright; frame measured to `previewAspect`, swapchain recreated on extent change, aspect-fit as a second guarantee |
+| **Motion** | `ValueAnimator` + interpolators, several controls clipped mid-animation | One `CameraMotion` vocabulary: crisp press / springy release, slide-in Pro menu, travelling zoom-chip indicator, arc zoom wheel with detents, `clip = false` everywhere it can matter |
+| **Haptics** | Single `VIRTUAL_KEY` blip per action | `CameraHaptics`: distinct `EFFECT_TICK` detents on the zoom wheel, heavy click arming the shutter, double click on capture, `GESTURE_END` on release |
 | **Icons** | 24 vector drawables + PNG-tinted bitmaps | Nine hand-built `ImageVector`s (24-unit grid, 1.7 stroke) — resolution independent, can never be resampled or cropped |
 | **Shutter** | Static layered drawable | `ShutterButton`: ring/gap/disc, spring compression, capture pulse drawn *inside* its own 96 dp box |
-| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; lens chips + pinch + radial dial drive `SCALER_CROP_REGION`; 22-stop ƒ ladder drives the CoC pass |
+| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; RAW sits beside the flash; 0.6×/1×/2× chips + pinch (the only zoom input) drive `SCALER_CROP_REGION`; continuous ƒ slider drives the CoC pass |
 | **Focus** | Static yellow square | Spring-in AE/AF reticle + hardware focus scan at the tap point |
-| **Pro controls** | Chevron drawer with dead buttons | Glass sheet: ƒ, ±4 EV, Grid, RAW, Timer, live telemetry |
+| **Settings** | Chevron drawer with dead buttons | Sheet sliding down from the top bar: continuous ƒ and ±4 EV sliders, Grid / Timer, live telemetry (no title, no Done — tap outside) |
 | **Gallery** | Always-empty tile | Real bokeh frame decoded from the capture, plus a shutter→gallery flight |
 
 Highlights of the implementation:
@@ -51,7 +52,9 @@ Highlights of the implementation:
 - **`src/com/zenith/auxcam/MainActivity.kt`** — `ComponentActivity`, edge-to-edge window flags, the four JNI entry points, `setContent { NotiCamTheme { CameraScreen(...) } }`.
 - **`CameraController.kt`** — owns the engine, the Shizuku binding, the `ImageReader`s and the single source of truth (`CameraUiState`); implements the `CameraActions` interface the composables call.
 - **`ui/theme/Theme.kt`** — `CameraColors`, `CameraSpacing`, `CameraType`.
-- **`ui/components/`** — `ShutterButton`, `Viewfinder`, `Controls` (top bar, mode carousel, sliders, Pro sheet, gallery tile, bottom bar), `ZoomDial`.
+- **`ui/components/`** — `ShutterButton`, `Viewfinder`, `Controls` (top bar, mode carousel, sliders, Pro sheet, gallery tile, bottom bar), `ZoomChips` (travelling indicator), `ZoomDial` (arc wheel).
+- **`ui/feedback/Haptics.kt`** — the haptic vocabulary.
+- **`ui/theme/Theme.kt` → `CameraMotion`** — every spring and tween in the app.
 - **`ui/icons/NotiIcons.kt`** — the icon set.
 - **`DeviceProfile.kt`** — every CMF Phone 2 Pro constant (display, sensor streams, lens ladder, camera id).
 - **`CameraUserService`** — AIDL surface (`setFlashMode`, `setEvCompensation`, `setZoom`, `focusAt`, `setPhysicalLens`) mapping 1:1 onto Camera2 controls.

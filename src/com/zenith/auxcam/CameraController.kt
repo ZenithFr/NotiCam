@@ -41,6 +41,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
 
 /** Native JNI entry points, implemented by [MainActivity]. */
 interface NativeBridge {
@@ -78,10 +79,12 @@ interface CameraActions {
     fun onModeSelected(mode: CaptureMode)
     fun onZoomSelected(zoom: Float)
     fun onZoomGesture(scaleFactor: Float)
-    /** Delta in degrees from the radial dial; mapped to a zoom step. */
-    fun onZoomDialRotate(deltaDegrees: Float)
-    fun onApertureChanged(index: Int)
-    fun onEvChanged(steps: Int)
+
+    /** @param fStop real f-number, e.g. 2.36f — continuous, not an index. */
+    fun onApertureChanged(fStop: Float)
+
+    /** @param ev exposure compensation in EV, continuous (sent as 1/3 steps). */
+    fun onEvChanged(ev: Float)
     fun onGridToggle()
     fun onRawToggle()
     fun onTimerCycle()
@@ -164,6 +167,7 @@ class CameraController(
     private var captureReceiver: BroadcastReceiver? = null
 
     private var lastSentZoom = 1f
+    private var lastSentEvSteps = 0
     private val physicalLenses = mutableListOf<String>()
     private var currentLens = "0"
 
@@ -754,27 +758,25 @@ class CameraController(
 
     override fun onZoomGesture(scaleFactor: Float) {
         if (scaleFactor == 0f) return
-        applyZoom(state.zoom * scaleFactor, force = false)
+        applyZoom(state.zoom * scaleFactor, force = false, showWheel = true)
     }
 
-    override fun onZoomDialRotate(deltaDegrees: Float) {
-        val span = DeviceProfile.ZOOM_STOPS.last() - DeviceProfile.ZOOM_STOPS.first()
-        // A half turn sweeps 40 % of the range, matching the dial's tick spacing.
-        applyZoom(state.zoom + (deltaDegrees / 180f) * span * 0.4f, force = false)
-    }
-
-    private fun applyZoom(requested: Float, force: Boolean) {
+    private fun applyZoom(requested: Float, force: Boolean, showWheel: Boolean = false) {
         val clamped = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (!force && kotlin.math.abs(clamped - state.zoom) < 0.005f) return
 
+        // Only a pinch summons the radial wheel. Tapping a chip keeps the chips
+        // on screen — they must not swap themselves out for the wheel.
         update {
             it.copy(
                 zoom = clamped,
-                zoomDialVisible = true,
+                zoomDialVisible = if (showWheel) true else it.zoomDialVisible,
             )
         }
-        main.removeCallbacks(hideDial)
-        main.postDelayed(hideDial, 2200L)
+        if (showWheel) {
+            main.removeCallbacks(hideDial)
+            main.postDelayed(hideDial, 1600L)
+        }
 
         // Pinch produces dozens of events per gesture — only forward real changes.
         if (force || kotlin.math.abs(clamped - lastSentZoom) > 0.02f) {
@@ -791,16 +793,23 @@ class CameraController(
         update { it.copy(zoomDialVisible = false) }
     }
 
-    override fun onApertureChanged(index: Int) {
-        update { it.copy(fStopIndex = index.coerceIn(0, FSTOPS.lastIndex)) }
+    override fun onApertureChanged(fStop: Float) {
+        val clamped = fStop.coerceIn(FSTOPS.first(), FSTOPS.last())
+        if (kotlin.math.abs(clamped - state.fStop) < 0.001f) return
+        update { it.copy(fStop = clamped) }
     }
 
-    override fun onEvChanged(steps: Int) {
-        val clamped = steps.coerceIn(-12, 12)
-        if (clamped == state.evSteps) return
-        update { it.copy(evSteps = clamped) }
+    override fun onEvChanged(ev: Float) {
+        val clamped = ev.coerceIn(-4f, 4f)
+        if (kotlin.math.abs(clamped - state.ev) < 0.01f) return
+        update { it.copy(ev = clamped) }
+        // The Camera2 control is quantised to 1/3 EV, so only forward when the
+        // rounded step actually changes — a smooth UI drag is ~continuous.
+        val steps = (clamped * 3f).roundToInt()
+        if (steps == lastSentEvSteps) return
+        lastSentEvSteps = steps
         try {
-            service?.setEvCompensation(clamped)
+            service?.setEvCompensation(steps)
         } catch (e: RemoteException) {
             Log.w(TAG, "setEvCompensation failed")
         }
@@ -896,8 +905,10 @@ class CameraController(
         haptic()
         val u = normalisedX.coerceIn(0f, 1f)
         val v = normalisedY.coerceIn(0f, 1f)
-        val sensorX = if (DeviceProfile.PREVIEW_ROTATION_90) 1f - v else u
-        val sensorY = if (DeviceProfile.PREVIEW_ROTATION_90) u else v
+        // Mirrors composite.comp: with PREVIEW_ROTATION_90 the screen tap (u, v)
+        // samples the sensor at (v, 1 - u) — a 90° clockwise mapping.
+        val sensorX = if (DeviceProfile.PREVIEW_ROTATION_90) v else u
+        val sensorY = if (DeviceProfile.PREVIEW_ROTATION_90) 1f - u else v
         try {
             service?.focusAt(sensorX, sensorY)
         } catch (e: RemoteException) {
@@ -907,9 +918,19 @@ class CameraController(
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
+    /**
+     * Fallback haptic for state changes the UI cannot feel (lens switch, timer).
+     * The composables own gesture feedback through `CameraHaptics`; this is only
+     * for controller-initiated events.
+     */
     private fun haptic() {
         try {
-            activity.window.decorView.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            val view = activity.window.decorView
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            } else {
+                view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "no haptics: ${t.message}")
         }

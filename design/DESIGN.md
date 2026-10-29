@@ -16,7 +16,8 @@ back to code.
 | Principle | What it means in code |
 |---|---|
 | **Nothing is painted over the framebuffer.** | `CameraScreen` is one `Column`: top bar → `weight(1f)` frame slot → lens chips → ƒ row → bottom bar. The chrome is *outside* the 4:3 region by construction, so no control can overlap the live image. Only the transient zoom dial floats on top, and only while the user is rotating it. |
-| **The frame is never stretched.** | The sensor streams 1440 × 1080. `CameraScreen` fits a box of exactly `DeviceProfile.previewAspect` inside the leftover slot (`Modifier.size(w, h)`), that box *is* the `SurfaceView` extent, and `composite.comp` aspect-fits the frame one more time. |
+| **The frame is never stretched *or* sideways.** | The sensor streams 1440 × 1080; `composite.comp` rotates it **90° clockwise** into the swapchain, so the box is 3:4 portrait and the scene is upright in the hand. `CameraScreen` fits a box of exactly `DeviceProfile.previewAspect` inside the leftover slot and that box *is* the `SurfaceView` extent. |
+| **Pinch is the only zoom input.** | The wheel is a read-out, not a control: it has no pointer input, so nothing can be dragged sideways and no part of the framebuffer can be occluded by a touch target. |
 | **One accent colour.** | `CameraColors.Yellow` (`#FFD60A`) marks selection (active mode, ƒ needle, "Done") and nothing else. `Red` (`#FF453A`) is reserved for recording. |
 | **Glass, not slabs.** | `CameraColors.Glass` (55 % `#1C1C1E`) capsules with a 0.5 dp `#1FFFFFFF` hairline. The old opaque `#D00B0B0E` toolbar and acrylic cards are gone. |
 | **Motion has meaning.** | Everything is a Compose spring (`dampingRatio` 0.6–0.9, `StiffnessLow`…`StiffnessHigh`), 110–460 ms. No `LinearInterpolator`, no `ValueAnimator`. |
@@ -32,7 +33,7 @@ Column(windowInsetsPadding(safeDrawing))
  ├── TopBar            56 dp    flash · status pill · Pro
  ├── BoxWithConstraints weight(1f)   ← the ONLY flexible row
  │     └── Viewfinder   measured to exactly 4:3 (1440 × 1080)
- ├── LensChips         44 dp    1× · 2× · 5×
+ ├── ZoomChips         44 dp    0.6× · 1× · 2×   (collapse into the wheel)
  ├── QuickApertureRow  ~34 dp   Portrait only, expandVertically(clip = false)
  └── BottomBar                 Pro sheet (animated) · modes · shutter row
        GalleryTile 52 dp · ShutterButton 96 dp box / 72 dp visual · flip 48 dp
@@ -90,15 +91,15 @@ whole screen without being clipped by the toolbar or the frame.
 | `Viewfinder` | `Viewfinder.kt` | `AndroidView(SurfaceView)` filling the box the caller sized to `previewAspect`. Rule-of-thirds grid, AE/AF reticle (spring-in, pivot at the tap), capture bloom, tap-to-focus + pinch-to-zoom detectors. |
 | `GlassIconButton` | `Controls.kt` | 44 dp glass circle inside a 48 dp touch target; press scales to 0.90 with `clip = false`. |
 | `StatusPill` | `Controls.kt` | Black 42 % capsule, `AnimatedContent` crossfade on text change. |
-| `LensChip` | `Controls.kt` | 44 dp circle; white when selected; press 0.92. |
+| `ZoomChips` | `ZoomChips.kt` | 0.6× / 1× / 2× with a single white disc travelling between positions; `zoom` is the live engine value, so a pinch moves it too. Between stops the disc fades and the nearest label brightens. While the wheel is up the row fades to 0 and shrinks to 0.84 — it *becomes* the wheel. |
 | `ModeCarousel` | `Controls.kt` | `PHOTO · PORTRAIT · PRO`, `Yellow` for the selection, `animateColorAsState`. |
 | `IosSlider` | `Controls.kt` | 4 dp track, 20 dp white knob, tap or drag, integer snapping for the ƒ/EV ladders, `CLOCK_TICK` haptic on drag. |
 | `TogglePill` | `Controls.kt` | White when active — used for Grid / RAW / Timer. |
 | `GalleryTile` | `Controls.kt` | 52 dp tile showing the real decoded bokeh frame, else the gallery glyph. |
-| `ProSheet` | `Controls.kt` | Glass panel: ƒ ladder, ±4 EV, Grid / RAW / Timer, live telemetry. Opens with `expandVertically(clip = false)` + `spring`, closing the "sliced contents" artefact. |
+| `ProSheet` | `Controls.kt` | Settings panel with no title and no Done button: continuous ƒ slider (log scale), continuous ±4 EV slider, Grid / Timer, live telemetry. Rendered by `ProMenuOverlay`, which hangs it under the top bar and slides it **down**; tapping the scrim or the top-bar Pro button closes it. |
 | `TopBar` | `Controls.kt` | `Box` so the status pill stays optically centred while the corner buttons change width. |
 | `BottomBar` | `Controls.kt` | Pro sheet → modes → shutter row. Publishes the shutter and gallery centres via `onGloballyPositioned` for the hand-off animation. |
-| `ZoomDial` | `ZoomDial.kt` | 236 dp glass disk, 48 ticks, yellow needle sweeping 160°, drag-to-rotate mapped to real `SCALER_CROP_REGION`. Auto-hides after 2.2 s. |
+| `ZoomDial` | `ZoomDial.kt` | Zoom wheel, **read-only**: top arc only (202°→338°), 47 ticks whose alpha follows `sin()`, a radial backdrop that fades to fully transparent before the bottom, travelled thread + needle + glow knob, callout pop per stop. No pointer input — zoom is pinch-only. |
 | `NotiIcons` | `ui/icons/NotiIcons.kt` | Nine hand-built `ImageVector`s on a 24 unit grid, 1.7 stroke, round caps. Resolution-independent, so scaling can never resample or crop a glyph. |
 
 ---
@@ -108,36 +109,73 @@ whole screen without being clipped by the toolbar or the frame.
 | Gesture | Result | Engine call |
 |---|---|---|
 | Tap the frame | Reticle springs in at the tap point | `focusAt(sensorX, sensorY)` on the privileged session |
-| Pinch the frame | Zoom dial appears, zoom follows the pinch | `setZoom(z)`, throttled to 0.02 steps |
-| Drag the dial rim | Zoom follows rotation (≈ 0.4 × range per half turn) | `setZoom(z)` |
-| Tap a lens chip | Jump to 1× / 2× / 5× | `setZoom(z)` |
+| Pinch the frame | Chips morph into the wheel, zoom follows the pinch | `setZoom(z)`, throttled to 0.02 steps |
+| Tap a lens chip | Jump to 0.6× / 1× / 2× (chips stay on screen) | `setZoom(z)` |
 | Tap the shutter | Bloom + ring pulse + shutter→gallery flight | capture request with the current ƒ and EV |
-| Tap Pro | Sheet slides up, corner button becomes a white ✕ | — |
+| Tap Pro | Settings sheet slides down from under the top bar; button becomes a white ✕ | — |
+| Tap outside the sheet | Closes it (there is no Done button) | — |
+| Tap RAW | Toggles RAW capture (beside the flash, not in the sheet) | raw plane dump |
 | Tap flash | Off → Auto → On, icon + status pill update | `setFlashMode(mode)` |
 | Portrait mode | ƒ ladder appears in the bottom bar | — |
 | Tap gallery | Opens the system gallery | `ACTION_VIEW` |
 
-Sensor-space mapping for a tap (`CameraController.onFocusAt`): with the sensor
-frame presented 1440 × 1080 landscape and the phone portrait, the normalised tap
-`(u, v)` becomes `sensorX = 1 − v`, `sensorY = u`. Flip both that expression and
-`DeviceProfile.PREVIEW_ROTATION_90` if a future build presents the frame upright.
+Sensor-space mapping for a tap (`CameraController.onFocusAt`) mirrors the shader:
+with `PREVIEW_ROTATION_90` the normalised tap `(u, v)` becomes `sensorX = v`,
+`sensorY = 1 − u` — the same 90° clockwise mapping `composite.comp` uses.
 
 ---
 
-## 6. Motion reference
+## 6. Motion & haptics reference
 
-| Element | Spec |
+All curves live in `ui/theme/Theme.kt` as `CameraMotion` — no composable defines
+its own spring, and nothing uses a default `animate*AsState()` spec. The shape is
+deliberately asymmetric: **press down is crisp, release is springy**.
+
+| Interaction | Spec |
 |---|---|
-| Icon button press | `spring(0.65, Medium)` → 0.90 |
-| Lens chip press | `spring(0.70, Medium)` → 0.92 |
-| Mode label press | `spring(0.60, Medium)` → 0.94 |
-| Shutter press | `spring(0.90, High)` → 0.86; release `MediumBouncy / Low` |
-| Shutter pulse | 520 ms `LinearOutSlowInEasing`, ring fades as it grows |
-| Capture bloom | 60 ms to 0.85 alpha, 260 ms `FastOutSlowIn` back to 0 |
-| Focus reticle | 110 ms fade + `MediumBouncy` spring scale 0.72 → 1.0, 1.2 s hold |
-| Pro sheet | `spring(0.90, MediumLow)` expand, 170 ms shrink, both `clip = false` |
-| Zoom dial | 150 ms fade + `spring(0.80, MediumLow)` scale 0.9 → 1.0 |
+| Press (icon button, chip, mode, toggle) | `spring(0.62, StiffnessHigh)` → scale 0.86–0.95 |
+| Release | `spring(DampingRatioMediumBouncy, StiffnessMediumLow)` → 1.0 |
+| Selection (mode/mode colour) | `spring(0.78, MediumLow)`; selected label sits at 1.06× |
+| Panels / overlays | `spring(0.9, MediumLow)` — damped so a panel never overshoots a neighbour |
+| Zoom wheel | `spring(LowBouncy, StiffnessLow)` — keeps momentum like a lens barrel |
+| Fades | 120–180 ms `tween`, always faster than the move they accompany |
+| Shutter press | `press()` → 0.86, release `release()` |
+| Shutter pulse | 520 ms `LinearOutSlowInEasing`, ring grows into the 96 dp margin |
+| Shutter disc | compresses 4 % while the pulse travels |
+| Capture bloom | 55 ms to 0.85 α, 280 ms `FastOutSlowIn` back to 0 |
+| Focus reticle | 110 ms fade + `release()` spring 0.72 → 1.0, 1.2 s hold |
+| Zoom chips | **one disc slides** between positions, `spring(0.72, MediumLow)`; labels cross-fade 180 ms |
+| Chips → wheel morph | chips fade 140 ms + shrink to 0.84 + drop 6 dp; wheel scales 0.55 → 1 from `TransformOrigin(0.5, 0)` on `slide()`, so the arc unfurls out of the chip line |
+| Settings sheet | slides **down** from under the top bar + fade 160 ms + scale 0.96 → 1 from the top edge; exit 130–160 ms; scrim fades 180 ms |
 | Gallery flight | 460 ms `FastOutSlowIn`, 96 dp tile, 26 dp arc lift |
+
+### Layout-safe animation rules
+
+1. **Never animate the height of anything above the viewfinder.** The frame lives
+   in a `weight(1f)` slot; changing the column height resizes the `SurfaceView`
+   and therefore recreates the Vulkan swapchain on every frame. The ƒ row keeps a
+   fixed 36 dp slot and the Pro menu is a bottom overlay — both animate by
+   translation only.
+2. **Never clip.** Animated parents set `clip = false`; controls compose at their
+   maximum size (shutter 96 dp for a 72 dp disc).
+3. **One travel per action.** A zoom change moves exactly one thing (the disc);
+   a mode change moves exactly one thing (the label scale).
+
+### Haptics — `ui/feedback/Haptics.kt`
+
+`CameraHaptics` maps each interaction to a distinct, very short Android
+`VibrationEffect` (falling back to `HapticFeedbackConstants` below Android 10).
+Predefined effects respect the system touch-feedback setting.
+
+| Event | Effect |
+|---|---|
+| Zoom wheel detent / chip crossing a stop | `EFFECT_TICK` |
+| Chip, mode, toggle selection | `EFFECT_CLICK` |
+| Plain button | `EFFECT_CLICK` (keyboard-tap fallback) |
+| Finger down on the shutter | `EFFECT_HEAVY_CLICK` |
+| Frame captured | `EFFECT_DOUBLE_CLICK` |
+| AE/AF lock | `EFFECT_CLICK` |
+| Gesture end (pinch, wheel release) | `GESTURE_END` |
 
 ---
 

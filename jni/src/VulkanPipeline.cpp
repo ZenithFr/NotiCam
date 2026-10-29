@@ -33,10 +33,12 @@ struct GatherPushConstants {
 };
 
 // Presentation orientation of the *preview*.
-// The sensor streams landscape (1440x1080) and the presenter copies it 1:1 into
-// the swapchain, so when the surface is a portrait box the frame must be rotated.
-// Keep this in sync with SensorProfile.PREVIEW_ROTATION_90 on the Kotlin side.
-static constexpr int kPreviewRotate90 = 0;
+// The sensor streams landscape (1440x1080) but the phone is held portrait, so the
+// preview pass rotates the frame 90° clockwise into the swapchain. The still pass
+// keeps 0: the 4080x3072 dump stays in sensor orientation and Kotlin rotates the
+// thumbnail with the same handedness. Keep in sync with
+// DeviceProfile.PREVIEW_ROTATION_90.
+static constexpr int kPreviewRotate90 = 1;
 
 struct CompositePushConstants {
     uint32_t outWidth;

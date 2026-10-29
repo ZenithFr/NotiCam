@@ -2,16 +2,21 @@ package com.zenith.auxcam.ui
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -21,10 +26,11 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,8 +48,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -51,12 +60,14 @@ import com.zenith.auxcam.CameraActions
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.DeviceProfile
 import com.zenith.auxcam.ui.components.BottomBar
-import com.zenith.auxcam.ui.components.LensChip
+import com.zenith.auxcam.ui.components.ProSheet
 import com.zenith.auxcam.ui.components.QuickApertureRow
 import com.zenith.auxcam.ui.components.TopBar
 import com.zenith.auxcam.ui.components.Viewfinder
+import com.zenith.auxcam.ui.components.ZoomChips
 import com.zenith.auxcam.ui.components.ZoomDial
 import com.zenith.auxcam.ui.theme.CameraColors
+import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.roundToInt
@@ -88,6 +99,10 @@ fun CameraScreen(
 ) {
     var shutterCenter by remember { mutableStateOf(Offset.Zero) }
     var galleryCenter by remember { mutableStateOf(Offset.Zero) }
+
+    // Top edge of the 0.6x/1x/2x chip row, in root pixels. The zoom wheel is
+    // anchored here so its arc grows out of the chips.
+    var chipsTopPx by remember { mutableStateOf(0f) }
 
     Box(
         modifier = modifier
@@ -123,6 +138,7 @@ fun CameraScreen(
 
                 Viewfinder(
                     gridVisible = state.grid,
+                    zoom = state.zoom,
                     capturePulse = state.capturePulse,
                     focusNonce = state.focusNonce,
                     enabled = true,
@@ -135,37 +151,68 @@ fun CameraScreen(
                 )
             }
 
-            // Lens chips hug the bottom edge of the frame.
-            Row(
+            // Lens chips hug the bottom edge of the frame. One travelling disc
+            // marks the selection, so a zoom change reads as a single movement.
+            // The chips and the wheel are two states of one control: while the
+            // wheel is up the chips collapse into the arc's anchor line.
+            val chipsAlpha by animateFloatAsState(
+                targetValue = if (state.zoomActive) 0f else 1f,
+                animationSpec = CameraMotion.fade(if (state.zoomActive) 140 else 200),
+                label = "chips-alpha",
+            )
+            val chipsMorph by animateFloatAsState(
+                targetValue = if (state.zoomActive) 1f else 0f,
+                animationSpec = CameraMotion.select(),
+                label = "chips-morph",
+            )
+
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(top = 12.dp)
-                    .height(44.dp),
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
+                    .graphicsLayer {
+                        alpha = chipsAlpha
+                        val scale = 1f - 0.16f * chipsMorph
+                        scaleX = scale
+                        scaleY = scale
+                        translationY = 6.dp.toPx() * chipsMorph
+                        clip = false
+                    }
+                    .onGloballyPositioned { coords ->
+                        chipsTopPx = coords.positionInRoot().y
+                    },
+                contentAlignment = Alignment.Center,
             ) {
-                DeviceProfile.ZOOM_STOPS.forEach { stop ->
-                    LensChip(
-                        label = formatStop(stop),
-                        selected = kotlin.math.abs(state.zoom - stop) < 0.08f,
-                        onClick = { actions.onZoomSelected(stop) },
-                        modifier = Modifier.padding(horizontal = 5.dp),
-                    )
-                }
+                ZoomChips(
+                    zoom = state.zoom,
+                    onSelect = actions::onZoomSelected,
+                    stops = DeviceProfile.ZOOM_STOPS,
+                    enabled = !state.zoomActive,
+                )
             }
 
-            AnimatedVisibility(
-                visible = state.quickApertureVisible,
-                enter = fadeIn(tween(160)) + androidx.compose.animation.expandVertically(
-                    animationSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow),
-                    clip = false,
-                ),
-                exit = fadeOut(tween(120)) + androidx.compose.animation.shrinkVertically(
-                    animationSpec = tween(150),
-                    clip = false,
-                ),
+            // The ƒ row keeps its space even when hidden: animating the column
+            // height would resize the SurfaceView (and therefore the Vulkan
+            // swapchain) on every frame of the transition.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(36.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                QuickApertureRow(state = state, actions = actions)
+                AnimatedVisibility(
+                    visible = state.quickApertureVisible,
+                    enter = fadeIn(tween(170)) + slideInVertically(
+                        animationSpec = CameraMotion.slide<IntOffset>(),
+                        initialOffsetY = { it / 3 },
+                    ),
+                    exit = fadeOut(tween(120)) + slideOutVertically(
+                        animationSpec = tween<IntOffset>(140),
+                        targetOffsetY = { it / 3 },
+                    ),
+                ) {
+                    QuickApertureRow(state = state, actions = actions)
+                }
             }
 
             Box(
@@ -187,19 +234,22 @@ fun CameraScreen(
         }
 
         // ── Overlays: siblings of the column, so nothing can clip them ───────
-        AnimatedVisibility(
-            visible = state.zoomDialVisible,
-            enter = fadeIn(tween(150)) + scaleIn(
-                initialScale = 0.9f,
-                animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow),
-            ),
-            exit = fadeOut(tween(240)) + scaleOut(targetScale = 0.94f, animationSpec = tween(240)),
-            modifier = Modifier.align(Alignment.Center),
+        // The wheel: pinned so its arc lands on the chip row, and animated out of
+        // that line (scale from the top edge) so the two controls read as one
+        // object morphing rather than two widgets cross-fading.
+        ZoomWheel(
+            zoom = state.zoom,
+            visible = state.zoomActive,
+            anchorTopPx = chipsTopPx,
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
+
+        // Settings sheet: hangs from the top edge, slides down over the frame.
+        ProMenuOverlay(
+            open = state.proSheetOpen,
+            onClose = { actions.onProToggle() },
         ) {
-            ZoomDial(
-                zoom = state.zoom,
-                onRotate = actions::onZoomDialRotate,
-            )
+            ProSheet(state = state, actions = actions)
         }
 
         GalleryHandoff(
@@ -211,9 +261,6 @@ fun CameraScreen(
         )
     }
 }
-
-private fun formatStop(stop: Float): String =
-    if (stop == stop.toInt().toFloat()) "${stop.toInt()}×" else String.format("%.1f×", stop)
 
 /** Subtle black ramp behind the toolbar, replacing the old solid slab. */
 private fun Modifier.drawBottomScrim(): Modifier = this.background(
@@ -305,4 +352,135 @@ private fun GalleryHandoff(
             }
             .clip(RoundedCornerShape(12.dp)),
     )
+}
+
+/**
+ * The Pro menu, sliding up out of the bottom of the screen.
+ *
+ * It is a root-level overlay rather than part of the column on purpose:
+ *
+ *  • **No layout change** while it opens, so the `SurfaceView` (and therefore the
+ *    Vulkan swapchain) is never resized mid-animation;
+ *  • **No overlap with the 4:3 frame** — the panel's max height is the chrome band
+ *    below the viewfinder, so it slides over the controls, never over the image;
+ *  • The motion is a translate + fade + 3 % scale on one damped spring, with the
+ *    content scrolling inside if the band is short (landscape, big font scale).
+ */
+@Composable
+private fun ProMenuOverlay(
+    open: Boolean,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    Box(modifier = modifier.fillMaxSize()) {
+        // Tap-outside-to-dismiss: there is no Done button any more, so the sheet
+        // needs a second way out besides the top-bar Pro button.
+        AnimatedVisibility(
+            visible = open,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(140)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // Stops under the top bar: flash / RAW / Pro stay legible and
+                    // the Pro button keeps working as the close affordance.
+                    .windowInsetsPadding(WindowInsets.statusBars)
+                    .padding(top = TOP_BAR_HEIGHT)
+                    .background(Color.Black.copy(alpha = 0.38f))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onClose,
+                    ),
+            )
+        }
+
+        // The panel hangs just below the top bar, so the flash / RAW / Pro controls
+        // stay visible and the Pro button remains the close affordance.
+        AnimatedVisibility(
+            visible = open,
+            // Slides DOWN from behind the top bar: the panel unfolds out of the
+            // header rather than fading in place.
+            enter = fadeIn(tween(160)) + scaleIn(
+                initialScale = 0.96f,
+                transformOrigin = TransformOrigin(0.5f, 0f),
+                animationSpec = CameraMotion.slide<Float>(),
+            ) + slideInVertically(
+                animationSpec = CameraMotion.slide<IntOffset>(),
+                initialOffsetY = { -it },
+            ),
+            exit = fadeOut(tween(130)) + scaleOut(
+                targetScale = 0.96f,
+                transformOrigin = TransformOrigin(0.5f, 0f),
+                animationSpec = tween(150),
+            ) + slideOutVertically(
+                animationSpec = tween<IntOffset>(160),
+                targetOffsetY = { -it },
+            ),
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.statusBars)
+                .padding(top = TOP_BAR_HEIGHT, start = CameraSpacing.gutterWide, end = CameraSpacing.gutterWide),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                content()
+            }
+        }
+    }
+}
+
+/** Must match `TopBar`'s height so the sheet tucks directly under it. */
+private val TOP_BAR_HEIGHT = 56.dp
+
+/**
+ * The zoom wheel, anchored to the chip row and morphing out of it.
+ *
+ * `anchorTopPx` is the root-space top of the chips. The wheel is offset so its
+ * **arc** — not its bounding box — sits over the chips, and the entrance scales
+ * from the top edge so the arc appears to unfurl out of the chip line while the
+ * chips collapse into it (see the `chipsAlpha`/`chipsMorph` animation above).
+ *
+ * The wheel takes no input: zoom is pinch-only, so this never steals a touch from
+ * the shutter or the chips beneath it.
+ */
+@Composable
+private fun ZoomWheel(
+    zoom: Float,
+    visible: Boolean,
+    anchorTopPx: Float,
+    modifier: Modifier = Modifier,
+) {
+    // The arc's ends sit ~24 % of the diameter below the wheel's top edge.
+    val arcOverlapPx = with(LocalDensity.current) { 52.dp.toPx() }
+    val offsetY = (anchorTopPx - arcOverlapPx).roundToInt()
+
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(tween(140)) + scaleIn(
+            initialScale = 0.55f,
+            transformOrigin = TransformOrigin(0.5f, 0f),
+            animationSpec = CameraMotion.slide<Float>(),
+        ),
+        exit = fadeOut(tween(180)) + scaleOut(
+            targetScale = 0.7f,
+            transformOrigin = TransformOrigin(0.5f, 0f),
+            animationSpec = tween(200),
+        ),
+        modifier = modifier
+            .fillMaxWidth()
+            .offset { IntOffset(0, offsetY) },
+    ) {
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            ZoomDial(zoom = zoom)
+        }
+    }
 }

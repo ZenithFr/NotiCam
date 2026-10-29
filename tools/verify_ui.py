@@ -390,6 +390,71 @@ def check_composable_calls() -> int:
                 err(f"{where}: uses {name}() but does not import {full}")
     return checked
 
+
+# Symbols whose import cannot be inferred from their package name. A missing import
+# for one of these is an invisible-but-fatal Kotlin error when there is no compiler
+# in the loop, so they are checked explicitly.
+COMPOSE_SYMBOLS = {
+    "Offset": "androidx.compose.ui.geometry.Offset",
+    "Size": "androidx.compose.ui.geometry.Size",
+    "CornerRadius": "androidx.compose.ui.geometry.CornerRadius",
+    "Color": "androidx.compose.ui.graphics.Color",
+    "Brush": "androidx.compose.ui.graphics.Brush",
+    "StrokeCap": "androidx.compose.ui.graphics.StrokeCap",
+    "StrokeJoin": "androidx.compose.ui.graphics.StrokeJoin",
+    "TransformOrigin": "androidx.compose.ui.graphics.TransformOrigin",
+    "ImageBitmap": "androidx.compose.ui.graphics.ImageBitmap",
+    "graphicsLayer": "androidx.compose.ui.graphics.graphicsLayer",
+    "IntOffset": "androidx.compose.ui.unit.IntOffset",
+    "AnimatedVisibility": "androidx.compose.animation.AnimatedVisibility",
+    "Animatable": "androidx.compose.animation.core.Animatable",
+    "animateFloatAsState": "androidx.compose.animation.core.animateFloatAsState",
+    "fadeIn": "androidx.compose.animation.fadeIn",
+    "fadeOut": "androidx.compose.animation.fadeOut",
+    "scaleIn": "androidx.compose.animation.scaleIn",
+    "scaleOut": "androidx.compose.animation.scaleOut",
+    "slideInVertically": "androidx.compose.animation.slideInVertically",
+    "slideOutVertically": "androidx.compose.animation.slideOutVertically",
+    "LocalDensity": "androidx.compose.ui.platform.LocalDensity",
+    "TextOverflow": "androidx.compose.ui.text.style.TextOverflow",
+    "ContentScale": "androidx.compose.ui.layout.ContentScale",
+    "pointerInput": "androidx.compose.ui.input.pointer.pointerInput",
+    "onGloballyPositioned": "androidx.compose.ui.layout.onGloballyPositioned",
+    "verticalScroll": "androidx.compose.foundation.verticalScroll",
+    "rememberScrollState": "androidx.compose.foundation.rememberScrollState",
+    "detectDragGestures": "androidx.compose.foundation.gestures.detectDragGestures",
+    "detectTapGestures": "androidx.compose.foundation.gestures.detectTapGestures",
+    "detectTransformGestures": "androidx.compose.foundation.gestures.detectTransformGestures",
+}
+
+
+def check_compose_symbols() -> int:
+    checked = 0
+    for path in walk_sources():
+        if not path.endswith(".kt"):
+            continue
+        where = os.path.relpath(path, ROOT)
+        text = open(path, encoding="utf-8").read()
+        code = strip_code(text)
+        imports = set(re.findall(r"^import\s+([\w.]+)$", text, re.MULTILINE))
+        for symbol, import_path in COMPOSE_SYMBOLS.items():
+            # Matches bare uses (`Offset`), extension calls (`Modifier.graphicsLayer`)
+            # and import lines — the import check below filters the last case.
+            if not re.search(r"(?<![\w])" + symbol + r"\b", code):
+                continue
+            checked += 1
+            # Any import of that simple name satisfies it (android.graphics.Color
+            # is a legitimate alternative to the Compose one).
+            if import_path in imports:
+                continue
+            if any(i.rsplit(".", 1)[-1] == symbol for i in imports):
+                continue
+            # a same-file declaration wins over an import
+            if re.search(r"\b(fun|val|var|class|object)\s+" + symbol + r"\b", code):
+                continue
+            err(f"{where}: uses {symbol} but does not import {import_path}")
+    return checked
+
 # ───────────────────────────────────────────────────────────────────────────
 # main
 # ───────────────────────────────────────────────────────────────────────────
@@ -400,6 +465,7 @@ def main() -> int:
     imports = check_imports()
     members = check_members()
     composables = check_composable_calls()
+    symbols = check_compose_symbols()
 
     print(f"· resource definitions : {sum(len(v) for v in defined.values())}")
     print(f"· resource references  : {refs}")
@@ -407,6 +473,7 @@ def main() -> int:
     print(f"· project imports      : {imports}")
     print(f"· member cross-checks  : {members}")
     print(f"· composable imports   : {composables}")
+    print(f"· compose symbol imports: {symbols}")
 
     if errors:
         print(f"\n✗ {len(errors)} problem(s):")
