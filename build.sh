@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
+# Prefer JDK 17 if installed to avoid D8 bug on JDK 21 inner class attributes
+if [ -d "/home/zenith/.local/share/mise/installs/java/temurin-17.0.21+9/bin" ]; then
+    export PATH="/home/zenith/.local/share/mise/installs/java/temurin-17.0.21+9/bin:$PATH"
+fi
+
 BUILD_TOOLS_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/home/zenith/Android/Sdk}}"
 NDK_DIR="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-/home/zenith/Work/android-ndk-r27b}}"
 BUILD_TOOLS="$BUILD_TOOLS_DIR/build-tools/34.0.0"

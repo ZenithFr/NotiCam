@@ -6,6 +6,9 @@
 -->
 <resources>
 
+    <!-- Base token root -->
+    <style name="Ios" />
+
     <!-- Base: upright, white, system sans -->
     <style name="Ios.Text">
         <item name="android:fontFamily">sans-serif</item>
@@ -69,6 +72,8 @@
 
     <!-- Glass circle icon button (flash / pro drawer / lens flip) -->
     <style name="Ios.IconButton">
+        <item name="android:layout_width">@dimen/ios_control_touch</item>
+        <item name="android:layout_height">@dimen/ios_control_touch</item>
         <item name="android:padding">12dp</item>
         <item name="android:scaleType">fitCenter</item>
         <item name="android:background">@drawable/ios_circle_ripple</item>

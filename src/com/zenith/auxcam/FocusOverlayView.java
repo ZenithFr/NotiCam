@@ -38,12 +38,13 @@ public class FocusOverlayView extends View {
     private ValueAnimator mAppearAnimator;
     private ValueAnimator mFadeAnimator;
 
-    private final Runnable mFadeOutRunnable = new Runnable() {
+    private final class FadeOutRunnable implements Runnable {
         @Override
         public void run() {
             fadeOut();
         }
-    };
+    }
+    private final Runnable mFadeOutRunnable = new FadeOutRunnable();
 
     public FocusOverlayView(Context context) {
         super(context);

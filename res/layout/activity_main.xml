@@ -463,6 +463,8 @@
                 <ImageButton
                     android:id="@+id/btn_switch_cam"
                     style="@style/Ios.IconButton"
+                    android:layout_width="@dimen/ios_control_touch"
+                    android:layout_height="@dimen/ios_control_touch"
                     android:src="@drawable/ic_camera_flip"
                     android:contentDescription="@string/switch_lens" />
             </LinearLayout>

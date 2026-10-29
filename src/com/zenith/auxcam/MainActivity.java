@@ -30,6 +30,7 @@ import android.view.ScaleGestureDetector;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
@@ -225,8 +226,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         applyModeVisuals(false);
 
         if (mPreviewView != null) {
-            mPreviewView.setAspectRatio(1440, 1080);
+            mPreviewView.setAspectRatio(1080, 1440);
             mPreviewView.getHolder().addCallback(this);
+        }
+        if (mViewfinder != null) {
+            int screenW = getResources().getDisplayMetrics().widthPixels;
+            int vfH = Math.round(screenW * 4.0f / 3.0f);
+            ViewGroup.LayoutParams lp = mViewfinder.getLayoutParams();
+            if (lp != null) {
+                lp.width = screenW;
+                lp.height = vfH;
+                mViewfinder.setLayoutParams(lp);
+            }
         }
 
         discoverLenses();
