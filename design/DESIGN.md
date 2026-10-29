@@ -19,7 +19,7 @@ back to code.
 | **The frame is never stretched *or* sideways.** | The sensor streams 1440 × 1080; `composite.comp` rotates it **90° clockwise** into the swapchain, so the box is 3:4 portrait and the scene is upright in the hand. `CameraScreen` fits a box of exactly `DeviceProfile.previewAspect` inside the leftover slot and that box *is* the `SurfaceView` extent. |
 | **Pinch is the only zoom input.** | The wheel is a read-out, not a control: it has no pointer input, so nothing can be dragged sideways and no part of the framebuffer can be occluded by a touch target. |
 | **One accent colour.** | `CameraColors.Yellow` (`#FFD60A`) marks selection (active mode, ƒ needle, "Done") and nothing else. `Red` (`#FF453A`) is reserved for recording. |
-| **Glass, not slabs.** | `CameraColors.Glass` capsules with a hairline **plus a frosted texture** (`ui/effects/MatteGlass.kt`): a sheen along the top edge and a 64×64 grain tile repeated by the GPU. Flat translucency looked like a tinted rectangle. |
+| **Matte transparency, not glassmorphism.** | Chrome is a *thin flat shade* — 8 % white over the dark surface, 14 % black over the live scene — carrying a 64×64 grain tile repeated by the GPU (`ui/effects/Matte.kt`). No sheen, no hairline rim, no backdrop blur: a specular top-edge highlight is what makes a surface read as glass, so there isn't one. The grain alone is what tells you a control is there. |
 | **Motion has meaning.** | Everything is a Compose spring (`dampingRatio` 0.6–0.9, `StiffnessLow`…`StiffnessHigh`), 110–460 ms. No `LinearInterpolator`, no `ValueAnimator`. |
 | **Nothing clips.** | Every animated control composes at its *maximum* size and sets `clip = false` on its `graphicsLayer`; expansion animations run with `clip = false`. The shutter's pulse ring is drawn inside its own 96 dp box. |
 | **Thumb-reachable.** | Shutter, modes, lens chips and the ƒ row sit in the bottom half; flash/Pro in the top corners; everything ≥ 48 dp of touch target. |
@@ -65,11 +65,30 @@ whole screen without being clipped by the toolbar or the frame.
 | `LabelSecondary` | 65 % | status pill text |
 | `LabelTertiary` | 40 % | unselected modes, section headers, captions |
 | `LabelQuaternary` | 25 % | slider end labels |
-| `Glass` | 55 % `#1C1C1E` | circular buttons, capsules |
-| `GlassStrong` | 95 % `#1C1C1E` | Pro sheet, zoom dial |
-| `Separator` | 12 % white | 0.5 dp hairlines |
-| `SeparatorStrong` | 24 % white | panel and gallery-tile outlines |
+| `Matte` | 8 % white | circular buttons, chips, RAW, gallery tile — flat film over the black surface |
+| `MatteScrim` | 14 % black | Pro sheet and zoom dial — flat shade over the live scene |
+| `Separator` | 12 % white | internal hairlines *between rows inside* a panel only — never a surface rim |
 | `SliderTrack` / `SliderFill` | 24 % / 100 % white | iOS slider |
+
+### Legibility with almost no shade
+
+The flat shade is deliberately thin, so it does **less** work than a frosted panel.
+Measured on `design/sample_portrait.jpg` (the bright bokeh frame the mock ships
+with), white label text over the sheet area gives:
+
+| Shade over the scene | Mean contrast | Brightest 10 % |
+|---|---|---|
+| 8 % black | 3.65 : 1 | 1.95 : 1 |
+| **14 % black (shipping)** | **3.86 : 1** | **2.08 : 1** |
+| 35 % black | 4.82 : 1 | 2.66 : 1 |
+
+Two things follow. First, adding shade has sharply diminishing returns — going from
+14 % to 35 % buys about one contrast step, while costing most of the see-through
+quality, which is why the thin value is the right trade. Second, small text over a
+blown-out sky will be marginal whatever the panel does; the lever there is glyph
+contrast (a 1 px ink shadow on the type), not a heavier surface. The mock keeps the
+thin shade and accepts the trade, the same way the iOS camera HUD puts white glyphs
+straight over the scene.
 
 ### Spacing — `CameraSpacing`
 8-pt grid. `gutter` 16 dp (chrome), `gutterWide` 24 dp (bottom bar), `touch`
@@ -89,7 +108,7 @@ whole screen without being clipped by the toolbar or the frame.
 |---|---|---|
 | `ShutterButton` | `ShutterButton.kt` | 4 dp white ring, 3.5 dp gap, solid disc, red dot while recording. Press = spring to 0.86, release = `DampingRatioMediumBouncy`. The capture pulse ring expands *into the 24 dp margin* of the 96 dp box, so it is never sliced. |
 | `Viewfinder` | `Viewfinder.kt` | `AndroidView(SurfaceView)` filling the box the caller sized to `previewAspect`. Rule-of-thirds grid, AE/AF reticle (spring-in, pivot at the tap), capture bloom, tap-to-focus + pinch-to-zoom detectors. |
-| `GlassIconButton` | `Controls.kt` | 44 dp glass circle inside a 48 dp touch target; press scales to 0.90 with `clip = false`. |
+| `MatteIconButton` | `Controls.kt` | 44 dp flat-film disc inside a 48 dp touch target; press scales to 0.90 with `clip = false`. |
 | `StatusPill` | `Controls.kt` | Black 42 % capsule, `AnimatedContent` crossfade on text change. |
 | `ZoomChips` | `ZoomChips.kt` | **UW** (+ `0.6×` beneath) / 1× / 2× with a single white disc travelling between positions; `zoom` is the live engine value, so a pinch moves it too. Between stops the disc fades and the nearest label brightens. While the wheel is up the row fades to 0 and shrinks to 0.84 — it *becomes* the wheel. |
 | `ModeCarousel` | `Controls.kt` | `PHOTO · PORTRAIT · PRO`, `Yellow` for the selection, `animateColorAsState`. |

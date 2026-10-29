@@ -20,8 +20,8 @@ import androidx.compose.ui.unit.sp
  * Apple Camera tokens, expressed as Compose values.
  *
  * Everything the chrome draws comes from here so the capture surface cannot
- * drift away from the design language: one accent (systemYellow), translucent
- * near-black glass, hairline separators and an SF-style type ramp.
+ * drift away from the design language: one accent (systemYellow), flat
+ * see-through matte film, hairline separators and an SF-style type ramp.
  */
 object CameraColors {
     /** iOS systemYellow (dark appearance) — selection only. */
@@ -37,15 +37,28 @@ object CameraColors {
     val LabelQuaternary = Color(0x40FFFFFF)
     val OnLight = Color.Black
 
-    /** 55 % #1C1C1E — glass controls floating over the scene. */
-    val Glass = Color(0x8C1C1C1E)
-    /** 95 % #1C1C1E — the Pro sheet. */
-    val GlassStrong = Color(0xF21C1C1E)
-    /** Pressed / ripple tint. */
-    val GlassPressed = Color(0x33FFFFFF)
+    /**
+     * Flat film over dark chrome — 8 % white.
+     *
+     * The chrome is transparent: what tells you a control is there is a barely
+     * tinted, uniformly shaded disc plus the matte grain (see `effects/Matte.kt`),
+     * not an opaque card. Over the black capture surface a *white* film is used so
+     * the disc still separates from the background; a black shade would be
+     * invisible there.
+     */
+    val Matte = Color(0x14FFFFFF)
 
+    /**
+     * Flat shade over the live scene — 14 % black.
+     *
+     * Same idea inverted: the settings sheet hangs over the preview, where a white
+     * film would wash the picture out. Darkening keeps the scene visible through
+     * the panel while white labels stay legible against it.
+     */
+    val MatteScrim = Color(0x24000000)
+
+    /** Internal hairline *between rows inside* a panel. Never a surface rim. */
     val Separator = Color(0x1FFFFFFF)
-    val SeparatorStrong = Color(0x33FFFFFF)
     val SliderTrack = Color(0x3DFFFFFF)
     val SliderFill = Color.White
     val Scrim = Color(0x99000000)

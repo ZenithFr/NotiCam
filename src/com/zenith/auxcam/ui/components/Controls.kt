@@ -14,7 +14,6 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -68,7 +67,7 @@ import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
 import com.zenith.auxcam.FrameRatio
 import com.zenith.auxcam.Resolution
-import com.zenith.auxcam.ui.effects.matteGlass
+import com.zenith.auxcam.ui.effects.matte
 import com.zenith.auxcam.ui.effects.rememberMatteGrain
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.icons.NotiIcons
@@ -80,14 +79,16 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
- * Glass icon button.
+ * Matte icon button.
  *
- * The 44 dp circle lives inside a 48 dp touch target and only the circle is
- * scaled on press (`clip = false`), so the glyph is never cropped by the
- * neighbouring layout while the animation runs.
+ * A flat film disc (8 % white) with the matte grain on it — no rim, no sheen, no
+ * backdrop blur, so on a bright scene you read the glyph against the picture
+ * rather than against a card. The 44 dp circle lives inside a 48 dp touch target
+ * and only the circle is scaled on press (`clip = false`), so the glyph is never
+ * cropped by the neighbouring layout while the animation runs.
  */
 @Composable
-fun GlassIconButton(
+fun MatteIconButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
@@ -103,17 +104,17 @@ fun GlassIconButton(
         targetValue = if (pressed) 0.86f else 1f,
         // Down: crisp. Up: a touch of overshoot. This asymmetry is the whole trick.
         animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
-        label = "glass-press",
+        label = "matte-press",
     )
     val background by animateColorAsState(
-        targetValue = if (selected) Color.White else CameraColors.Glass,
+        targetValue = if (selected) Color.White else CameraColors.Matte,
         animationSpec = tween(180),
-        label = "glass-bg",
+        label = "matte-bg",
     )
     val foreground by animateColorAsState(
         targetValue = if (selected) Color.Black else tint,
         animationSpec = tween(180),
-        label = "glass-fg",
+        label = "matte-fg",
     )
 
     Box(
@@ -138,8 +139,7 @@ fun GlassIconButton(
                     clip = false
                 }
                 .background(background, CircleShape)
-                .border(0.5.dp, CameraColors.Separator, CircleShape)
-                .matteGlass(grain, CircleShape, strength = if (selected) 0.35f else 1f),
+                .matte(grain, CircleShape, strength = if (selected) 0.35f else 1f),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -158,7 +158,7 @@ fun StatusPill(text: String, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .heightIn(min = 30.dp)
-            .background(Color.Black.copy(alpha = 0.42f), RoundedCornerShape(15.dp))
+            .background(CameraColors.Matte, RoundedCornerShape(15.dp))
             .padding(horizontal = 12.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -194,7 +194,7 @@ fun LensChip(
         label = "chip-press",
     )
     val background by animateColorAsState(
-        targetValue = if (selected) Color.White else CameraColors.Glass,
+        targetValue = if (selected) Color.White else CameraColors.Matte,
         animationSpec = tween(200),
         label = "chip-bg",
     )
@@ -213,7 +213,6 @@ fun LensChip(
                 clip = false
             }
             .background(background, CircleShape)
-            .border(0.5.dp, CameraColors.Separator, CircleShape)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -374,7 +373,7 @@ fun TogglePill(
         label = "toggle-press",
     )
     val background by animateColorAsState(
-        targetValue = if (active) Color.White else CameraColors.Glass,
+        targetValue = if (active) Color.White else CameraColors.Matte,
         animationSpec = tween(180),
         label = "toggle-bg",
     )
@@ -393,7 +392,6 @@ fun TogglePill(
                 clip = false
             }
             .background(background, RoundedCornerShape(CameraSpacing.capsuleHeight / 2))
-            .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(CameraSpacing.capsuleHeight / 2))
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -447,9 +445,10 @@ fun GalleryTile(
                 clip = false
             }
             .clip(shape)
-            .background(CameraColors.Label.copy(alpha = 0.08f), shape)
-            .border(0.5.dp, CameraColors.SeparatorStrong, shape)
-            .matteGlass(grain, shape, strength = 0.8f)
+            .background(CameraColors.Matte, shape)
+            // Lighter tooth than the chrome: a captured frame sits under this, and
+            // grain over a photo should read as a matte print, not as noise.
+            .matte(grain, shape, strength = 0.5f)
             .clickable(
                 interactionSource = pressed,
                 indication = null,
@@ -507,13 +506,8 @@ fun ProSheet(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(CameraColors.GlassStrong, RoundedCornerShape(CameraSpacing.panelRadius))
-            .border(
-                width = 0.5.dp,
-                color = CameraColors.SeparatorStrong,
-                shape = RoundedCornerShape(CameraSpacing.panelRadius),
-            )
-            .matteGlass(grain, RoundedCornerShape(CameraSpacing.panelRadius))
+            .background(CameraColors.MatteScrim, RoundedCornerShape(CameraSpacing.panelRadius))
+            .matte(grain, RoundedCornerShape(CameraSpacing.panelRadius))
             .padding(horizontal = 20.dp, vertical = 18.dp),
     ) {
         // ── Framing: 1:1 · 4:3 · 16:9 · Full ────────────────────────────────
@@ -668,7 +662,7 @@ private fun SegmentPill(
         label = "segment-press",
     )
     val bg by animateColorAsState(
-        targetValue = if (selected) Color.White else CameraColors.Glass,
+        targetValue = if (selected) Color.White else CameraColors.Matte,
         animationSpec = tween(190),
         label = "segment-bg",
     )
@@ -687,7 +681,6 @@ private fun SegmentPill(
                 clip = false
             }
             .background(bg, RoundedCornerShape(16.dp))
-            .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(16.dp))
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -721,7 +714,7 @@ private fun TelephotoPill(
         label = "tele-press",
     )
     val bg by animateColorAsState(
-        targetValue = if (active) Color.White else CameraColors.Glass,
+        targetValue = if (active) Color.White else CameraColors.Matte,
         animationSpec = tween(190),
         label = "tele-bg",
     )
@@ -740,7 +733,6 @@ private fun TelephotoPill(
                 clip = false
             }
             .background(bg, RoundedCornerShape(18.dp))
-            .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(18.dp))
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -869,7 +861,7 @@ fun TopBar(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            GlassIconButton(
+            MatteIconButton(
                 icon = when (state.flash) {
                     FlashMode.Off -> NotiIcons.FlashOff
                     FlashMode.Auto -> NotiIcons.FlashAuto
@@ -897,7 +889,7 @@ fun TopBar(
             modifier = Modifier.align(Alignment.Center),
         )
 
-        GlassIconButton(
+        MatteIconButton(
             icon = if (state.proSheetOpen) NotiIcons.Close else NotiIcons.Sliders,
             contentDescription = "Pro controls",
             onClick = {
@@ -932,7 +924,7 @@ fun RawBadge(
         label = "raw-press",
     )
     val background by animateColorAsState(
-        targetValue = if (active) Color.White else CameraColors.Glass,
+        targetValue = if (active) Color.White else CameraColors.Matte,
         animationSpec = tween(180),
         label = "raw-bg",
     )
@@ -957,8 +949,7 @@ fun RawBadge(
                 clip = false
             }
             .background(background, RoundedCornerShape(15.dp))
-            .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(15.dp))
-            .matteGlass(grain, RoundedCornerShape(15.dp), strength = 0.7f)
+            .matte(grain, RoundedCornerShape(15.dp), strength = 0.7f)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -1092,7 +1083,7 @@ fun BottomBar(
             Spacer(Modifier.weight(1f))
 
             if (state.lensCount > 1) {
-                GlassIconButton(
+                MatteIconButton(
                     icon = NotiIcons.FlipCamera,
                     contentDescription = "Switch lens",
                     onClick = { actions.onSwitchLens() },

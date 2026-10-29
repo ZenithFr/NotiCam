@@ -46,7 +46,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
@@ -259,11 +258,10 @@ fun CameraScreen(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .drawBottomScrim(),
-            ) {
+            // No scrim behind the bar: it already sits on the black capture
+            // surface, so the old black 55->92 % ramp was shading black with black
+            // and only added a visible band edge. Flat means flat.
+            Box(modifier = Modifier.fillMaxWidth()) {
                 BottomBar(
                     state = state,
                     actions = actions,
@@ -302,15 +300,6 @@ fun CameraScreen(
         )
     }
 }
-
-/** Subtle black ramp behind the toolbar, replacing the old solid slab. */
-private fun Modifier.drawBottomScrim(): Modifier = this.background(
-    Brush.verticalGradient(
-        0f to Color.Transparent,
-        0.28f to CameraColors.Black.copy(alpha = 0.55f),
-        1f to CameraColors.Black.copy(alpha = 0.92f),
-    ),
-)
 
 /** A single line under the top bar when running on non-target hardware. */
 @Composable
@@ -429,7 +418,7 @@ private fun ProMenuOverlay(
                     // the Pro button keeps working as the close affordance.
                     .windowInsetsPadding(WindowInsets.statusBars)
                     .padding(top = TOP_BAR_HEIGHT)
-                    .background(Color.Black.copy(alpha = 0.38f))
+                    .background(Color.Black.copy(alpha = 0.30f))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,

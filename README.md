@@ -35,7 +35,7 @@ the shipping layout lives in [`design/index.html`](design/index.html).
 | | Before | After |
 |---|---|---|
 | **Stack** | `Activity` + `FrameLayout` + hand-written `View` subclasses | `ComponentActivity` → `CameraController` → `CameraScreen`; one immutable `CameraUiState` |
-| **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: floating glass controls, one accent (`#FFD60A`) |
+| **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: flat see-through matte film, no rims, one accent (`#FFD60A`) |
 | **Layout** | Absolute chrome painted over the preview | `Column`: top bar → `weight(1f)` frame → chips → ƒ row → bottom bar. **Nothing can overlap the 4:3 framebuffer** |
 | **Preview geometry** | 4:3 landscape view (sideways), swapchain frozen at first size → stretched image | `composite.comp` rotates the sensor frame 90° CW → 3:4 portrait, upright; frame measured to `previewAspect`, swapchain recreated on extent change, aspect-fit as a second guarantee |
 | **Motion** | `ValueAnimator` + interpolators, several controls clipped mid-animation | One `CameraMotion` vocabulary: crisp press / springy release, slide-in Pro menu, travelling zoom-chip indicator, arc zoom wheel with detents, `clip = false` everywhere it can matter |
@@ -54,7 +54,7 @@ Highlights of the implementation:
 - **`ui/theme/Theme.kt`** — `CameraColors`, `CameraSpacing`, `CameraType`.
 - **`ui/components/`** — `ShutterButton`, `Viewfinder`, `Controls` (top bar, mode carousel, sliders, Pro sheet, gallery tile, bottom bar), `ZoomChips` (travelling indicator), `ZoomDial` (arc wheel).
 - **`ui/feedback/Haptics.kt`** — the soft haptic vocabulary.
-- **`ui/effects/MatteGlass.kt`** — frosted-glass sheen + GPU-tiled grain.
+- **`ui/effects/Matte.kt`** — the matte grain: one GPU-tiled 64×64 noise bitmap, no sheen, no rim, no blur.
 - **`ui/theme/Theme.kt` → `CameraMotion`** — every spring and tween in the app.
 - **`ui/icons/NotiIcons.kt`** — the icon set.
 - **`DeviceProfile.kt`** — every CMF Phone 2 Pro constant (display, sensor streams, lens ladder, camera id).
