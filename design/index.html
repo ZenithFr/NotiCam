@@ -18,20 +18,32 @@
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
   html,body{margin:0;height:100%}
+  /* The page is exactly one viewport tall and never scrolls: the phone is fitted
+     to whatever space is left (`fitDevice()`), so the *entire* screen is always
+     visible no matter how short the preview pane is. Centring with
+     `align-items:center` used to clip the TOP of the phone in short panes. */
   body{
     background:radial-gradient(1200px 700px at 30% -10%, #1b1b22 0%, #0a0a0c 55%, #060607 100%);
     color:#fff;
     font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
-    display:flex;align-items:center;justify-content:center;gap:64px;
-    padding:40px 32px;min-height:100%;
+    display:flex;align-items:stretch;justify-content:center;gap:44px;
+    padding:20px;height:100vh;height:100dvh;overflow:hidden;
   }
 
   /* ─────────── phone shell ─────────── */
+  /* The slot is a plain flex box; the phone inside is absolutely positioned and
+     scaled, so the fit is never circular (a transformed child cannot size it). */
+  .phone-slot{
+    position:relative;flex:1 1 auto;min-width:0;min-height:0;height:100%;
+  }
   .device{
-    position:relative;width:390px;height:844px;border-radius:56px;
+    position:absolute;left:50%;top:50%;
+    width:390px;height:844px;border-radius:56px;
+    transform:translate(-50%,-50%) scale(var(--phone-scale,1));
+    transform-origin:center center;
     background:#000;
     box-shadow:0 0 0 11px #16161a, 0 0 0 13px #2c2c32, 0 40px 90px -20px rgba(0,0,0,.9), 0 0 140px rgba(120,140,255,.06);
-    overflow:hidden;flex:0 0 auto;
+    overflow:hidden;
   }
   .island{
     position:absolute;top:11px;left:50%;transform:translateX(-50%);
@@ -236,7 +248,11 @@
   .dial svg.ticks{position:absolute;inset:0}
 
   /* ─────────── side spec panel ─────────── */
-  .spec{max-width:340px;color:rgba(255,255,255,.72);font-size:13px;line-height:1.6}
+  .spec{
+    flex:0 1 360px;max-width:360px;max-height:100%;overflow:auto;
+    color:rgba(255,255,255,.72);font-size:13px;line-height:1.6;
+    overscroll-behavior:contain;
+  }
   .spec h1{font-size:24px;letter-spacing:-.02em;color:#fff;margin:0 0 4px;font-weight:600}
   .spec h1 span{color:var(--yellow)}
   .spec p.lede{margin:0 0 22px;color:rgba(255,255,255,.5);font-size:13px}
@@ -258,14 +274,21 @@
     color:rgba(255,255,255,.7)
   }
   @media (max-width:1080px){
-    body{flex-direction:column;gap:36px;padding:24px 16px 60px}
-    .spec{max-width:390px}
-    .device{transform:scale(.92);transform-origin:top center}
+    body{flex-direction:column;gap:18px;padding:16px}
+    /* the phone keeps the roomy part of a narrow pane; the notes scroll */
+    .phone-slot{flex:1 1 auto;order:1}
+    .spec{flex:0 0 auto;order:2;max-width:560px;max-height:30%;margin:0 auto;width:100%}
+  }
+  /* On a short pane the app preview wins: the notes are supplementary, the phone
+     is the deliverable. */
+  @media (max-height:760px){
+    .spec{display:none}
   }
 </style>
 </head>
 <body>
 
+<div class="phone-slot" id="phoneSlot">
 <div class="device" id="device">
   <div class="island"></div>
   <div class="status">
@@ -387,6 +410,7 @@
 
   <img class="flyer" id="flyer" src="sample_portrait.jpg" alt="" />
 </div>
+</div><!-- /phone-slot -->
 
 <div class="spec">
   <h1>NotiCam <span>· Apple Camera</span></h1>
@@ -462,20 +486,58 @@
 
   const $ = id => document.getElementById(id);
 
+  // ── device fitting ───────────────────────────────────────────────────────
+  // The mock is drawn at its true size (390 x 844 CSS px) and scaled to fit
+  // whatever box the preview pane gives it, so the whole screen is always
+  // visible — top bar through shutter row — at any pane size.
+  const PHONE_W = 390, PHONE_H = 844, PHONE_RING = 15;
+  let phoneScale = 1;
+
+  function fitDevice() {
+    const slot = $("phoneSlot"), device = $("device");
+    if (!slot || !device) return;
+    // clientWidth/Height are layout px (unaffected by the transform we set).
+    const w = slot.clientWidth, h = slot.clientHeight;
+    if (!w || !h) return;
+    const s = Math.min(
+      (w - 8) / (PHONE_W + PHONE_RING * 2),
+      (h - 8) / (PHONE_H + PHONE_RING * 2),
+      1
+    );
+    phoneScale = Math.max(0.2, s);
+    device.style.setProperty("--phone-scale", phoneScale.toFixed(4));
+  }
+
+  // Screen px -> phone-local px (the reverse of `transform: scale()`).
+  const toLocal = v => v / (phoneScale || 1);
+
   // ── frame fitting: 4:3 inside whatever space the chrome leaves ────────────
   function fitStage() {
-    const stage = $("stage");
-    const frame = $("viewfinder");
+    const stage = $("stage"), frame = $("viewfinder");
     if (!stage || !frame) return;
-    const r = stage.getBoundingClientRect();
-    if (!r.width || !r.height) return;
-    const w = Math.min(r.width, (r.height * 4) / 3);
-    frame.style.width = w + "px";
-    frame.style.height = (w * 3) / 4 + "px";
+    // Layout px on purpose: getBoundingClientRect() would return *scaled* px.
+    const w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    const fw = Math.min(w, (h * 4) / 3);
+    frame.style.width = fw + "px";
+    frame.style.height = (fw * 3) / 4 + "px";
   }
-  addEventListener("resize", fitStage);
-  if (typeof ResizeObserver === "function") new ResizeObserver(fitStage).observe($("stage"));
-  addEventListener("load", fitStage);
+
+  function relayout() {
+    fitDevice();
+    // The stage size only changes after the new scale is applied.
+    requestAnimationFrame(fitStage);
+  }
+
+  addEventListener("resize", relayout);
+  addEventListener("orientationchange", relayout);
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(relayout);
+    ro.observe($("phoneSlot"));
+    ro.observe($("stage"));
+  }
+  addEventListener("load", relayout);
+  relayout();
   const el = {
     flash: $("flash"), pro: $("pro"), status: $("status"), flip: $("flip"),
     sheet: $("sheet"), done: $("doneBtn"), grid: $("grid"),
@@ -697,7 +759,9 @@
   // ── tap to focus ─────────────────────────────────────────────────────────
   el.viewfinder.addEventListener("pointerdown", e => {
     const r = el.viewfinder.getBoundingClientRect();
-    const x = e.clientX - r.left, y = e.clientY - r.top;
+    // The phone is scaled by `fitDevice()`, so screen deltas must be divided
+    // back down to the phone's own coordinate space.
+    const x = toLocal(e.clientX - r.left), y = toLocal(e.clientY - r.top);
     el.reticle.style.left = x + "px";
     el.reticle.style.top = y + "px";
     el.reticle.classList.remove("show");
@@ -730,10 +794,13 @@
     const dr = $("device").getBoundingClientRect();
     const sr = el.shutter.getBoundingClientRect();
     const gr = el.gallery.getBoundingClientRect();
-    const sx = sr.left - dr.left + sr.width / 2;
-    const sy = sr.top - dr.top + sr.height / 2;
-    const gx = gr.left - dr.left + gr.width / 2;
-    const gy = gr.top - dr.top + gr.height / 2;
+    // Phone-local coordinates (see toLocal): the flyer lives inside .device and
+    // is not affected by the phone's transform, so scale must be divided out.
+    const sx = toLocal(sr.left - dr.left + sr.width / 2);
+    const sy = toLocal(sr.top - dr.top + sr.height / 2);
+    const gx = toLocal(gr.left - dr.left + gr.width / 2);
+    const gy = toLocal(gr.top - dr.top + gr.height / 2);
+    const galleryW = toLocal(gr.width);
 
     el.flyer.style.left = (sx - 48) + "px";
     el.flyer.style.top = (sy - 48) + "px";
@@ -744,7 +811,7 @@
       [
         { transform: "scale(.72)", opacity: 0, offset: 0 },
         { transform: "scale(1)", opacity: 1, offset: .28 },
-        { transform: `translate(${gx - sx}px, ${gy - sy}px) scale(${gr.width / 96})`, opacity: 1, offset: 1 }
+        { transform: `translate(${gx - sx}px, ${gy - sy}px) scale(${galleryW / 96})`, opacity: 1, offset: 1 }
       ],
       { duration: 470, easing: "cubic-bezier(.25,.9,.3,1)", fill: "forwards" }
     );
