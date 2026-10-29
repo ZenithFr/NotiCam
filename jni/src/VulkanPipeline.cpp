@@ -329,6 +329,14 @@ bool VulkanPipeline::initPreviewResources() {
         vkAllocateCommandBuffers(mDevice, &cbInfo, mPreviewCmds);
     }
 
+    if (mPreviewQueryPool == VK_NULL_HANDLE) {
+        VkQueryPoolCreateInfo qpInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
+        qpInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        qpInfo.queryCount = 4 * MAX_FRAMES_IN_FLIGHT;
+        vkCreateQueryPool(mDevice, &qpInfo, nullptr, &mPreviewQueryPool);
+        LOGI("Created mPreviewQueryPool with %d query slots", 4 * MAX_FRAMES_IN_FLIGHT);
+    }
+
     // Allocate preview composite descriptor set
     VkDescriptorSetAllocateInfo dsAllocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
     dsAllocInfo.descriptorPool = mStillDescPool;
@@ -511,6 +519,12 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     VkCommandBufferBeginInfo bInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(curCmd, &bInfo);
 
+    uint32_t qBase = mCurrentFrame * 4;
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(curCmd, mPreviewQueryPool, qBase, 4);
+        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mPreviewQueryPool, qBase + 0);
+    }
+
     auto transition = [&](VkImage img, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAcc, VkAccessFlags dstAcc, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
         VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -565,6 +579,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     vkCmdDispatch(curCmd, gxWork, gyWork, 1);
 
     vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 1);
+    }
 
     // 32-tap Gather Pass
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
@@ -573,6 +590,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     vkCmdDispatch(curCmd, gxWork, gyWork, 1);
 
     vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 2);
+    }
 
     // Composite Pass (Preview Viewport)
     uint32_t gxComp = (mSwapchainExtent.width + 15) / 16;
@@ -594,6 +614,10 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     transition(mSwapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_TRANSFER_BIT, mPreviewQueryPool, qBase + 3);
+    }
+
     vkEndCommandBuffer(curCmd);
 
     // 6. Submit with Semaphore
@@ -607,9 +631,13 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &mRenderFinishedSemaphores[mCurrentFrame];
 
+    auto tSubmit = std::chrono::high_resolution_clock::now();
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
         vkQueueSubmit(mComputeQueue, 1, &submitInfo, mRenderFences[mCurrentFrame]);
+
+        // Synchronous wait on fence: guarantees GPU has completely rendered before present
+        vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX);
 
         // 7. Present to Android SurfaceView
         VkPresentInfoKHR presentInfo{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -620,6 +648,50 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         presentInfo.pImageIndices = &imageIndex;
 
         vkQueuePresentKHR(mComputeQueue, &presentInfo);
+    }
+    auto tPresent = std::chrono::high_resolution_clock::now();
+    double submitToPresentMs = std::chrono::duration<double, std::milli>(tPresent - tSubmit).count();
+
+    // Read hardware timestamps
+    float timestampPeriod = 1.0f;
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(mPhysicalDevice, &props);
+    timestampPeriod = props.limits.timestampPeriod;
+
+    uint64_t ts[4]{};
+    double dCoc = 0.0, dGather = 0.0, dComp = 0.0, dTotalGpu = 0.0;
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkGetQueryPoolResults(mDevice, mPreviewQueryPool, qBase, 4, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+        dCoc = (ts[1] - ts[0]) * timestampPeriod / 1e6;
+        dGather = (ts[2] - ts[1]) * timestampPeriod / 1e6;
+        dComp = (ts[3] - ts[2]) * timestampPeriod / 1e6;
+        dTotalGpu = (ts[3] - ts[0]) * timestampPeriod / 1e6;
+    }
+
+    static std::vector<double> sSubmitWindow;
+    static std::vector<double> sGpuWindow;
+    sSubmitWindow.push_back(submitToPresentMs);
+    sGpuWindow.push_back(dTotalGpu);
+
+    if (sSubmitWindow.size() >= 60) {
+        std::vector<double> sortedSubmit = sSubmitWindow;
+        std::vector<double> sortedGpu = sGpuWindow;
+        std::sort(sortedSubmit.begin(), sortedSubmit.end());
+        std::sort(sortedGpu.begin(), sortedGpu.end());
+
+        size_t n = sortedSubmit.size();
+        double p50_submit = sortedSubmit[n * 50 / 100];
+        double p90_submit = sortedSubmit[n * 90 / 100];
+        double p95_submit = sortedSubmit[n * 95 / 100];
+        double min_submit = sortedSubmit.front();
+        double max_submit = sortedSubmit.back();
+        double p50_gpu = sortedGpu[n * 50 / 100];
+        double effFps = 1000.0 / (p50_submit > 0.1 ? p50_submit : 33.3);
+
+        LOGI("PREVIEW TELEMETRY (N=%zu): Submit->Present p50=%.2f ms, p90=%.2f ms, p95=%.2f ms [min=%.2f, max=%.2f] | Effective FPS=%.1f | GPU: CoC=%.2f ms, 32-tap Gather=%.2f ms, Comp=%.2f ms | Total GPU p50=%.2f ms",
+             n, p50_submit, p90_submit, p95_submit, min_submit, max_submit, effFps, dCoc, dGather, dComp, p50_gpu);
+        sSubmitWindow.clear();
+        sGpuWindow.clear();
     }
 
     mCurrentFrame = (mCurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -1331,6 +1403,10 @@ void VulkanPipeline::destroy() {
     }
 
     if (mSwapchainInitialized && mDevice != VK_NULL_HANDLE) {
+        if (mPreviewQueryPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(mDevice, mPreviewQueryPool, nullptr);
+            mPreviewQueryPool = VK_NULL_HANDLE;
+        }
         if (mViewPreviewOut != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewPreviewOut, nullptr);
         if (mImgPreviewOut != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgPreviewOut, nullptr);
         if (mMemPreviewOut != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemPreviewOut, nullptr);
