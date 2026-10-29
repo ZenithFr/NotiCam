@@ -4,8 +4,6 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -29,7 +27,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.zenith.auxcam.DeviceProfile
+import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
+import com.zenith.auxcam.ui.theme.CameraMotion
 import kotlinx.coroutines.delay
 
 /**
@@ -62,22 +62,18 @@ fun Viewfinder(
 ) {
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var viewSize by remember { mutableStateOf(Size.Zero) }
+    val haptics = rememberCameraHaptics()
 
     val reticleScale = remember { Animatable(0.72f) }
     val reticleAlpha = remember { Animatable(0f) }
 
     LaunchedEffect(focusNonce) {
         if (focusNonce > 0 && focusPoint != null) {
+            haptics.focus()
             reticleAlpha.snapTo(0f)
             reticleScale.snapTo(0.72f)
             reticleAlpha.animateTo(1f, tween(durationMillis = 110))
-            reticleScale.animateTo(
-                targetValue = 1f,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMediumLow,
-                ),
-            )
+            reticleScale.animateTo(targetValue = 1f, animationSpec = CameraMotion.release())
             delay(1200)
             reticleAlpha.animateTo(0f, tween(durationMillis = 260, easing = FastOutSlowInEasing))
         }
@@ -87,8 +83,8 @@ fun Viewfinder(
     LaunchedEffect(capturePulse) {
         if (capturePulse > 0) {
             bloomAlpha.snapTo(0f)
-            bloomAlpha.animateTo(0.85f, tween(durationMillis = 60))
-            bloomAlpha.animateTo(0f, tween(durationMillis = 260, easing = FastOutSlowInEasing))
+            bloomAlpha.animateTo(0.85f, tween(durationMillis = 55))
+            bloomAlpha.animateTo(0f, tween(durationMillis = 280, easing = FastOutSlowInEasing))
         }
     }
 
@@ -179,10 +175,41 @@ fun Viewfinder(
                 }
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
-                    detectTransformGestures { _, _, zoom, _ ->
-                        if (zoom != 1f) onZoomGesture(zoom)
+                    var accumulated = 1f
+                    var lastStop = -1
+                    detectTransformGestures(
+                        onGestureEnd = {
+                            accumulated = 1f
+                            lastStop = -1
+                            haptics.gestureEnd()
+                        },
+                    ) { _, _, zoom, _ ->
+                        if (zoom == 1f) return@detectTransformGestures
+                        onZoomGesture(zoom)
+                        // Tick once per lens stop crossed, not per pointer event.
+                        accumulated *= zoom
+                        val stop = nearestStopIndex(accumulated)
+                        if (stop != lastStop) {
+                            lastStop = stop
+                            haptics.tick()
+                        }
                     }
                 },
         )
     }
+}
+
+/** Index of the closest lens stop to [zoom], used for pinch detents. */
+private fun nearestStopIndex(zoom: Float): Int {
+    val stops = DeviceProfile.ZOOM_STOPS
+    var best = 0
+    var bestDelta = Float.MAX_VALUE
+    stops.forEachIndexed { index, stop ->
+        val delta = kotlin.math.abs(stop - zoom)
+        if (delta < bestDelta) {
+            bestDelta = delta
+            best = index
+        }
+    }
+    return best
 }

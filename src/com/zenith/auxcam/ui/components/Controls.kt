@@ -3,18 +3,14 @@ package com.zenith.auxcam.ui.components
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -59,6 +55,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zenith.auxcam.CameraActions
@@ -66,8 +63,10 @@ import com.zenith.auxcam.CameraController
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
+import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.icons.NotiIcons
 import com.zenith.auxcam.ui.theme.CameraColors
+import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.roundToInt
@@ -90,9 +89,11 @@ fun GlassIconButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val haptics = rememberCameraHaptics()
     val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.9f else 1f,
-        animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMedium),
+        targetValue = if (pressed) 0.86f else 1f,
+        // Down: crisp. Up: a touch of overshoot. This asymmetry is the whole trick.
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
         label = "glass-press",
     )
     val background by animateColorAsState(
@@ -111,8 +112,11 @@ fun GlassIconButton(
             .size(CameraSpacing.touch)
             .clickable(
                 interactionSource = interaction,
-                indication = LocalIndication.current,
-                onClick = onClick,
+                indication = null,
+                onClick = {
+                    haptics.tap()
+                    onClick()
+                },
             ),
         contentAlignment = Alignment.Center,
     ) {
@@ -175,8 +179,8 @@ fun LensChip(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.92f else 1f,
-        animationSpec = spring(dampingRatio = 0.7f, stiffness = Spring.StiffnessMedium),
+        targetValue = if (pressed) 0.88f else 1f,
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
         label = "chip-press",
     )
     val background by animateColorAsState(
@@ -202,7 +206,7 @@ fun LensChip(
             .border(0.5.dp, CameraColors.Separator, CircleShape)
             .clickable(
                 interactionSource = interaction,
-                indication = LocalIndication.current,
+                indication = null,
                 onClick = onClick,
             ),
         contentAlignment = Alignment.Center,
@@ -237,14 +241,20 @@ fun ModeCarousel(
 private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val haptics = rememberCameraHaptics()
     val color by animateColorAsState(
         targetValue = if (selected) CameraColors.Yellow else CameraColors.LabelTertiary,
         animationSpec = tween(220),
         label = "mode-color",
     )
     val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.94f else 1f,
-        animationSpec = spring(dampingRatio = 0.6f, stiffness = Spring.StiffnessMedium),
+        // Selected labels sit a hair larger — Apple does the same in the carousel.
+        targetValue = when {
+            pressed -> 0.92f
+            selected -> 1.06f
+            else -> 1f
+        },
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
         label = "mode-scale",
     )
 
@@ -252,8 +262,11 @@ private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit) {
         modifier = Modifier
             .clickable(
                 interactionSource = interaction,
-                indication = LocalIndication.current,
-                onClick = onClick,
+                indication = null,
+                onClick = {
+                    haptics.select()
+                    onClick()
+                },
             )
             .padding(horizontal = 12.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
@@ -349,6 +362,12 @@ fun TogglePill(
     modifier: Modifier = Modifier,
 ) {
     val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.95f else 1f,
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
+        label = "toggle-press",
+    )
     val background by animateColorAsState(
         targetValue = if (active) Color.White else CameraColors.Glass,
         animationSpec = tween(180),
@@ -359,15 +378,24 @@ fun TogglePill(
         animationSpec = tween(180),
         label = "toggle-fg",
     )
+    val haptics = rememberCameraHaptics()
     Box(
         modifier = modifier
             .height(CameraSpacing.capsuleHeight)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                clip = false
+            }
             .background(background, RoundedCornerShape(CameraSpacing.capsuleHeight / 2))
             .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(CameraSpacing.capsuleHeight / 2))
             .clickable(
                 interactionSource = interaction,
-                indication = LocalIndication.current,
-                onClick = onClick,
+                indication = null,
+                onClick = {
+                    haptics.select()
+                    onClick()
+                },
             ),
         contentAlignment = Alignment.Center,
     ) {
@@ -413,9 +441,10 @@ fun GalleryTile(
 /**
  * The Pro sheet: aperture ladder, exposure and the shoot toggles.
  *
- * `expandVertically(clip = false)` keeps the sheet's contents from being sliced
- * while it slides open — the clipping artefact that usually shows up on
- * height-animated panels.
+ * The panel itself is static — [BottomBar] performs the slide-in on the whole
+ * panel (translation + fade + a 4 % scale) so the contents are never re-laid out
+ * frame by frame. The only thing that morphs inside is the aperture block, which
+ * belongs to Portrait mode.
  */
 @Composable
 fun ProSheet(
@@ -426,7 +455,6 @@ fun ProSheet(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .animateContentSize()
             .background(CameraColors.GlassStrong, RoundedCornerShape(CameraSpacing.panelRadius))
             .border(
                 width = 0.5.dp,
@@ -443,7 +471,11 @@ fun ProSheet(
                 style = CameraType.Value,
                 color = CameraColors.Yellow,
                 modifier = Modifier
-                    .clickable { actions.onProToggle() }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { actions.onProToggle() },
+                    )
                     .padding(horizontal = 8.dp, vertical = 6.dp),
             )
         }
@@ -452,15 +484,15 @@ fun ProSheet(
 
         AnimatedVisibility(
             visible = state.mode == CaptureMode.Portrait,
-            enter = fadeIn(tween(160)) + expandVertically(
-                animationSpec = spring(dampingRatio = 0.85f, stiffness = Spring.StiffnessMediumLow),
-                expandFrom = Alignment.Top,
-                clip = false,
+            // Aperture block: fade + slide, no height animation. Height-animated
+            // panels are what made the old sheet squash its own contents.
+            enter = fadeIn(tween(200)) + slideInVertically(
+                animationSpec = CameraMotion.slide<IntOffset>(),
+                initialOffsetY = { -it / 3 },
             ),
-            exit = fadeOut(tween(120)) + shrinkVertically(
-                animationSpec = tween(160),
-                shrinkTowards = Alignment.Top,
-                clip = false,
+            exit = fadeOut(tween(120)) + slideOutVertically(
+                animationSpec = tween<IntOffset>(140),
+                targetOffsetY = { -it / 4 },
             ),
         ) {
             Column {
@@ -632,26 +664,9 @@ fun BottomBar(
             .padding(horizontal = CameraSpacing.gutterWide),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        AnimatedVisibility(
-            visible = state.proSheetOpen,
-            enter = fadeIn(tween(150)) + expandVertically(
-                animationSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow),
-                expandFrom = Alignment.Bottom,
-                clip = false,
-            ),
-            exit = fadeOut(tween(120)) + shrinkVertically(
-                animationSpec = tween(170),
-                shrinkTowards = Alignment.Bottom,
-                clip = false,
-            ),
-        ) {
-            ProSheet(
-                state = state,
-                actions = actions,
-                modifier = Modifier.padding(bottom = 14.dp),
-            )
-        }
-
+        // The Pro menu is NOT built here: it lives in CameraScreen as an overlay
+        // anchored to the chrome band, so opening it never changes this Column's
+        // height (which would resize the SurfaceView underneath).
         ModeCarousel(
             selected = state.mode,
             onSelect = { actions.onModeSelected(it) },

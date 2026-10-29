@@ -2,9 +2,7 @@ package com.zenith.auxcam.ui.components
 
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
@@ -24,7 +22,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
+import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 
 /**
@@ -51,17 +51,19 @@ fun ShutterButton(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val haptics = rememberCameraHaptics()
 
     // Press: fast, slightly damped compression. Release: springy, no flicker.
     val pressScale by animateFloatAsState(
         targetValue = if (pressed && enabled) 0.86f else 1f,
-        animationSpec = if (pressed && enabled) {
-            spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessHigh)
-        } else {
-            spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
-        },
+        animationSpec = if (pressed && enabled) CameraMotion.press() else CameraMotion.release(),
         label = "shutter-press",
     )
+
+    // Arm the shutter the moment the finger lands: heavy click, like a real button.
+    LaunchedEffect(pressed) {
+        if (pressed && enabled) haptics.shutterDown()
+    }
 
     val pulseProgress = remember { Animatable(1f) }
     LaunchedEffect(pulse) {
@@ -82,7 +84,10 @@ fun ShutterButton(
                 // No ripple: the ring/disc compression is the feedback.
                 indication = null,
                 enabled = enabled,
-                onClick = onClick,
+                onClick = {
+                    haptics.capture()
+                    onClick()
+                },
             ),
         contentAlignment = Alignment.Center,
     ) {
@@ -123,8 +128,12 @@ fun ShutterButton(
                 style = Stroke(width = ringWidth),
             )
 
-            // 3. Inner disc.
-            drawCircle(color = Color.White, radius = discRadius, center = center)
+            // 3. Inner disc. Compresses a hair while the pulse ring is travelling.
+            drawCircle(
+                color = Color.White,
+                radius = discRadius * (1f - 0.04f * (1f - pulseProgress.value).coerceIn(0f, 1f)),
+                center = center,
+            )
 
             // 4. Recording indicator.
             if (recording) {

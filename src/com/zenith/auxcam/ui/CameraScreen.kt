@@ -3,15 +3,17 @@ package com.zenith.auxcam.ui
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -20,12 +22,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -42,8 +47,12 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -51,12 +60,14 @@ import com.zenith.auxcam.CameraActions
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.DeviceProfile
 import com.zenith.auxcam.ui.components.BottomBar
-import com.zenith.auxcam.ui.components.LensChip
+import com.zenith.auxcam.ui.components.ProSheet
 import com.zenith.auxcam.ui.components.QuickApertureRow
 import com.zenith.auxcam.ui.components.TopBar
 import com.zenith.auxcam.ui.components.Viewfinder
+import com.zenith.auxcam.ui.components.ZoomChips
 import com.zenith.auxcam.ui.components.ZoomDial
 import com.zenith.auxcam.ui.theme.CameraColors
+import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.roundToInt
@@ -89,10 +100,16 @@ fun CameraScreen(
     var shutterCenter by remember { mutableStateOf(Offset.Zero) }
     var galleryCenter by remember { mutableStateOf(Offset.Zero) }
 
+    // Bottom edge of the 4:3 frame, in root pixels. The Pro menu is capped to the
+    // chrome band below this line, so it can never cover the framebuffer.
+    var frameBottomPx by remember { mutableStateOf(0f) }
+    var rootHeightPx by remember { mutableStateOf(0f) }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(CameraColors.Black),
+            .background(CameraColors.Black)
+            .onSizeChanged { rootHeightPx = it.height.toFloat() },
     ) {
         Column(
             modifier = Modifier
@@ -131,41 +148,51 @@ fun CameraScreen(
                     onSurfaceDestroyed = actions::onPreviewSurfaceDestroyed,
                     onTap = actions::onFocusAt,
                     onZoomGesture = actions::onZoomGesture,
-                    modifier = Modifier.size(frameWidth, frameHeight),
+                    modifier = Modifier
+                        .size(frameWidth, frameHeight)
+                        .onGloballyPositioned { coords ->
+                            frameBottomPx = coords.positionInRoot().y + coords.size.height
+                        },
                 )
             }
 
-            // Lens chips hug the bottom edge of the frame.
-            Row(
+            // Lens chips hug the bottom edge of the frame. One travelling disc
+            // marks the selection, so a zoom change reads as a single movement.
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 12.dp)
-                    .height(44.dp),
-                horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically,
+                    .padding(top = 12.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                DeviceProfile.ZOOM_STOPS.forEach { stop ->
-                    LensChip(
-                        label = formatStop(stop),
-                        selected = kotlin.math.abs(state.zoom - stop) < 0.08f,
-                        onClick = { actions.onZoomSelected(stop) },
-                        modifier = Modifier.padding(horizontal = 5.dp),
-                    )
-                }
+                ZoomChips(
+                    zoom = state.zoom,
+                    onSelect = actions::onZoomSelected,
+                    stops = DeviceProfile.ZOOM_STOPS,
+                )
             }
 
-            AnimatedVisibility(
-                visible = state.quickApertureVisible,
-                enter = fadeIn(tween(160)) + androidx.compose.animation.expandVertically(
-                    animationSpec = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow),
-                    clip = false,
-                ),
-                exit = fadeOut(tween(120)) + androidx.compose.animation.shrinkVertically(
-                    animationSpec = tween(150),
-                    clip = false,
-                ),
+            // The ƒ row keeps its space even when hidden: animating the column
+            // height would resize the SurfaceView (and therefore the Vulkan
+            // swapchain) on every frame of the transition.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(36.dp),
+                contentAlignment = Alignment.Center,
             ) {
-                QuickApertureRow(state = state, actions = actions)
+                AnimatedVisibility(
+                    visible = state.quickApertureVisible,
+                    enter = fadeIn(tween(170)) + slideInVertically(
+                        animationSpec = CameraMotion.slide<IntOffset>(),
+                        initialOffsetY = { it / 3 },
+                    ),
+                    exit = fadeOut(tween(120)) + slideOutVertically(
+                        animationSpec = tween<IntOffset>(140),
+                        targetOffsetY = { it / 3 },
+                    ),
+                ) {
+                    QuickApertureRow(state = state, actions = actions)
+                }
             }
 
             Box(
@@ -184,19 +211,36 @@ fun CameraScreen(
         }
 
         // ── Overlays: siblings of the column, so nothing can clip them ───────
+        // The wheel rises and settles rather than popping: translate 14 dp up with
+        // the scale, on the damped slide spring, and fade slightly ahead of both.
         AnimatedVisibility(
             visible = state.zoomDialVisible,
-            enter = fadeIn(tween(150)) + scaleIn(
-                initialScale = 0.9f,
-                animationSpec = spring(dampingRatio = 0.8f, stiffness = Spring.StiffnessMediumLow),
+            enter = fadeIn(tween(120)) + scaleIn(
+                initialScale = 0.92f,
+                animationSpec = CameraMotion.slide<Float>(),
+            ) + slideInVertically(
+                animationSpec = CameraMotion.slide<IntOffset>(),
+                initialOffsetY = { it / 26 },
             ),
-            exit = fadeOut(tween(240)) + scaleOut(targetScale = 0.94f, animationSpec = tween(240)),
+            exit = fadeOut(tween(200)) + scaleOut(
+                targetScale = 0.96f,
+                animationSpec = tween(200),
+            ),
             modifier = Modifier.align(Alignment.Center),
         ) {
             ZoomDial(
                 zoom = state.zoom,
-                onRotate = actions::onZoomDialRotate,
+                onFraction = actions::onZoomFraction,
+                onCommit = actions::onZoomCommit,
             )
+        }
+
+        ProMenuOverlay(
+            open = state.proSheetOpen,
+            bandHeightPx = (rootHeightPx - frameBottomPx).coerceAtLeast(0f),
+            modifier = Modifier.align(Alignment.BottomCenter),
+        ) {
+            ProSheet(state = state, actions = actions)
         }
 
         GalleryHandoff(
@@ -208,9 +252,6 @@ fun CameraScreen(
         )
     }
 }
-
-private fun formatStop(stop: Float): String =
-    if (stop == stop.toInt().toFloat()) "${stop.toInt()}×" else String.format("%.1f×", stop)
 
 /** Subtle black ramp behind the toolbar, replacing the old solid slab. */
 private fun Modifier.drawBottomScrim(): Modifier = this.background(
@@ -302,4 +343,67 @@ private fun GalleryHandoff(
             }
             .clip(RoundedCornerShape(12.dp)),
     )
+}
+
+/**
+ * The Pro menu, sliding up out of the bottom of the screen.
+ *
+ * It is a root-level overlay rather than part of the column on purpose:
+ *
+ *  • **No layout change** while it opens, so the `SurfaceView` (and therefore the
+ *    Vulkan swapchain) is never resized mid-animation;
+ *  • **No overlap with the 4:3 frame** — the panel's max height is the chrome band
+ *    below the viewfinder, so it slides over the controls, never over the image;
+ *  • The motion is a translate + fade + 3 % scale on one damped spring, with the
+ *    content scrolling inside if the band is short (landscape, big font scale).
+ */
+@Composable
+private fun ProMenuOverlay(
+    open: Boolean,
+    bandHeightPx: Float,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit,
+) {
+    // Height available between the bottom of the 4:3 frame and the bottom of the
+    // window — the menu is clamped to it, so it can slide over the controls but
+    // never over the image. Guarded against the pre-measure pass (0 px).
+    val density = LocalDensity.current
+    val cap = with(density) { bandHeightPx.coerceAtLeast(0f).toDp() }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = CameraSpacing.gutterWide)
+            .windowInsetsPadding(WindowInsets.navigationBars),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        AnimatedVisibility(
+            visible = open,
+            enter = fadeIn(tween(180)) + scaleIn(
+                initialScale = 0.97f,
+                transformOrigin = TransformOrigin(0.5f, 1f),
+                animationSpec = CameraMotion.slide<Float>(),
+            ) + slideInVertically(
+                animationSpec = CameraMotion.slide<IntOffset>(),
+                initialOffsetY = { it },
+            ),
+            exit = fadeOut(tween(140)) + scaleOut(
+                targetScale = 0.97f,
+                transformOrigin = TransformOrigin(0.5f, 1f),
+                animationSpec = tween(160),
+            ) + slideOutVertically(
+                animationSpec = tween<IntOffset>(170),
+                targetOffsetY = { it },
+            ),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = if (cap > 12.dp) cap - 12.dp else 0.dp)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                content()
+            }
+        }
+    }
 }

@@ -90,15 +90,15 @@ whole screen without being clipped by the toolbar or the frame.
 | `Viewfinder` | `Viewfinder.kt` | `AndroidView(SurfaceView)` filling the box the caller sized to `previewAspect`. Rule-of-thirds grid, AE/AF reticle (spring-in, pivot at the tap), capture bloom, tap-to-focus + pinch-to-zoom detectors. |
 | `GlassIconButton` | `Controls.kt` | 44 dp glass circle inside a 48 dp touch target; press scales to 0.90 with `clip = false`. |
 | `StatusPill` | `Controls.kt` | Black 42 % capsule, `AnimatedContent` crossfade on text change. |
-| `LensChip` | `Controls.kt` | 44 dp circle; white when selected; press 0.92. |
+| `ZoomChips` | `ZoomChips.kt` | 1× / 2× / 5× with a single white disc travelling between positions; `zoom` is the live engine value, so a pinch moves it too. Between stops the disc fades and the nearest label brightens. |
 | `ModeCarousel` | `Controls.kt` | `PHOTO · PORTRAIT · PRO`, `Yellow` for the selection, `animateColorAsState`. |
 | `IosSlider` | `Controls.kt` | 4 dp track, 20 dp white knob, tap or drag, integer snapping for the ƒ/EV ladders, `CLOCK_TICK` haptic on drag. |
 | `TogglePill` | `Controls.kt` | White when active — used for Grid / RAW / Timer. |
 | `GalleryTile` | `Controls.kt` | 52 dp tile showing the real decoded bokeh frame, else the gallery glyph. |
-| `ProSheet` | `Controls.kt` | Glass panel: ƒ ladder, ±4 EV, Grid / RAW / Timer, live telemetry. Opens with `expandVertically(clip = false)` + `spring`, closing the "sliced contents" artefact. |
+| `ProSheet` | `Controls.kt` | Glass panel: ƒ ladder, ±4 EV, Grid / RAW / Timer, live telemetry. Rendered by `ProMenuOverlay` in `CameraScreen.kt`, which slides it up from below the fold, clamps its height to the chrome band below the 4:3 frame, and scrolls its contents if the band is short. |
 | `TopBar` | `Controls.kt` | `Box` so the status pill stays optically centred while the corner buttons change width. |
 | `BottomBar` | `Controls.kt` | Pro sheet → modes → shutter row. Publishes the shutter and gallery centres via `onGloballyPositioned` for the hand-off animation. |
-| `ZoomDial` | `ZoomDial.kt` | 236 dp glass disk, 48 ticks, yellow needle sweeping 160°, drag-to-rotate mapped to real `SCALER_CROP_REGION`. Auto-hides after 2.2 s. |
+| `ZoomDial` | `ZoomDial.kt` | Zoom wheel: **top arc only** (202°→338°), 47 ticks whose alpha follows `sin()` so both ends dissolve, a radial backdrop that fades to fully transparent before the bottom, a yellow travelled thread + needle + glow knob, a detent haptic every tick and a snap to the nearest lens stop on release. Auto-hides after 2.2 s. |
 | `NotiIcons` | `ui/icons/NotiIcons.kt` | Nine hand-built `ImageVector`s on a 24 unit grid, 1.7 stroke, round caps. Resolution-independent, so scaling can never resample or crop a glyph. |
 
 ---
@@ -124,20 +124,57 @@ frame presented 1440 × 1080 landscape and the phone portrait, the normalised ta
 
 ---
 
-## 6. Motion reference
+## 6. Motion & haptics reference
 
-| Element | Spec |
+All curves live in `ui/theme/Theme.kt` as `CameraMotion` — no composable defines
+its own spring, and nothing uses a default `animate*AsState()` spec. The shape is
+deliberately asymmetric: **press down is crisp, release is springy**.
+
+| Interaction | Spec |
 |---|---|
-| Icon button press | `spring(0.65, Medium)` → 0.90 |
-| Lens chip press | `spring(0.70, Medium)` → 0.92 |
-| Mode label press | `spring(0.60, Medium)` → 0.94 |
-| Shutter press | `spring(0.90, High)` → 0.86; release `MediumBouncy / Low` |
-| Shutter pulse | 520 ms `LinearOutSlowInEasing`, ring fades as it grows |
-| Capture bloom | 60 ms to 0.85 alpha, 260 ms `FastOutSlowIn` back to 0 |
-| Focus reticle | 110 ms fade + `MediumBouncy` spring scale 0.72 → 1.0, 1.2 s hold |
-| Pro sheet | `spring(0.90, MediumLow)` expand, 170 ms shrink, both `clip = false` |
-| Zoom dial | 150 ms fade + `spring(0.80, MediumLow)` scale 0.9 → 1.0 |
+| Press (icon button, chip, mode, toggle) | `spring(0.62, StiffnessHigh)` → scale 0.86–0.95 |
+| Release | `spring(DampingRatioMediumBouncy, StiffnessMediumLow)` → 1.0 |
+| Selection (mode/mode colour) | `spring(0.78, MediumLow)`; selected label sits at 1.06× |
+| Panels / overlays | `spring(0.9, MediumLow)` — damped so a panel never overshoots a neighbour |
+| Zoom wheel | `spring(LowBouncy, StiffnessLow)` — keeps momentum like a lens barrel |
+| Fades | 120–180 ms `tween`, always faster than the move they accompany |
+| Shutter press | `press()` → 0.86, release `release()` |
+| Shutter pulse | 520 ms `LinearOutSlowInEasing`, ring grows into the 96 dp margin |
+| Shutter disc | compresses 4 % while the pulse travels |
+| Capture bloom | 55 ms to 0.85 α, 280 ms `FastOutSlowIn` back to 0 |
+| Focus reticle | 110 ms fade + `release()` spring 0.72 → 1.0, 1.2 s hold |
+| Zoom chips | **one disc slides** between positions, `spring(0.72, MediumLow)`; labels cross-fade 180 ms |
+| Pro menu | translate up from below + fade 180 ms + scale 0.97 → 1, `slide()`; exit 140–170 ms |
+| Zoom wheel in/out | fade 120 ms + scale 0.92 → 1 + rise 1/26 of its height |
 | Gallery flight | 460 ms `FastOutSlowIn`, 96 dp tile, 26 dp arc lift |
+
+### Layout-safe animation rules
+
+1. **Never animate the height of anything above the viewfinder.** The frame lives
+   in a `weight(1f)` slot; changing the column height resizes the `SurfaceView`
+   and therefore recreates the Vulkan swapchain on every frame. The ƒ row keeps a
+   fixed 36 dp slot and the Pro menu is a bottom overlay — both animate by
+   translation only.
+2. **Never clip.** Animated parents set `clip = false`; controls compose at their
+   maximum size (shutter 96 dp for a 72 dp disc).
+3. **One travel per action.** A zoom change moves exactly one thing (the disc);
+   a mode change moves exactly one thing (the label scale).
+
+### Haptics — `ui/feedback/Haptics.kt`
+
+`CameraHaptics` maps each interaction to a distinct, very short Android
+`VibrationEffect` (falling back to `HapticFeedbackConstants` below Android 10).
+Predefined effects respect the system touch-feedback setting.
+
+| Event | Effect |
+|---|---|
+| Zoom wheel detent / chip crossing a stop | `EFFECT_TICK` |
+| Chip, mode, toggle selection | `EFFECT_CLICK` |
+| Plain button | `EFFECT_CLICK` (keyboard-tap fallback) |
+| Finger down on the shutter | `EFFECT_HEAVY_CLICK` |
+| Frame captured | `EFFECT_DOUBLE_CLICK` |
+| AE/AF lock | `EFFECT_CLICK` |
+| Gesture end (pinch, wheel release) | `GESTURE_END` |
 
 ---
 

@@ -74,8 +74,14 @@ interface CameraActions {
     fun onModeSelected(mode: CaptureMode)
     fun onZoomSelected(zoom: Float)
     fun onZoomGesture(scaleFactor: Float)
-    /** Delta in degrees from the radial dial; mapped to a zoom step. */
-    fun onZoomDialRotate(deltaDegrees: Float)
+    /**
+     * Live position of the radial wheel, 0..1 across the zoom range. Called at
+     * pointer rate while the wheel spins.
+     */
+    fun onZoomFraction(fraction: Float)
+
+    /** Wheel released: snap to the nearest lens stop. */
+    fun onZoomCommit(fraction: Float)
     fun onApertureChanged(index: Int)
     fun onEvChanged(steps: Int)
     fun onGridToggle()
@@ -730,10 +736,20 @@ class CameraController(
         applyZoom(state.zoom * scaleFactor, force = false)
     }
 
-    override fun onZoomDialRotate(deltaDegrees: Float) {
-        val span = DeviceProfile.ZOOM_STOPS.last() - DeviceProfile.ZOOM_STOPS.first()
-        // A half turn sweeps 40 % of the range, matching the dial's tick spacing.
-        applyZoom(state.zoom + (deltaDegrees / 180f) * span * 0.4f, force = false)
+    override fun onZoomFraction(fraction: Float) {
+        val lo = DeviceProfile.ZOOM_STOPS.first()
+        val hi = DeviceProfile.ZOOM_STOPS.last()
+        applyZoom(lo + (hi - lo) * fraction.coerceIn(0f, 1f), force = false)
+    }
+
+    override fun onZoomCommit(fraction: Float) {
+        val stops = DeviceProfile.ZOOM_STOPS
+        val target = stops.minByOrNull {
+            kotlin.math.abs(
+                it - (stops.first() + (stops.last() - stops.first()) * fraction.coerceIn(0f, 1f)),
+            )
+        } ?: stops.first()
+        applyZoom(target, force = true)
     }
 
     private fun applyZoom(requested: Float, force: Boolean) {
@@ -864,9 +880,19 @@ class CameraController(
 
     // ── helpers ─────────────────────────────────────────────────────────────
 
+    /**
+     * Fallback haptic for state changes the UI cannot feel (lens switch, timer).
+     * The composables own gesture feedback through `CameraHaptics`; this is only
+     * for controller-initiated events.
+     */
     private fun haptic() {
         try {
-            activity.window.decorView.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            val view = activity.window.decorView
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+            } else {
+                view.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
         } catch (t: Throwable) {
             Log.w(TAG, "no haptics: ${t.message}")
         }

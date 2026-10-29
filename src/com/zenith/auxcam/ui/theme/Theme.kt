@@ -1,5 +1,10 @@
 package com.zenith.auxcam.ui.theme
 
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.SpringSpec
+import androidx.compose.animation.core.TweenSpec
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -68,6 +73,56 @@ object CameraSpacing {
      *  always has room to expand — this is what stops the animation clipping. */
     val shutterTouch = 96.dp
     val gallery = 52.dp
+}
+
+/**
+ * Every spring and tween in the app, in one place.
+ *
+ * Rules of thumb baked into these numbers:
+ *  • **press down** is fast and stiff (~120 ms to settle) so the control answers
+ *    the finger immediately;
+ *  • **release** is slower and slightly bouncy, which is where the iOS "lift"
+ *    feel comes from;
+ *  • **selection** (chips, modes) is a medium spring — visible travel, no wobble;
+ *  • **slides** (Pro sheet, dial) are heavily damped so panels never overshoot
+ *    into their neighbours;
+ *  • physical detents (zoom wheel) use a low-bouncy, low-stiffness spring so the
+ *    indicator keeps a little momentum like a real lens barrel.
+ *
+ * Nothing here is animated with `LinearEasing`, and no control uses a default
+ * `animate*AsState()` spec — that is what made the previous pass feel mechanical.
+ */
+object CameraMotion {
+
+    /** Press compression. Crisp, no visible wobble. */
+    fun <T> press(): SpringSpec<T> = spring(dampingRatio = 0.62f, stiffness = Spring.StiffnessHigh)
+
+    /** Finger-up return. The bounce is subtle but it is what reads as "iOS". */
+    fun <T> release(): SpringSpec<T> = spring(
+        dampingRatio = Spring.DampingRatioMediumBouncy,
+        stiffness = Spring.StiffnessMediumLow,
+    )
+
+    /** Selection / colour / mode changes. */
+    fun <T> select(): SpringSpec<T> = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+
+    /** Panels and overlays sliding into place — damped, never overshoots a neighbour. */
+    fun <T> slide(): SpringSpec<T> = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow)
+
+    /** Zoom wheel / radial indicator: keeps a little momentum. */
+    fun <T> wheel(): SpringSpec<T> = spring(
+        dampingRatio = Spring.DampingRatioLowBouncy,
+        stiffness = Spring.StiffnessLow,
+    )
+
+    /** Snapping the wheel onto a lens stop. */
+    fun <T> detent(): SpringSpec<T> = spring(dampingRatio = 1f, stiffness = Spring.StiffnessMedium)
+
+    /** Short opacity transitions. Fades are always faster than moves. */
+    fun fade(durationMillis: Int = 140): TweenSpec<Float> = tween(durationMillis)
+
+    const val PressedScale = 0.90f
+    const val PressedAlpha = 0.72f
 }
 
 object CameraType {
