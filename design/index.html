@@ -63,14 +63,14 @@
   .camera{position:absolute;inset:0;display:flex;flex-direction:column;padding-top:48px}
 
   /* The stage gets whatever height the fixed chrome does not use (the CSS twin
-     of `Modifier.weight(1f)`), and `fitStage()` sizes the frame to exactly 4:3
+     of `Modifier.weight(1f)`), and `fitStage()` sizes the frame to exactly 3:4
      inside it — never stretched, never overlapping. */
   .stage{
     flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;
     background:#000;overflow:hidden;
   }
   .viewfinder{
-    position:relative;flex:0 0 auto;width:100%;height:auto;aspect-ratio:4/3;
+    position:relative;flex:0 0 auto;width:100%;height:auto;aspect-ratio:3/4;
     overflow:hidden;background:#111;
   }
   .viewfinder img{
@@ -111,6 +111,14 @@
   .iconbtn:active{transform:scale(.9);background:rgba(255,255,255,.16)}
   .iconbtn.white{background:#fff;color:#000;box-shadow:none}
   .spacer{flex:1}
+  .rawpill{
+    height:30px;padding:0 11px;border:0;border-radius:15px;cursor:pointer;
+    font-size:11px;font-weight:600;letter-spacing:.04em;
+    color:var(--label-2);background:var(--glass);box-shadow:inset 0 0 0 .5px var(--sep);
+    transition:background .18s ease,color .18s ease,transform .16s cubic-bezier(.2,.9,.3,1.3);
+  }
+  .rawpill:active{transform:scale(.92)}
+  .rawpill.on{background:#fff;color:#000;box-shadow:none}
   .pillstatus{
     font-size:11px;letter-spacing:.04em;color:var(--label-2);
     padding:7px 12px;border-radius:12px;background:rgba(0,0,0,.4);
@@ -121,12 +129,13 @@
   /* ─────────── lens chips ─────────── */
   /* One disc travels between chips — the selection reads as a single movement
      instead of three independent background fades (ZoomChips.kt). */
-  .lensrow{
-    position:relative;display:flex;justify-content:center;gap:6px;margin-top:14px;height:44px;
-  }
+  /* The disc is positioned with a CSS variable, not with measured rects: the old
+     getBoundingClientRect() maths ran before layout and mis-aligned the disc. */
   .chipdisc{
+    --i:0; --s:1;
     position:absolute;top:0;left:50%;margin-left:-22px;width:44px;height:44px;
-    border-radius:50%;background:#fff;transform:translateX(0) scale(1);
+    border-radius:50%;background:#fff;
+    transform:translateX(calc(-50% + var(--i) * 50px)) scale(var(--s));
     transition:transform .42s cubic-bezier(.34,1.32,.44,1),opacity .18s ease;
     pointer-events:none;
   }
@@ -172,19 +181,24 @@
   /* The menu is an overlay anchored to the chrome band: it translates up from
      below the fold and never changes the layout height, so the 4:3 frame is not
      resized while it animates (ProMenuOverlay in CameraScreen.kt). */
+  /* Settings sheet: hangs from under the top bar and slides DOWN out of it. */
   .sheet{
-    position:absolute;left:24px;right:24px;bottom:18px;z-index:2;
+    position:absolute;left:24px;right:24px;top:104px;z-index:2;
     background:var(--glass-strong);border-radius:24px;
     box-shadow:inset 0 0 0 .5px rgba(255,255,255,.16);
     padding:14px 18px 16px;
     backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
-    transform:translateY(calc(100% + 40px)) scale(.97);opacity:0;pointer-events:none;
-    transform-origin:50% 100%;
+    transform:translateY(-16px) scale(.96);opacity:0;pointer-events:none;
+    transform-origin:50% 0;
     transition:transform .42s cubic-bezier(.34,1.24,.44,1),opacity .2s ease;
   }
-  .sheet.open{
-    transform:none;opacity:1;pointer-events:auto;
+  .sheet.open{transform:none;opacity:1;pointer-events:auto}
+  /* Starts under the top bar so flash / RAW / Pro stay legible and tappable. */
+  .scrim{
+    position:absolute;left:0;right:0;top:104px;bottom:0;background:rgba(0,0,0,.38);opacity:0;
+    pointer-events:none;transition:opacity .2s ease;z-index:1;
   }
+  .scrim.on{opacity:1;pointer-events:auto}
   .sheet-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
   .section{
     font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--label-3);
@@ -248,17 +262,27 @@
     opacity:0;pointer-events:none;z-index:50;will-change:transform,opacity;
   }
 
-  /* zoom wheel overlay: arc of ticks on top, everything below fades to nothing */
+  /* The chips and the wheel are two states of one control. The wheel is anchored
+     to the chip row so its arc sits on top of the chips, and it scales out of that
+     line (transform-origin at the top) while the chips collapse into it. */
+  .zoomstack{position:relative;z-index:20;margin-top:14px}
   .dial{
-    position:absolute;left:50%;top:44%;width:244px;height:244px;
-    transform:translate(-50%,-50%) scale(.92);
-    border-radius:50%;
+    position:absolute;left:50%;top:-52px;width:244px;height:244px;
+    transform-origin:50% 0;
+    transform:translateX(-50%) scale(.55);
+    border-radius:50%;pointer-events:none;
     background:radial-gradient(circle at 50% 20%,
       rgba(20,20,22,.95) 0%, rgba(20,20,22,.55) 42%, rgba(20,20,22,.12) 68%, rgba(20,20,22,0) 82%);
-    display:grid;place-items:center;opacity:0;pointer-events:none;
-    transition:opacity .22s ease,transform .4s cubic-bezier(.34,1.2,.44,1);z-index:45;
+    display:grid;place-items:center;opacity:0;
+    transition:opacity .2s ease,transform .42s cubic-bezier(.34,1.28,.44,1);z-index:1;
   }
-  .dial.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  .dial.show{opacity:1;transform:translateX(-50%) scale(1)}
+  /* chips collapse into the arc while the wheel is up */
+  .lensrow{
+    position:relative;z-index:2;display:flex;justify-content:center;gap:6px;height:44px;
+    transition:opacity .2s ease,transform .36s cubic-bezier(.34,1.2,.44,1);
+  }
+  .zoomstack.wheel .lensrow{opacity:0;transform:scale(.84) translateY(6px);pointer-events:none}
   .dial > div{margin-top:-12px}
   .dial .big{font-size:34px;font-weight:500;letter-spacing:.02em;transition:transform .3s cubic-bezier(.34,1.4,.44,1)}
   .dial .sub{font-size:11px;letter-spacing:.06em;color:rgba(255,255,255,.6);margin-top:2px;text-align:center}
@@ -321,6 +345,7 @@
     <!-- top chrome: flash · status · pro (outside the 4:3 region) -->
   <div class="topbar">
     <button class="iconbtn" id="flash" aria-label="Flash"></button>
+    <button class="rawpill" id="rawBadge">RAW</button>
     <div class="spacer"></div>
     <div class="pillstatus" id="status">Ready</div>
     <div class="spacer"></div>
@@ -340,12 +365,53 @@
     </div>
 
     <!-- lens chips -->
+    <div class="zoomstack" id="zoomstack">
+      <div class="dial" id="dial">
+        <svg class="ticks" viewBox="0 0 244 244" id="dialTicks"></svg>
+        <div>
+          <div class="big" id="dialZoom">1×</div>
+          <div class="sub" id="dialSub">24 MM</div>
+        </div>
+      </div>
     <div class="lensrow" id="lensrow">
       <div class="chipdisc" id="chipdisc"></div>
-      <button class="chip sel" id="chip1" style="position:relative;z-index:1">1×</button>
-      <button class="chip" id="chip2" style="position:relative;z-index:1">2×</button>
-      <button class="chip" id="chip5" style="position:relative;z-index:1">5×</button>
+      <button class="chip sel" id="chip1" style="position:relative;z-index:1">0.6×</button>
+      <button class="chip" id="chip2" style="position:relative;z-index:1">1×</button>
+      <button class="chip" id="chip5" style="position:relative;z-index:1">2×</button>
     </div>
+    </div><!-- /zoomstack -->
+
+    <div class="scrim" id="scrim"></div>
+<div class="sheet" id="sheet">
+      <div class="rowlabel" style="margin-bottom:2px">
+        <span class="aperture-ico" id="icoAperture2"></span>
+        <span class="section" style="flex:1">Aperture</span>
+        <span class="val" id="sheetApValue">ƒ 1.8</span>
+      </div>
+      <div class="slider" id="sheetApSlider">
+        <div class="track"></div><div class="fill"></div><div class="knob"></div>
+      </div>
+      <div class="ticks"><span>1.4</span><span>2.8</span><span>5.6</span><span>11</span><span>16</span></div>
+
+      <div class="rowlabel">
+        <span class="section" style="flex:1">Exposure</span>
+        <span class="val" id="evValue">0 EV</span>
+      </div>
+      <div class="slider" id="evSlider">
+        <div class="track"></div><div class="fill"></div><div class="knob"></div>
+      </div>
+      <div class="ticks"><span>−4</span><span>0</span><span>+4</span></div>
+
+      <div class="divider"></div>
+
+      <div class="toggles">
+        <button class="toggle" id="tGrid">Grid</button>
+        <button class="toggle" id="tTimer">Timer</button>
+      </div>
+
+      <div class="telemetry" id="telemetry">VIEWFINDER · 30 FPS · DEPTH · 30 FPS · Δt 0.0 ms</div>
+    </div>
+
 
     <!-- portrait quick aperture -->
     <div class="quickap" id="quickap">
@@ -358,41 +424,7 @@
 
     <!-- bottom chrome -->
     <div class="bottom">
-      <div class="sheet" id="sheet">
-        <div class="sheet-head">
-          <span class="section">Pro controls</span>
-          <button class="done" id="doneBtn">Done</button>
-        </div>
-
-        <div class="rowlabel" style="margin-bottom:2px">
-          <span class="aperture-ico" id="icoAperture2"></span>
-          <span class="section" style="flex:1">Aperture</span>
-          <span class="val" id="sheetApValue">ƒ 1.8</span>
-        </div>
-        <div class="slider" id="sheetApSlider">
-          <div class="track"></div><div class="fill"></div><div class="knob"></div>
-        </div>
-        <div class="ticks"><span>1.4</span><span>2.5</span><span>4.5</span><span>8</span><span>16</span></div>
-
-        <div class="rowlabel">
-          <span class="section" style="flex:1">Exposure</span>
-          <span class="val" id="evValue">0 EV</span>
-        </div>
-        <div class="slider" id="evSlider">
-          <div class="track"></div><div class="fill"></div><div class="knob"></div>
-        </div>
-
-        <div class="divider"></div>
-
-        <div class="toggles">
-          <button class="toggle" id="tGrid">Grid</button>
-          <button class="toggle" id="tRaw">RAW</button>
-          <button class="toggle" id="tTimer">Timer</button>
-        </div>
-
-        <div class="telemetry" id="telemetry">VIEWFINDER · 30 FPS · DEPTH · 30 FPS · Δt 0.0 ms</div>
-      </div>
-
+      
       <div class="modes" id="modes">
         <button class="mode sel" data-mode="photo">Photo</button>
         <button class="mode" data-mode="portrait">Portrait</button>
@@ -417,14 +449,6 @@
   </div>
 
   <!-- top bar was here: it now lives inside .camera, above the frame -->
-
-  <div class="dial" id="dial">
-    <svg class="ticks" viewBox="0 0 244 244" id="dialTicks"></svg>
-    <div>
-      <div class="big" id="dialZoom">1.0×</div>
-      <div class="sub" id="dialSub">24 MM</div>
-    </div>
-  </div>
 
   <img class="flyer" id="flyer" src="sample_portrait.jpg" alt="" />
 </div>
@@ -536,9 +560,10 @@
     // Layout px on purpose: getBoundingClientRect() would return *scaled* px.
     const w = stage.clientWidth, h = stage.clientHeight;
     if (!w || !h) return;
-    const fw = Math.min(w, (h * 4) / 3);
-    frame.style.width = fw + "px";
-    frame.style.height = (fw * 3) / 4 + "px";
+    // 3:4 portrait — the engine rotates the 1440x1080 sensor frame 90° CW.
+    const fh = Math.min(h, (w * 4) / 3);
+    frame.style.height = fh + "px";
+    frame.style.width = (fh * 3) / 4 + "px";
   }
 
   function relayout() {
@@ -558,12 +583,12 @@
   relayout();
   const el = {
     flash: $("flash"), pro: $("pro"), status: $("status"), flip: $("flip"),
-    sheet: $("sheet"), done: $("doneBtn"), grid: $("grid"),
+    sheet: $("sheet"), grid: $("grid"),
     viewfinder: $("viewfinder"), reticle: $("reticle"), bloom: $("bloom"),
     shutter: $("shutter"), pulse: $("pulse"), gallery: $("gallery"),
     flyer: $("flyer"), dial: $("dial"), dialZoom: $("dialZoom"),
     dialSub: $("dialSub"), quickap: $("quickap"),
-    tGrid: $("tGrid"), tRaw: $("tRaw"), tTimer: $("tTimer"),
+    tGrid: $("tGrid"), tTimer: $("tTimer"),
     sheetApSlider: $("sheetApSlider"), quickApSlider: $("quickApSlider"),
     evSlider: $("evSlider"), telemetry: $("telemetry")
   };
@@ -608,6 +633,7 @@
   function setSheet(open) {
     state.sheetOpen = open;
     el.sheet.classList.toggle("open", open);
+    $("scrim").classList.toggle("on", open);
     if (open) {
       el.pro.classList.add("white");
       el.pro.innerHTML = ICONS.close;
@@ -618,7 +644,8 @@
     updateQuickAperture();
   }
   el.pro.addEventListener("click", () => setSheet(!state.sheetOpen));
-  el.done.addEventListener("click", () => setSheet(false));
+  // no Done button: tap outside closes
+  $("scrim").addEventListener("click", () => setSheet(false));
 
   // ── modes ────────────────────────────────────────────────────────────────
   function setMode(mode) {
@@ -658,9 +685,10 @@
       const rect = root.getBoundingClientRect();
       const clientX = e.touches ? e.touches[0].clientX : e.clientX;
       const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-      const next = Math.round(min + t * (max - min));
-      if (next !== v) { v = next; paint(); onChange(v); }
-      else { paint(); }
+      // Continuous: no snapping, which is what makes the sliders feel smooth.
+      v = min + t * (max - min);
+      paint();
+      onChange(v);
     }
     let dragging = false;
     root.addEventListener("pointerdown", e => {
@@ -716,7 +744,14 @@
     el.tGrid.classList.toggle("on");
     el.grid.classList.toggle("on", el.tGrid.classList.contains("on"));
   });
-  el.tRaw.addEventListener("click", () => el.tRaw.classList.toggle("on"));
+  $("rawBadge").addEventListener("click", () => {
+    $("rawBadge").classList.toggle("on");
+    $("rawBadge").animate(
+      [{ transform: "scale(.9)" }, { transform: "scale(1)" }],
+      { duration: 220, easing: "cubic-bezier(.2,.9,.3,1.2)" }
+    );
+    el.status.textContent = $("rawBadge").classList.contains("on") ? "RAW + JPEG" : "JPEG only";
+  });
   el.tTimer.addEventListener("click", () => {
     const order = [null, 3, 10];
     const cur = el.tTimer.dataset.step ? Number(el.tTimer.dataset.step) : 0;
@@ -727,23 +762,19 @@
   });
 
   // ── zoom chips ───────────────────────────────────────────────────────────
-  const chips = [["chip1", 1], ["chip2", 2], ["chip5", 5]];
+  const chips = [["chip1", 0.6], ["chip2", 1], ["chip5", 2]];
+  const STOPS = chips.map(([, v]) => v);
+  const ZMIN = 0.6, ZMAX = 2;
   const MM = z => Math.round(24 * z);
 
-  // ── travelling selection disc ────────────────────────────────────────────
+  // ── travelling selection disc (pure CSS offsets — always aligned) ────────
   function moveDisc() {
-    const row = $("lensrow"), disc = $("chipdisc");
-    if (!row || !disc) return;
-    const onStop = chips.some(([, v]) => Math.abs(v - state.zoom) < 0.08);
-    // centre of the active chip, relative to the row
-    const target = chips
-      .map(([id]) => $(id))
-      .find(b => b.classList.contains("sel")) || $(chips[0][0]);
-    const rowBox = row.getBoundingClientRect();
-    const chipBox = target.getBoundingClientRect();
-    const cx = chipBox.left - rowBox.left + chipBox.width / 2;
-    disc.style.transform =
-      `translateX(${cx - rowBox.width / 2}px) scale(${onStop ? 1 : 0.84})`;
+    const disc = $("chipdisc");
+    if (!disc) return;
+    const onStop = STOPS.some(v => Math.abs(v - state.zoom) < 0.08);
+    const idx = chips.findIndex(([, v]) => Math.abs(v - state.zoom) < 0.08);
+    disc.style.setProperty("--i", Math.max(0, idx));
+    disc.style.setProperty("--s", onStop ? 1 : 0.84);
     disc.style.opacity = onStop ? "1" : "0";
   }
 
@@ -756,11 +787,12 @@
       b.classList.toggle("near", !on && Math.abs(val - z) < 0.6);
     });
     moveDisc();
-    el.dialZoom.textContent = z.toFixed(1) + "×";
+    el.dialZoom.textContent = fmtZoom(z);
     el.dialSub.textContent = MM(z) + " MM";
     drawTicks(z);
-    showDial();
+    showWheel();
   }
+  const fmtZoom = z => (Math.abs(z - Math.round(z)) < 0.05 ? Math.round(z) : z.toFixed(1)) + "×";
   chips.forEach(([id, val]) => $(id).addEventListener("click", () => setZoom(val)));
   addEventListener("resize", moveDisc);
   requestAnimationFrame(moveDisc);
@@ -816,10 +848,16 @@
   drawTicks(1);
 
   let dialTimer;
-  function showDial() {
+  // The wheel only appears for a pinch in the app; the mock also shows it when a
+  // chip is tapped so the morph is visible in the preview.
+  function showWheel() {
     el.dial.classList.add("show");
+    $("zoomstack").classList.add("wheel");
     clearTimeout(dialTimer);
-    dialTimer = setTimeout(() => el.dial.classList.remove("show"), 2200);
+    dialTimer = setTimeout(() => {
+      el.dial.classList.remove("show");
+      $("zoomstack").classList.remove("wheel");
+    }, 1600);
   }
 
   // ── tap to focus ─────────────────────────────────────────────────────────

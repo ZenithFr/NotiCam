@@ -27,10 +27,14 @@ data class CameraUiState(
     val flash: FlashMode = FlashMode.Off,
     val zoom: Float = 1f,
 
-    /** Index into [CameraController.FSTOPS]. */
-    val fStopIndex: Int = 2,
-    /** Exposure compensation in 1/3 EV steps (-12..+12). */
-    val evSteps: Int = 0,
+    /**
+     * Aperture, as a real f-number. Continuous: the slider interpolates
+     * logarithmically between [CameraController.FSTOPS] entries, so dragging is
+     * smooth instead of stepping through 22 detents.
+     */
+    val fStop: Float = 1.8f,
+    /** Exposure compensation in EV (-4f..+4f), also continuous. */
+    val ev: Float = 0f,
 
     val grid: Boolean = false,
     val raw: Boolean = false,
@@ -54,19 +58,32 @@ data class CameraUiState(
     val focusNonce: Int = 0,
     val zoomDialVisible: Boolean = false,
 ) {
-    val fStop: Float
-        get() = CameraController.FSTOPS[fStopIndex.coerceIn(0, CameraController.FSTOPS.lastIndex)]
+    /** Aperture shown by the sliders: 0 = open (1.4), 1 = closed (16). */
+    val apertureFraction: Float
+        get() {
+            val lo = CameraController.FSTOPS.first().toDouble()
+            val hi = CameraController.FSTOPS.last().toDouble()
+            return (kotlin.math.ln(fStop.coerceIn(lo.toFloat(), hi.toFloat()) / lo) /
+                kotlin.math.ln(hi / lo)).toFloat().coerceIn(0f, 1f)
+        }
 
     val fStopLabel: String
         get() = "ƒ " + if (fStop >= 9.95f) String.format("%.0f", fStop) else String.format("%.1f", fStop)
 
     val evLabel: String
         get() {
-            val ev = evSteps / 3f
             if (kotlin.math.abs(ev) < 0.05f) return "0 EV"
             val sign = if (ev > 0) "+" else "−"
             return sign + String.format("%.1f", kotlin.math.abs(ev)) + " EV"
         }
+
+    /** 0..1 position of the EV slider across its -4..+4 range. */
+    val evFraction: Float
+        get() = ((ev + 4f) / 8f).coerceIn(0f, 1f)
+
+    /** True while the zoom surface is showing (pinch in progress or just ended). */
+    val zoomActive: Boolean
+        get() = zoomDialVisible
 
     val focalLabel: String
         get() = String.format("%.0f MM", DeviceProfile.FOCAL_MAIN_MM * zoom)

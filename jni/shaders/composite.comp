@@ -65,9 +65,14 @@ void main() {
 
     // ── Orientation ─────────────────────────────────────────────────────────
     if (pc.rotate90 != 0) {
-        // Map upright screen coordinates [0..1]² onto sensor coordinates
-        // rotated 90° clockwise: sensor_x = 1 - v, sensor_y = u
-        uv = vec2(1.0 - uv.y, uv.x);
+        // Map upright (portrait) screen coordinates [0..1]² onto the landscape
+        // sensor frame, rotating it 90° CLOCKWISE so the phone's "up" becomes the
+        // sensor's "up":
+        //     sensor_x = v        (screen v runs along the sensor's x axis)
+        //     sensor_y = 1 - u    (screen u runs against the sensor's y axis)
+        // The inverse mapping (sensor_x = 1 - v, sensor_y = u) is a 90° counter-
+        // clockwise rotation, which is what made the preview upside-down-sideways.
+        uv = vec2(uv.y, 1.0 - uv.x);
     }
 
     vec4 sharpRgba = texture(uOriginalColor, uv);

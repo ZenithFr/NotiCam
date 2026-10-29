@@ -293,22 +293,17 @@ fun IosSlider(
     valueRange: ClosedFloatingPointRange<Float>,
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
-    steps: Int = 0,
 ) {
     var widthPx by remember { mutableFloatStateOf(1f) }
     val view = LocalView.current
     val span = (valueRange.endInclusive - valueRange.start).takeIf { it != 0f } ?: 1f
     val fraction = ((value - valueRange.start) / span).coerceIn(0f, 1f)
 
+    // Continuous: the value follows the finger with no snapping, which is what
+    // makes the aperture and exposure sliders feel like the iOS ones.
     fun emit(x: Float) {
         val raw = valueRange.start + (x / widthPx).coerceIn(0f, 1f) * span
-        val snapped = if (steps > 0) {
-            val step = span / steps
-            (raw / step).roundToInt() * step
-        } else {
-            raw
-        }
-        onValueChange(snapped.coerceIn(valueRange.start, valueRange.endInclusive))
+        onValueChange(raw.coerceIn(valueRange.start, valueRange.endInclusive))
     }
 
     Box(
@@ -316,10 +311,10 @@ fun IosSlider(
             .fillMaxWidth()
             .height(34.dp)
             .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
-            .pointerInput(valueRange, steps) {
+            .pointerInput(valueRange) {
                 detectTapGestures { offset -> emit(offset.x) }
             }
-            .pointerInput(valueRange, steps) {
+            .pointerInput(valueRange) {
                 detectHorizontalDragGestures { change, _ ->
                     view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
                     emit(change.position.x)
@@ -461,98 +456,72 @@ fun ProSheet(
                 color = CameraColors.SeparatorStrong,
                 shape = RoundedCornerShape(CameraSpacing.panelRadius),
             )
-            .padding(horizontal = 18.dp, vertical = 16.dp),
+            .padding(horizontal = 20.dp, vertical = 18.dp),
     ) {
+        // Aperture — logarithmic and continuous, so dragging feels like a real ring.
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(text = "PRO", style = CameraType.Section, color = CameraColors.LabelTertiary)
-            Spacer(Modifier.weight(1f))
-            Text(
-                text = "Done",
-                style = CameraType.Value,
-                color = CameraColors.Yellow,
-                modifier = Modifier
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                        onClick = { actions.onProToggle() },
-                    )
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+            Icon(
+                imageVector = NotiIcons.Aperture,
+                contentDescription = "Aperture",
+                tint = CameraColors.LabelSecondary,
+                modifier = Modifier.size(16.dp),
             )
+            Spacer(Modifier.width(7.dp))
+            Text("APERTURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
+            Spacer(Modifier.weight(1f))
+            Text(state.fStopLabel, style = CameraType.Value, color = CameraColors.Label)
+        }
+        IosSlider(
+            value = state.apertureFraction,
+            valueRange = 0f..1f,
+            onValueChange = { actions.onApertureChanged(fStopForFraction(it)) },
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text("1.4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("2.8", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("5.6", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("11", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("16", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
         }
 
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(14.dp))
 
-        AnimatedVisibility(
-            visible = state.mode == CaptureMode.Portrait,
-            // Aperture block: fade + slide, no height animation. Height-animated
-            // panels are what made the old sheet squash its own contents.
-            enter = fadeIn(tween(200)) + slideInVertically(
-                animationSpec = CameraMotion.slide<IntOffset>(),
-                initialOffsetY = { -it / 3 },
-            ),
-            exit = fadeOut(tween(120)) + slideOutVertically(
-                animationSpec = tween<IntOffset>(140),
-                targetOffsetY = { -it / 4 },
-            ),
-        ) {
-            Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = NotiIcons.Aperture,
-                        contentDescription = "Aperture",
-                        tint = CameraColors.LabelSecondary,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Text("APERTURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
-                    Spacer(Modifier.weight(1f))
-                    Text(state.fStopLabel, style = CameraType.Value, color = CameraColors.Label)
-                }
-                IosSlider(
-                    value = state.fStopIndex.toFloat(),
-                    valueRange = 0f..CameraController.FSTOPS.lastIndex.toFloat(),
-                    onValueChange = { actions.onApertureChanged(it.roundToInt()) },
-                    steps = CameraController.FSTOPS.lastIndex,
-                )
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Text("1.4", style = CameraType.Caption, fontSize = 9.sp, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("2.5", style = CameraType.Caption, fontSize = 9.sp, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("4.5", style = CameraType.Caption, fontSize = 9.sp, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("8", style = CameraType.Caption, fontSize = 9.sp, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("16", style = CameraType.Caption, fontSize = 9.sp, color = CameraColors.LabelQuaternary)
-                }
-                Spacer(Modifier.height(8.dp))
-            }
-        }
-
+        // Exposure
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("EXPOSURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
             Spacer(Modifier.weight(1f))
             Text(state.evLabel, style = CameraType.Value, color = CameraColors.Label)
         }
         IosSlider(
-            value = state.evSteps.toFloat(),
-            valueRange = -12f..12f,
-            onValueChange = { actions.onEvChanged(it.roundToInt()) },
-            steps = 24,
+            value = state.evFraction,
+            valueRange = 0f..1f,
+            onValueChange = { actions.onEvChanged(it * 8f - 4f) },
+            modifier = Modifier.padding(top = 2.dp),
         )
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text("−4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("0", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("+4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+        }
 
-        Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(16.dp))
         Box(
             Modifier
                 .fillMaxWidth()
                 .height(1.dp)
                 .background(CameraColors.Separator),
         )
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(14.dp))
 
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TogglePill("Grid", state.grid, { actions.onGridToggle() }, Modifier.weight(1f))
-            TogglePill("RAW", state.raw, { actions.onRawToggle() }, Modifier.weight(1f))
             TogglePill(
                 label = if (state.timerSeconds == 0) "Timer" else "${state.timerSeconds}s",
                 active = state.timerSeconds > 0,
@@ -561,7 +530,7 @@ fun ProSheet(
             )
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(14.dp))
         Text(
             text = state.telemetry,
             style = CameraType.Telemetry,
@@ -570,6 +539,14 @@ fun ProSheet(
             overflow = TextOverflow.Ellipsis,
         )
     }
+}
+
+/** Inverse of [CameraUiState.apertureFraction]: 0..1 → f-number on a log scale. */
+private fun fStopForFraction(fraction: Float): Float {
+    val lo = CameraController.FSTOPS.first().toDouble()
+    val hi = CameraController.FSTOPS.last().toDouble()
+    val f = fraction.coerceIn(0f, 1f).toDouble()
+    return (lo * Math.pow(hi / lo, f)).toFloat()
 }
 
 /** Portrait-only quick aperture, mirroring the iPhone's in-toolbar control. */
@@ -594,10 +571,9 @@ fun QuickApertureRow(
         Spacer(Modifier.width(6.dp))
         Box(Modifier.weight(1f)) {
             IosSlider(
-                value = state.fStopIndex.toFloat(),
-                valueRange = 0f..CameraController.FSTOPS.lastIndex.toFloat(),
-                onValueChange = { actions.onApertureChanged(it.roundToInt()) },
-                steps = CameraController.FSTOPS.lastIndex,
+                value = state.apertureFraction,
+                valueRange = 0f..1f,
+                onValueChange = { actions.onApertureChanged(fStopForFraction(it)) },
             )
         }
         Text(
@@ -623,16 +599,27 @@ fun TopBar(
             .height(56.dp)
             .padding(horizontal = CameraSpacing.gutter),
     ) {
-        GlassIconButton(
-            icon = when (state.flash) {
-                FlashMode.Off -> NotiIcons.FlashOff
-                FlashMode.Auto -> NotiIcons.FlashAuto
-                FlashMode.On -> NotiIcons.FlashOn
-            },
-            contentDescription = "Flash",
-            onClick = { actions.onFlashClick() },
+        Row(
             modifier = Modifier.align(Alignment.CenterStart),
-        )
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            GlassIconButton(
+                icon = when (state.flash) {
+                    FlashMode.Off -> NotiIcons.FlashOff
+                    FlashMode.Auto -> NotiIcons.FlashAuto
+                    FlashMode.On -> NotiIcons.FlashOn
+                },
+                contentDescription = "Flash",
+                onClick = { actions.onFlashClick() },
+            )
+
+            // RAW lives beside the flash now, not inside the settings sheet.
+            RawBadge(
+                active = state.raw,
+                onClick = { actions.onRawToggle() },
+            )
+        }
 
         StatusPill(
             text = state.status,
@@ -645,6 +632,67 @@ fun TopBar(
             onClick = { actions.onProToggle() },
             selected = state.proSheetOpen,
             modifier = Modifier.align(Alignment.CenterEnd),
+        )
+    }
+}
+
+/**
+ * RAW toggle: a compact capsule next to the flash button.
+ *
+ * Wordmarks read faster than an icon here ("RAW" is already the industry
+ * shorthand), and the active state uses the same white fill as the other
+ * selected controls.
+ */
+@Composable
+fun RawBadge(
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val haptics = rememberCameraHaptics()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.92f else 1f,
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
+        label = "raw-press",
+    )
+    val background by animateColorAsState(
+        targetValue = if (active) Color.White else CameraColors.Glass,
+        animationSpec = tween(180),
+        label = "raw-bg",
+    )
+    val foreground by animateColorAsState(
+        targetValue = if (active) Color.Black else CameraColors.LabelSecondary,
+        animationSpec = tween(180),
+        label = "raw-fg",
+    )
+
+    Box(
+        modifier = modifier
+            .height(30.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                clip = false
+            }
+            .background(background, RoundedCornerShape(15.dp))
+            .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(15.dp))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = {
+                    haptics.select()
+                    onClick()
+                },
+            )
+            .padding(horizontal = 11.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "RAW",
+            style = CameraType.Caption,
+            color = foreground,
         )
     }
 }

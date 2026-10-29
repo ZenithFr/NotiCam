@@ -55,6 +55,7 @@ fun ZoomChips(
     onSelect: (Float) -> Unit,
     stops: List<Float>,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
     chipSize: Dp = 44.dp,
     gap: Dp = 6.dp,
 ) {
@@ -114,6 +115,7 @@ fun ZoomChips(
                     selected = index == nearest && onStop,
                     dimmed = !onStop && index == nearest,
                     size = chipSize,
+                    enabled = enabled,
                     onClick = {
                         haptics.select()
                         onSelect(stop)
@@ -130,6 +132,7 @@ private fun ZoomChip(
     selected: Boolean,
     dimmed: Boolean,
     size: Dp,
+    enabled: Boolean,
     onClick: () -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
@@ -162,6 +165,7 @@ private fun ZoomChip(
             .clickable(
                 interactionSource = interaction,
                 indication = null,
+                enabled = enabled,
                 onClick = onClick,
             ),
         contentAlignment = Alignment.Center,

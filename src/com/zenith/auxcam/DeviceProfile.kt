@@ -50,12 +50,12 @@ object DeviceProfile {
     /**
      * Presentation rotation applied by `composite.comp`.
      *
-     * `false` → the sensor frame is presented as-is (1440x1080 landscape), so the
-     * viewfinder box is 4:3. Keep in sync with `kPreviewRotate90` in
-     * `VulkanPipeline.cpp`; flipping both to `true` presents the frame upright
-     * with a 3:4 box, which is the iPhone-like full-height preview.
+     * `true` → `composite.comp` rotates the 1440x1080 sensor frame 90° clockwise
+     * into the swapchain, so the viewfinder box is 3:4 portrait and the scene is
+     * upright when the phone is held normally. Keep in sync with
+     * `kPreviewRotate90` in `VulkanPipeline.cpp`.
      */
-    const val PREVIEW_ROTATION_90 = false
+    const val PREVIEW_ROTATION_90 = true
 
     /** Aspect the viewfinder composable must use. */
     val previewAspect: Float
@@ -64,7 +64,12 @@ object DeviceProfile {
     // ── Lens ladder exposed by the CMF Phone 2 Pro ──────────────────────────
     /** 24 mm equivalent main sensor. */
     const val FOCAL_MAIN_MM = 24f
-    val ZOOM_STOPS = listOf(1f, 2f, 5f)
+
+    /**
+     * Lens ladder: 0.6x (ultra-wide), 1x (main) and 2x (sensor crop).
+     * The chips, the zoom wheel and the pinch clamp all read this list.
+     */
+    val ZOOM_STOPS = listOf(0.6f, 1f, 2f)
 
     /**
      * True when running on the target hardware. The app is tuned for this phone

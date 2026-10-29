@@ -16,11 +16,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -50,6 +53,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun Viewfinder(
     gridVisible: Boolean,
+    zoom: Float,
     capturePulse: Int,
     focusNonce: Int,
     enabled: Boolean,
@@ -63,6 +67,9 @@ fun Viewfinder(
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     var viewSize by remember { mutableStateOf(Size.Zero) }
     val haptics = rememberCameraHaptics()
+    // Pinch detents are measured against the *live* engine zoom, not the gesture's
+    // own accumulation, so they line up with the 0.6x/1x/2x stops exactly.
+    val currentZoom by rememberUpdatedState(zoom)
 
     val reticleScale = remember { Animatable(0.72f) }
     val reticleAlpha = remember { Animatable(0f) }
@@ -138,7 +145,7 @@ fun Viewfinder(
                         alpha = reticleAlpha.value
                         scaleX = reticleScale.value
                         scaleY = reticleScale.value
-                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(
+                        transformOrigin = TransformOrigin(
                             pivotFractionX = if (viewSize.width > 0f) point.x / viewSize.width else 0.5f,
                             pivotFractionY = if (viewSize.height > 0f) point.y / viewSize.height else 0.5f,
                         )
@@ -151,7 +158,7 @@ fun Viewfinder(
                     color = CameraColors.Yellow,
                     topLeft = topLeft,
                     size = Size(half * 2f, half * 2f),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(4.dp.toPx()),
+                    cornerRadius = CornerRadius(4.dp.toPx()),
                     style = Stroke(width = 1.6.dp.toPx()),
                 )
                 drawCircle(color = CameraColors.Yellow, radius = 2.2.dp.toPx(), center = point)
@@ -175,20 +182,17 @@ fun Viewfinder(
                 }
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
-                    var accumulated = 1f
                     var lastStop = -1
                     detectTransformGestures(
                         onGestureEnd = {
-                            accumulated = 1f
                             lastStop = -1
                             haptics.gestureEnd()
                         },
-                    ) { _, _, zoom, _ ->
-                        if (zoom == 1f) return@detectTransformGestures
-                        onZoomGesture(zoom)
+                    ) { _, _, scale, _ ->
+                        if (scale == 1f) return@detectTransformGestures
+                        onZoomGesture(scale)
                         // Tick once per lens stop crossed, not per pointer event.
-                        accumulated *= zoom
-                        val stop = nearestStopIndex(accumulated)
+                        val stop = nearestStopIndex(currentZoom)
                         if (stop != lastStop) {
                             lastStop = stop
                             haptics.tick()
@@ -199,17 +203,3 @@ fun Viewfinder(
     }
 }
 
-/** Index of the closest lens stop to [zoom], used for pinch detents. */
-private fun nearestStopIndex(zoom: Float): Int {
-    val stops = DeviceProfile.ZOOM_STOPS
-    var best = 0
-    var bestDelta = Float.MAX_VALUE
-    stops.forEachIndexed { index, stop ->
-        val delta = kotlin.math.abs(stop - zoom)
-        if (delta < bestDelta) {
-            bestDelta = delta
-            best = index
-        }
-    }
-    return best
-}
