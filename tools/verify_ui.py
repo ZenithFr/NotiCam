@@ -202,7 +202,7 @@ def check_balance() -> int:
 DECL_RE = re.compile(
     r"^\s*(?:@\w+(?:\([^)]*\))?\s*)*"
     r"(?:public\s+|internal\s+|private\s+|protected\s+|abstract\s+|sealed\s+|data\s+|enum\s+|open\s+|inline\s+|value\s+)*"
-    r"(class|interface|object|fun|val|var)\s+([A-Za-z_][A-Za-z0-9_]*)",
+    r"(class|interface|object|fun|val|var)\s+(?:[\w.]+\.)?([A-Za-z_][A-Za-z0-9_]*)",
     re.MULTILINE,
 )
 

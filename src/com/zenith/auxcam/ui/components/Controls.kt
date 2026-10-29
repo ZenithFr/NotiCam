@@ -3,6 +3,8 @@ package com.zenith.auxcam.ui.components
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -38,6 +40,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,12 +66,17 @@ import com.zenith.auxcam.CameraController
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
+import com.zenith.auxcam.FrameRatio
+import com.zenith.auxcam.Resolution
+import com.zenith.auxcam.ui.effects.matteGlass
+import com.zenith.auxcam.ui.effects.rememberMatteGrain
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.icons.NotiIcons
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
+import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
 /**
@@ -90,6 +98,7 @@ fun GlassIconButton(
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val haptics = rememberCameraHaptics()
+    val grain = rememberMatteGrain()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.86f else 1f,
         // Down: crisp. Up: a touch of overshoot. This asymmetry is the whole trick.
@@ -129,7 +138,8 @@ fun GlassIconButton(
                     clip = false
                 }
                 .background(background, CircleShape)
-                .border(0.5.dp, CameraColors.Separator, CircleShape),
+                .border(0.5.dp, CameraColors.Separator, CircleShape)
+                .matteGlass(grain, CircleShape, strength = if (selected) 0.35f else 1f),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -402,17 +412,52 @@ fun TogglePill(
 @Composable
 fun GalleryTile(
     thumbnail: ImageBitmap?,
+    pulse: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val shape = RoundedCornerShape(10.dp)
+    val grain = rememberMatteGrain()
+    val haptics = rememberCameraHaptics()
+
+    // Landing: the tile pops and a white flash washes over it the moment the
+    // capture arrives, so the shutter -> tile flight has a visible destination.
+    val landing = remember { Animatable(0f) }
+    LaunchedEffect(pulse) {
+        if (pulse > 0) {
+            landing.snapTo(1f)
+            landing.animateTo(0f, tween(420, easing = FastOutSlowInEasing))
+        }
+    }
+    val pressed = remember { MutableInteractionSource() }
+    val isPressed by pressed.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (isPressed) 0.92f else 1f,
+        animationSpec = if (isPressed) CameraMotion.press() else CameraMotion.release(),
+        label = "gallery-press",
+    )
+
     Box(
         modifier = modifier
             .size(CameraSpacing.gallery)
+            .graphicsLayer {
+                val pop = 1f + 0.10f * landing.value
+                scaleX = pressScale * pop
+                scaleY = pressScale * pop
+                clip = false
+            }
             .clip(shape)
             .background(CameraColors.Label.copy(alpha = 0.08f), shape)
             .border(0.5.dp, CameraColors.SeparatorStrong, shape)
-            .clickable(onClick = onClick),
+            .matteGlass(grain, shape, strength = 0.8f)
+            .clickable(
+                interactionSource = pressed,
+                indication = null,
+                onClick = {
+                    haptics.tap()
+                    onClick()
+                },
+            ),
         contentAlignment = Alignment.Center,
     ) {
         if (thumbnail != null) {
@@ -428,6 +473,16 @@ fun GalleryTile(
                 contentDescription = "Gallery",
                 tint = CameraColors.LabelTertiary,
                 modifier = Modifier.size(22.dp),
+            )
+        }
+
+        // White flash on arrival, fading over 420 ms.
+        if (landing.value > 0.001f) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = landing.value * 0.85f }
+                    .background(Color.White),
             )
         }
     }
@@ -447,6 +502,8 @@ fun ProSheet(
     actions: CameraActions,
     modifier: Modifier = Modifier,
 ) {
+    val grain = rememberMatteGrain()
+
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -456,42 +513,72 @@ fun ProSheet(
                 color = CameraColors.SeparatorStrong,
                 shape = RoundedCornerShape(CameraSpacing.panelRadius),
             )
+            .matteGlass(grain, RoundedCornerShape(CameraSpacing.panelRadius))
             .padding(horizontal = 20.dp, vertical = 18.dp),
     ) {
-        // Aperture — logarithmic and continuous, so dragging feels like a real ring.
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = NotiIcons.Aperture,
-                contentDescription = "Aperture",
-                tint = CameraColors.LabelSecondary,
-                modifier = Modifier.size(16.dp),
-            )
-            Spacer(Modifier.width(7.dp))
-            Text("APERTURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
-            Spacer(Modifier.weight(1f))
-            Text(state.fStopLabel, style = CameraType.Value, color = CameraColors.Label)
-        }
-        IosSlider(
-            value = state.apertureFraction,
-            valueRange = 0f..1f,
-            onValueChange = { actions.onApertureChanged(fStopForFraction(it)) },
-            modifier = Modifier.padding(top = 2.dp),
-        )
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Text("1.4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("2.8", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("5.6", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("11", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("16", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+        // ── Framing: 1:1 · 4:3 · 16:9 · Full ────────────────────────────────
+        Text("FRAMING", style = CameraType.Section, color = CameraColors.LabelTertiary)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FrameRatio.entries.forEach { ratio ->
+                SegmentPill(
+                    label = ratio.label,
+                    selected = state.frameRatio == ratio,
+                    onClick = { actions.onFrameRatioSelected(ratio) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
         }
 
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(16.dp))
 
-        // Exposure
+        // ── Aperture: Portrait and Pro only ────────────────────────────────
+        AnimatedVisibility(
+            visible = state.apertureVisible,
+            enter = fadeIn(tween(200)) + slideInVertically(
+                animationSpec = CameraMotion.slide<IntOffset>(),
+                initialOffsetY = { -it / 3 },
+            ),
+            exit = fadeOut(tween(120)) + slideOutVertically(
+                animationSpec = tween<IntOffset>(140),
+                targetOffsetY = { -it / 4 },
+            ),
+        ) {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = NotiIcons.Aperture,
+                        contentDescription = "Aperture",
+                        tint = CameraColors.LabelSecondary,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text("APERTURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
+                    Spacer(Modifier.weight(1f))
+                    Text(state.fStopLabel, style = CameraType.Value, color = CameraColors.Label)
+                }
+                IosSlider(
+                    value = state.apertureFraction,
+                    valueRange = 0f..1f,
+                    onValueChange = { actions.onApertureChanged(fStopForFraction(it)) },
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+                Row(modifier = Modifier.fillMaxWidth()) {
+                    Text("1.4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+                    Spacer(Modifier.weight(1f))
+                    Text("2.8", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+                    Spacer(Modifier.weight(1f))
+                    Text("5.6", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+                    Spacer(Modifier.weight(1f))
+                    Text("11", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+                    Spacer(Modifier.weight(1f))
+                    Text("16", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+                }
+                Spacer(Modifier.height(14.dp))
+            }
+        }
+
+        // ── Exposure ───────────────────────────────────────────────────────
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("EXPOSURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
             Spacer(Modifier.weight(1f))
@@ -520,12 +607,35 @@ fun ProSheet(
         )
         Spacer(Modifier.height(14.dp))
 
+        // ── Capture options ────────────────────────────────────────────────
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TogglePill("Grid", state.grid, { actions.onGridToggle() }, Modifier.weight(1f))
             TogglePill(
-                label = if (state.timerSeconds == 0) "Timer" else "${state.timerSeconds}s",
+                label = state.resolution.label,
+                active = state.resolution == Resolution.High,
+                onClick = { actions.onResolutionToggle() },
+                modifier = Modifier.weight(1f),
+            )
+            TogglePill(
+                label = "GRID",
+                active = state.grid,
+                onClick = { actions.onGridToggle() },
+                modifier = Modifier.weight(1f),
+            )
+            TogglePill(
+                label = if (state.timerSeconds == 0) "TIMER" else "${state.timerSeconds}s",
                 active = state.timerSeconds > 0,
                 onClick = { actions.onTimerCycle() },
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Telephoto assist: above 2x hand the session to the physical tele lens.
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TelephotoPill(
+                active = state.telephoto,
+                onClick = { actions.onTelephotoToggle() },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -537,6 +647,160 @@ fun ProSheet(
             color = CameraColors.LabelTertiary,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** Segmented control used for the framing row. */
+@Composable
+private fun SegmentPill(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val haptics = rememberCameraHaptics()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.94f else 1f,
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
+        label = "segment-press",
+    )
+    val bg by animateColorAsState(
+        targetValue = if (selected) Color.White else CameraColors.Glass,
+        animationSpec = tween(190),
+        label = "segment-bg",
+    )
+    val fg by animateColorAsState(
+        targetValue = if (selected) Color.Black else CameraColors.LabelSecondary,
+        animationSpec = tween(190),
+        label = "segment-fg",
+    )
+
+    Box(
+        modifier = modifier
+            .height(32.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                clip = false
+            }
+            .background(bg, RoundedCornerShape(16.dp))
+            .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(16.dp))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = {
+                    haptics.select()
+                    onClick()
+                },
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, style = CameraType.Caption, color = fg, maxLines = 1)
+    }
+}
+
+/**
+ * Telephoto toggle with the "camera with a long lens" pictogram, so it reads as a
+ * lens choice rather than another abstract switch.
+ */
+@Composable
+private fun TelephotoPill(
+    active: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val haptics = rememberCameraHaptics()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.95f else 1f,
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
+        label = "tele-press",
+    )
+    val bg by animateColorAsState(
+        targetValue = if (active) Color.White else CameraColors.Glass,
+        animationSpec = tween(190),
+        label = "tele-bg",
+    )
+    val fg by animateColorAsState(
+        targetValue = if (active) Color.Black else CameraColors.LabelSecondary,
+        animationSpec = tween(190),
+        label = "tele-fg",
+    )
+
+    Row(
+        modifier = modifier
+            .height(36.dp)
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                clip = false
+            }
+            .background(bg, RoundedCornerShape(18.dp))
+            .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(18.dp))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = {
+                    haptics.select()
+                    onClick()
+                },
+            )
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center,
+    ) {
+        TelephotoGlyph(tint = fg, modifier = Modifier.size(16.dp))
+        Spacer(Modifier.width(7.dp))
+        Text(
+            text = if (active) "TELE · >2×" else "TELE OFF",
+            style = CameraType.Caption,
+            color = fg,
+            maxLines = 1,
+        )
+    }
+}
+
+/** Camera body with a long barrel — drawn, not themed, so it tints cleanly. */
+@Composable
+private fun TelephotoGlyph(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = 1.4.dp.toPx()
+        // body
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(w * 0.04f, h * 0.28f),
+            size = Size(w * 0.52f, h * 0.44f),
+            cornerRadius = CornerRadius(h * 0.10f),
+            style = Stroke(width = stroke),
+        )
+        // barrel
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(w * 0.56f, h * 0.38f),
+            size = Size(w * 0.34f, h * 0.24f),
+            cornerRadius = CornerRadius(h * 0.05f),
+            style = Stroke(width = stroke),
+        )
+        // hood
+        drawLine(
+            color = tint,
+            start = Offset(w * 0.90f, h * 0.34f),
+            end = Offset(w * 0.90f, h * 0.66f),
+            strokeWidth = stroke * 1.6f,
+        )
+        // viewfinder hump
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(w * 0.16f, h * 0.16f),
+            size = Size(w * 0.18f, h * 0.14f),
+            cornerRadius = CornerRadius(h * 0.04f),
+            style = Stroke(width = stroke),
         )
     }
 }
@@ -592,6 +856,7 @@ fun TopBar(
     state: CameraUiState,
     actions: CameraActions,
     modifier: Modifier = Modifier,
+    onInteraction: () -> Unit = {},
 ) {
     Box(
         modifier = modifier
@@ -611,13 +876,19 @@ fun TopBar(
                     FlashMode.On -> NotiIcons.FlashOn
                 },
                 contentDescription = "Flash",
-                onClick = { actions.onFlashClick() },
+                onClick = {
+                    onInteraction()
+                    actions.onFlashClick()
+                },
             )
 
             // RAW lives beside the flash now, not inside the settings sheet.
             RawBadge(
                 active = state.raw,
-                onClick = { actions.onRawToggle() },
+                onClick = {
+                    onInteraction()
+                    actions.onRawToggle()
+                },
             )
         }
 
@@ -629,7 +900,10 @@ fun TopBar(
         GlassIconButton(
             icon = if (state.proSheetOpen) NotiIcons.Close else NotiIcons.Sliders,
             contentDescription = "Pro controls",
-            onClick = { actions.onProToggle() },
+            onClick = {
+                onInteraction()
+                actions.onProToggle()
+            },
             selected = state.proSheetOpen,
             modifier = Modifier.align(Alignment.CenterEnd),
         )
@@ -668,6 +942,12 @@ fun RawBadge(
         label = "raw-fg",
     )
 
+    // The "vanity" moment: pressing RAW briefly morphs the badge into a bayer
+    // colour-filter-array icon — the rainbow sensor grid from the camera manuals.
+    val bayer = remember { Animatable(0f) }
+    val scope = rememberCoroutineScope()
+    val grain = rememberMatteGrain()
+
     Box(
         modifier = modifier
             .height(30.dp)
@@ -678,12 +958,18 @@ fun RawBadge(
             }
             .background(background, RoundedCornerShape(15.dp))
             .border(0.5.dp, CameraColors.Separator, RoundedCornerShape(15.dp))
+            .matteGlass(grain, RoundedCornerShape(15.dp), strength = 0.7f)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
                 onClick = {
                     haptics.select()
                     onClick()
+                    scope.launch {
+                        bayer.snapTo(0f)
+                        bayer.animateTo(1f, tween(260, easing = FastOutSlowInEasing))
+                        bayer.animateTo(0f, tween(300, easing = FastOutSlowInEasing))
+                    }
                 },
             )
             .padding(horizontal = 11.dp),
@@ -693,7 +979,56 @@ fun RawBadge(
             text = "RAW",
             style = CameraType.Caption,
             color = foreground,
+            modifier = Modifier.graphicsLayer { alpha = 1f - bayer.value },
         )
+
+        // Bayer mosaic: 2x2 RGGB blocks repeated, tinted like the manual diagrams,
+        // scaling in from the centre and dissolving back into the wordmark.
+        if (bayer.value > 0.001f) {
+            Canvas(
+                Modifier
+                    .size(30.dp)
+                    .graphicsLayer {
+                        val s = 0.55f + 0.45f * bayer.value
+                        scaleX = s
+                        scaleY = s
+                        alpha = bayer.value
+                    },
+            ) {
+                val cells = 4
+                val cell = size.minDimension / cells
+                val colors = listOf(
+                    Color(0xFFFF5A5F), Color(0xFF3DDC84),
+                    Color(0xFF3DDC84), Color(0xFF4C9AFF),
+                )
+                for (row in 0 until cells) {
+                    for (col in 0 until cells) {
+                        val tint = colors[(row * cells + col) % colors.size]
+                        drawRect(
+                            color = tint.copy(alpha = 0.85f),
+                            topLeft = Offset(col * cell + 1f, row * cell + 1f),
+                            size = Size(cell - 2f, cell - 2f),
+                        )
+                    }
+                }
+                // Micro-lens grid on top, the way the sensor diagrams show it.
+                for (i in 0..cells) {
+                    val p = i * cell
+                    drawLine(
+                        color = Color.Black.copy(alpha = 0.25f),
+                        start = Offset(p, 0f),
+                        end = Offset(p, size.height),
+                        strokeWidth = 1f,
+                    )
+                    drawLine(
+                        color = Color.Black.copy(alpha = 0.25f),
+                        start = Offset(0f, p),
+                        end = Offset(size.width, p),
+                        strokeWidth = 1f,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -728,6 +1063,7 @@ fun BottomBar(
         ) {
             GalleryTile(
                 thumbnail = state.lastThumbnail,
+                pulse = state.galleryPulse,
                 onClick = { actions.onGalleryOpen() },
                 modifier = Modifier.onGloballyPositioned { coords ->
                     onGalleryCenter(

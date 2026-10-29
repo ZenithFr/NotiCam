@@ -65,13 +65,16 @@ fun ShutterButton(
         if (pressed && enabled) haptics.shutterDown()
     }
 
+    // Two staggered rings on one clock: an outer ring that expands and a thin
+    // inner sweep that chases it. Both are read inside the draw lambda, so the
+    // whole capture animation costs zero recompositions (a pure 60 fps draw).
     val pulseProgress = remember { Animatable(1f) }
     LaunchedEffect(pulse) {
         if (pulse > 0) {
             pulseProgress.snapTo(0f)
             pulseProgress.animateTo(
                 targetValue = 1f,
-                animationSpec = tween(durationMillis = 520, easing = LinearOutSlowInEasing),
+                animationSpec = tween(durationMillis = 560, easing = LinearOutSlowInEasing),
             )
         }
     }
@@ -111,13 +114,28 @@ fun ShutterButton(
             val p = pulseProgress.value
             if (p < 1f) {
                 val maxPulse = boxRadius - 1.dp.toPx()
-                val radius = discRadius + (maxPulse - discRadius) * p
+
+                // Main ring: fast out, quick fade.
+                val ringRadius = discRadius + (maxPulse - discRadius) * p
                 drawCircle(
-                    color = Color.White.copy(alpha = 0.5f * (1f - p)),
-                    radius = radius,
+                    color = Color.White.copy(alpha = 0.55f * (1f - p)),
+                    radius = ringRadius,
                     center = center,
-                    style = Stroke(width = 2.dp.toPx()),
+                    style = Stroke(width = (2f - 0.8f * p).dp.toPx()),
                 )
+
+                // Chase ring: starts a beat later, thinner and shorter-lived. It is
+                // what makes the press read as a "snap" rather than a slow bloom.
+                val chase = ((p - 0.18f) / 0.82f).coerceIn(0f, 1f)
+                if (chase > 0f) {
+                    val chaseRadius = discRadius + (maxPulse - discRadius) * chase
+                    drawCircle(
+                        color = Color.White.copy(alpha = 0.28f * (1f - chase)),
+                        radius = chaseRadius,
+                        center = center,
+                        style = Stroke(width = 1.dp.toPx()),
+                    )
+                }
             }
 
             // 2. Outer ring — dims slightly while pressed, like the iPhone shutter.

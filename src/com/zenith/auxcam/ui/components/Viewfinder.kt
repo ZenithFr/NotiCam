@@ -23,6 +23,7 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -62,6 +63,9 @@ fun Viewfinder(
     onSurfaceDestroyed: (SurfaceHolder) -> Unit,
     onTap: (xFraction: Float, yFraction: Float) -> Unit,
     onZoomGesture: (scaleFactor: Float) -> Unit,
+    locked: Boolean,
+    onLock: () -> Unit,
+    onUnlock: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
@@ -73,6 +77,8 @@ fun Viewfinder(
 
     val reticleScale = remember { Animatable(0.72f) }
     val reticleAlpha = remember { Animatable(0f) }
+    // 0 = plain AE/AF square, 1 = locked badge with a padlock and label.
+    val lockMorph = remember { Animatable(0f) }
 
     LaunchedEffect(focusNonce) {
         if (focusNonce > 0 && focusPoint != null) {
@@ -82,7 +88,23 @@ fun Viewfinder(
             reticleAlpha.animateTo(1f, tween(durationMillis = 110))
             reticleScale.animateTo(targetValue = 1f, animationSpec = CameraMotion.release())
             delay(1200)
-            reticleAlpha.animateTo(0f, tween(durationMillis = 260, easing = FastOutSlowInEasing))
+            // A locked reticle stays put; only an unlocked one fades away.
+            if (!locked) {
+                reticleAlpha.animateTo(0f, tween(durationMillis = 260, easing = FastOutSlowInEasing))
+            }
+        }
+    }
+
+    LaunchedEffect(locked) {
+        if (locked) {
+            haptics.focusLock()
+            reticleAlpha.animateTo(1f, tween(120))
+            reticleScale.animateTo(0.82f, CameraMotion.release())
+            lockMorph.animateTo(1f, CameraMotion.select())
+        } else {
+            if (lockMorph.value > 0.01f) haptics.focusUnlock()
+            lockMorph.animateTo(0f, tween(180))
+            reticleScale.animateTo(1f, CameraMotion.release())
         }
     }
 
@@ -153,15 +175,77 @@ fun Viewfinder(
                     },
             ) {
                 val half = 36.dp.toPx()
-                val topLeft = Offset(point.x - half, point.y - half)
+                val m = lockMorph.value
+
+                // The square contracts a little and its corners tighten when locked.
+                val box = half * (1f - 0.18f * m)
                 drawRoundRect(
                     color = CameraColors.Yellow,
-                    topLeft = topLeft,
-                    size = Size(half * 2f, half * 2f),
-                    cornerRadius = CornerRadius(4.dp.toPx()),
-                    style = Stroke(width = 1.6.dp.toPx()),
+                    topLeft = Offset(point.x - box, point.y - box),
+                    size = Size(box * 2f, box * 2f),
+                    cornerRadius = CornerRadius(4.dp.toPx() + 4.dp.toPx() * m),
+                    style = Stroke(width = 1.6.dp.toPx() + 0.5.dp.toPx() * m),
                 )
-                drawCircle(color = CameraColors.Yellow, radius = 2.2.dp.toPx(), center = point)
+
+                if (m < 0.5f) {
+                    // Unlocked: the classic centre dot.
+                    drawCircle(
+                        color = CameraColors.Yellow.copy(alpha = 1f - m * 2f),
+                        radius = 2.2.dp.toPx(),
+                        center = point,
+                    )
+                } else {
+                    // Locked: a padlock glyph inside the square.
+                    val a = (m - 0.5f) * 2f
+                    val bodyW = 9.dp.toPx()
+                    val bodyH = 7.dp.toPx()
+                    val shake = bodyH / 2f
+                    val top = point.y - shake + 1.5.dp.toPx()
+                    drawRoundRect(
+                        color = CameraColors.Yellow.copy(alpha = a),
+                        topLeft = Offset(point.x - bodyW / 2f, top),
+                        size = Size(bodyW, bodyH),
+                        cornerRadius = CornerRadius(1.5.dp.toPx()),
+                    )
+                    drawArc(
+                        color = CameraColors.Yellow.copy(alpha = a),
+                        startAngle = 180f,
+                        sweepAngle = 180f,
+                        useCenter = false,
+                        topLeft = Offset(
+                            point.x - bodyW * 0.28f,
+                            top - bodyW * 0.62f,
+                        ),
+                        size = Size(bodyW * 0.56f, bodyW * 0.62f),
+                        style = Stroke(width = 1.4.dp.toPx(), cap = StrokeCap.Round),
+                    )
+                }
+            }
+
+            // "AE/AF LOCK" caption, fading in under the reticle.
+            if (lockMorph.value > 0.01f) {
+                val labelTop = point.y + 40.dp.toPx()
+                drawRoundRect(
+                    color = Color.Black.copy(alpha = 0.45f * lockMorph.value),
+                    topLeft = Offset(point.x - 34.dp.toPx(), labelTop),
+                    size = Size(68.dp.toPx(), 16.dp.toPx()),
+                    cornerRadius = CornerRadius(8.dp.toPx()),
+                )
+                // Three short bars stand in for the label at this size: text in a
+                // Canvas would need a TextMeasurer per frame, and the bars read as
+                // "AE/AF" at a glance without that cost.
+                var barX = 0f
+                for (bars in 0 until 3) {
+                    val w = 11.dp.toPx()
+                    val x = point.x - 24.dp.toPx() + barX
+                    drawRoundRect(
+                        color = CameraColors.Yellow.copy(alpha = lockMorph.value * 0.85f),
+                        topLeft = Offset(x, labelTop + 6.dp.toPx()),
+                        size = Size(w, 3.4.dp.toPx()),
+                        cornerRadius = CornerRadius(1.7.dp.toPx()),
+                    )
+                    barX += w + 4.dp.toPx()
+                }
             }
         }
 
@@ -170,15 +254,37 @@ fun Viewfinder(
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(enabled) {
+                .pointerInput(enabled, locked) {
                     if (!enabled) return@pointerInput
-                    detectTapGestures { offset ->
-                        viewSize = Size(size.width.toFloat(), size.height.toFloat())
-                        focusPoint = offset
-                        val w = size.width.toFloat().coerceAtLeast(1f)
-                        val h = size.height.toFloat().coerceAtLeast(1f)
-                        onTap((offset.x / w).coerceIn(0f, 1f), (offset.y / h).coerceIn(0f, 1f))
-                    }
+                    detectTapGestures(
+                        // Tap while locked releases; a normal tap focuses.
+                        onTap = { offset ->
+                            if (locked) {
+                                onUnlock()
+                            } else {
+                                viewSize = Size(size.width.toFloat(), size.height.toFloat())
+                                focusPoint = offset
+                                val w = size.width.toFloat().coerceAtLeast(1f)
+                                val h = size.height.toFloat().coerceAtLeast(1f)
+                                onTap(
+                                    (offset.x / w).coerceIn(0f, 1f),
+                                    (offset.y / h).coerceIn(0f, 1f),
+                                )
+                            }
+                        },
+                        // Hold to lock AE/AF at that point.
+                        onLongPress = { offset ->
+                            viewSize = Size(size.width.toFloat(), size.height.toFloat())
+                            focusPoint = offset
+                            val w = size.width.toFloat().coerceAtLeast(1f)
+                            val h = size.height.toFloat().coerceAtLeast(1f)
+                            onTap(
+                                (offset.x / w).coerceIn(0f, 1f),
+                                (offset.y / h).coerceIn(0f, 1f),
+                            )
+                            onLock()
+                        },
+                    )
                 }
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput

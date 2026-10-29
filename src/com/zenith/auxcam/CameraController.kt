@@ -84,6 +84,24 @@ interface CameraActions {
     fun onGridToggle()
     fun onRawToggle()
     fun onTimerCycle()
+
+    /** 12MP <-> 50MP. */
+    fun onResolutionToggle()
+
+    /** Tele lens assist above 2x. */
+    fun onTelephotoToggle()
+
+    /** Cycle 1:1 -> 4:3 -> 16:9 -> Full. */
+    fun onFrameRatioCycle()
+
+    /** Pick a framing directly (the segmented control). */
+    fun onFrameRatioSelected(ratio: FrameRatio)
+
+    /** Long-press on the viewfinder: lock AE/AF at the current point. */
+    fun onFocusLock()
+
+    /** Tap while locked: release. */
+    fun onFocusUnlock()
     fun onShutterClick()
     fun onSwitchLens()
     /** Opens the phone's gallery on the newest picture. */
@@ -114,6 +132,9 @@ class CameraController(
         private const val Y8_FORMAT = 0x20203859
         private const val THUMB_W = 168
         private const val THUMB_H = 126
+
+        /** Above this zoom the telephoto assist hands over to the physical tele. */
+        private const val TELE_THRESHOLD = 2.0f
 
         /** Apple's Portrait aperture ladder: f/1.4 → f/16. */
         val FSTOPS = floatArrayOf(
@@ -397,9 +418,10 @@ class CameraController(
             reader.setOnImageAvailableListener({ r -> onDepthImage(r) }, handler)
         }
 
+        val (stillW, stillH) = DeviceProfile.stillSize(state.resolution)
         stillReader = ImageReader.newInstance(
-            DeviceProfile.STILL_WIDTH,
-            DeviceProfile.STILL_HEIGHT,
+            stillW,
+            stillH,
             ImageFormat.YUV_420_888,
             2,
             HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
@@ -414,6 +436,7 @@ class CameraController(
         val color = colorReader ?: return
         val depth = depthReader ?: return
         val still = stillReader ?: return
+        val (stillW, stillH) = DeviceProfile.stillSize(state.resolution)
 
         // The preview surface must exist before the engine is initialised.
         if (!holder.surface.isValid) return
@@ -430,7 +453,7 @@ class CameraController(
             val ok = svc.openStereoSession(
                 color.surface, DeviceProfile.COLOR_WIDTH, DeviceProfile.COLOR_HEIGHT,
                 depth.surface, DeviceProfile.DEPTH_WIDTH, DeviceProfile.DEPTH_HEIGHT,
-                still.surface, DeviceProfile.STILL_WIDTH, DeviceProfile.STILL_HEIGHT,
+                still.surface, stillW, stillH,
                 currentLens,
             )
             update { it.copy(status = if (ok) "Starting engine…" else "Session failed") }
@@ -545,6 +568,9 @@ class CameraController(
                 outPath = File(dir, "AUXCAM_$stamp.rgba").absolutePath
 
                 if (state.raw) dumpRawPlanes(image, dir, stamp)
+                // 50MP vs 12MP is decided by the capture request the service
+                // builds; log the intent here so a mismatch is visible.
+                Log.i(TAG, "capture resolution=${state.resolution.label}")
 
                 val timestamps = LongArray(3)
                 native.processStill(
@@ -609,8 +635,7 @@ class CameraController(
         var raf: RandomAccessFile? = null
         return try {
             val file = File(rgbaPath)
-            val srcW = DeviceProfile.STILL_WIDTH
-            val srcH = DeviceProfile.STILL_HEIGHT
+            val (srcW, srcH) = DeviceProfile.stillSize(state.resolution)
             if (!file.exists() || file.length() < srcW.toLong() * srcH * 2L) return null
 
             raf = RandomAccessFile(file, "r")
@@ -750,6 +775,13 @@ class CameraController(
             main.postDelayed(hideDial, 1600L)
         }
 
+        // Tele assist: cross the 2x threshold with telephoto enabled and hand the
+        // session to the physical tele lens; fall back to the main sensor below it.
+        if (state.telephoto) {
+            if (clamped > TELE_THRESHOLD && !onTele) switchToTele()
+            else if (clamped <= TELE_THRESHOLD && onTele) switchToMain()
+        }
+
         // Pinch produces dozens of events per gesture — only forward real changes.
         if (force || kotlin.math.abs(clamped - lastSentZoom) > 0.02f) {
             lastSentZoom = clamped
@@ -758,6 +790,27 @@ class CameraController(
             } catch (e: RemoteException) {
                 Log.w(TAG, "setZoom failed")
             }
+        }
+    }
+
+    private fun switchToTele() {
+        val tele = teleLensId ?: return
+        onTele = true
+        try {
+            service?.setPhysicalLens(tele)
+            Log.i(TAG, "tele lens $tele engaged")
+        } catch (e: RemoteException) {
+            Log.w(TAG, "tele switch failed")
+            onTele = false
+        }
+    }
+
+    private fun switchToMain() {
+        onTele = false
+        try {
+            service?.setPhysicalLens(currentLens)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "main lens revert failed")
         }
     }
 
@@ -785,6 +838,64 @@ class CameraController(
         } catch (e: RemoteException) {
             Log.w(TAG, "setEvCompensation failed")
         }
+    }
+
+    override fun onResolutionToggle() {
+        val next = state.resolution.next()
+        update { it.copy(resolution = next, status = "${next.label} mode") }
+        haptic()
+        // The still stream is sized when the readers are created, so the session
+        // has to be rebuilt for 50 MP to actually take effect.
+        io.execute {
+            post { recreateStillReaderAndSession() }
+        }
+    }
+
+    private fun recreateStillReaderAndSession() {
+        try {
+            stillReader?.close()
+            val (w, h) = DeviceProfile.stillSize(state.resolution)
+            stillReader = ImageReader.newInstance(
+                w,
+                h,
+                ImageFormat.YUV_420_888,
+                2,
+                HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
+            ).also { reader ->
+                reader.setOnImageAvailableListener({ r -> onStillImage(r) }, handler)
+            }
+            startStereoSession()
+        } catch (t: Throwable) {
+            Log.w(TAG, "still reader recreate failed: ${t.message}")
+        }
+    }
+
+    override fun onTelephotoToggle() {
+        update { it.copy(telephoto = !it.telephoto) }
+        haptic()
+        // Apply immediately if the current zoom already qualifies.
+        if (state.telephoto && state.zoom > TELE_THRESHOLD) switchToTele()
+    }
+
+    override fun onFrameRatioCycle() {
+        update { it.copy(frameRatio = it.frameRatio.next()) }
+        haptic()
+    }
+
+    override fun onFrameRatioSelected(ratio: FrameRatio) {
+        if (state.frameRatio == ratio) return
+        update { it.copy(frameRatio = ratio) }
+        haptic()
+    }
+
+    override fun onFocusLock() {
+        if (state.aeAfLocked) return
+        update { it.copy(aeAfLocked = true) }
+    }
+
+    override fun onFocusUnlock() {
+        if (!state.aeAfLocked) return
+        update { it.copy(aeAfLocked = false) }
     }
 
     override fun onGridToggle() {
@@ -925,6 +1036,13 @@ class CameraController(
 
         val defaultIndex = physicalLenses.indexOf("0")
         currentLens = if (defaultIndex >= 0) "0" else physicalLenses.firstOrNull() ?: "0"
+
+        // The CMF Phone 2 Pro exposes main + ultra-wide + tele behind camera id 5.
+        // Pick the tele as the highest physical id that is not the active one; the
+        // fallback keeps tele-assist inert on devices that only have two lenses.
+        teleLensId = physicalLenses
+            .filter { it != currentLens }
+            .maxOrNull()
         update {
             it.copy(
                 lensCount = physicalLenses.size.coerceAtLeast(1),

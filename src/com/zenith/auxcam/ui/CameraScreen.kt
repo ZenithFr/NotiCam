@@ -38,6 +38,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -51,6 +52,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalDensity
@@ -71,6 +73,7 @@ import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /**
  * Root of the capture UI.
@@ -104,17 +107,53 @@ fun CameraScreen(
     // anchored here so its arc grows out of the chips.
     var chipsTopPx by remember { mutableStateOf(0f) }
 
+    // The header (flash state, RAW, status, Pro) fades out 2 s after the last
+    // interaction and comes back on the next touch.
+    var topBarVisible by remember { mutableStateOf(true) }
+    var interactionNonce by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(interactionNonce, state.status, state.flash, state.raw, state.proSheetOpen) {
+        topBarVisible = true
+        if (state.proSheetOpen) return@LaunchedEffect
+        delay(2000)
+        topBarVisible = false
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(CameraColors.Black),
+            .background(CameraColors.Black)
+            // Any touch revives the header — it is a HUD, not a permanent bar.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent()
+                        interactionNonce++
+                    }
+                }
+            },
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
-            TopBar(state = state, actions = actions)
+            // Header fade runs on an animated alpha read inside graphicsLayer, so
+            // it is a draw-phase change (60 fps) rather than a recomposition.
+            val headerAlpha by animateFloatAsState(
+                targetValue = if (topBarVisible) 1f else 0f,
+                animationSpec = CameraMotion.fade(if (topBarVisible) 180 else 420),
+                label = "header-alpha",
+            )
+            TopBar(
+                state = state,
+                actions = actions,
+                onInteraction = { interactionNonce++ },
+                modifier = Modifier.graphicsLayer {
+                    alpha = headerAlpha
+                    clip = false
+                },
+            )
 
             if (!DeviceProfile.isTargetDevice()) {
                 DeviceWarning()
@@ -131,7 +170,9 @@ fun CameraScreen(
                 // Fit the sensor rectangle inside the slot without stretching it:
                 // width-bound when the slot is proportionally tall enough, otherwise
                 // height-bound. Expressed in dp so the surface gets exact pixels.
-                val sensorAspect = DeviceProfile.previewAspect
+                // `frameAspect` encodes the user's 1:1 / 4:3 / 16:9 / FULL choice;
+                // null means "fill the slot" (Full).
+                val sensorAspect = state.frameAspect ?: if (maxHeight.value > 0f) maxWidth / maxHeight else DeviceProfile.previewAspect
                 val widthBound = maxWidth / sensorAspect <= maxHeight
                 val frameWidth = if (widthBound) maxWidth else maxHeight * sensorAspect
                 val frameHeight = if (widthBound) maxWidth / sensorAspect else maxHeight
@@ -147,6 +188,9 @@ fun CameraScreen(
                     onSurfaceDestroyed = actions::onPreviewSurfaceDestroyed,
                     onTap = actions::onFocusAt,
                     onZoomGesture = actions::onZoomGesture,
+                    locked = state.aeAfLocked,
+                    onLock = actions::onFocusLock,
+                    onUnlock = actions::onFocusUnlock,
                     modifier = Modifier.size(frameWidth, frameHeight),
                 )
             }

@@ -35,6 +35,16 @@ object DeviceProfile {
     const val STILL_WIDTH = 4080
     const val STILL_HEIGHT = 3072
 
+    /**
+     * Still stream size for a capture resolution. The sensor is 4:3, so both modes
+     * keep the 4:3 shape; 50 MP doubles the long edge (8160 x 6120) and is what the
+     * CMF Phone 2 Pro exposes as its full-resolution mode.
+     */
+    fun stillSize(resolution: Resolution): Pair<Int, Int> = when (resolution) {
+        Resolution.Standard -> STILL_WIDTH to STILL_HEIGHT
+        Resolution.High -> 8160 to 6120
+    }
+
     const val CAMERA_ID = "5"
 
     /**
@@ -70,6 +80,21 @@ object DeviceProfile {
      * The chips, the zoom wheel and the pinch clamp all read this list.
      */
     val ZOOM_STOPS = listOf(0.6f, 1f, 2f)
+
+    /**
+     * Chip label for a stop. The ultra-wide reads as "UW" (the way camera apps
+     * label it) with the real focal multiplier in small type beneath, instead of
+     * a bare "0.6×" that looks like a digital zoom step.
+     */
+    fun zoomLabel(stop: Float): String = when {
+        stop < 0.95f -> "UW"
+        else -> if (kotlin.math.abs(stop - stop.toInt()) < 0.05f) "${stop.toInt()}×"
+        else String.format("%.1f×", stop)
+    }
+
+    /** Small caption under a chip label, or null when the label says it all. */
+    fun zoomCaption(stop: Float): String? =
+        if (stop < 0.95f) String.format("%.1f×", stop) else null
 
     /**
      * True when running on the target hardware. The app is tuned for this phone

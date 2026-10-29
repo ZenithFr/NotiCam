@@ -19,7 +19,7 @@ back to code.
 | **The frame is never stretched *or* sideways.** | The sensor streams 1440 × 1080; `composite.comp` rotates it **90° clockwise** into the swapchain, so the box is 3:4 portrait and the scene is upright in the hand. `CameraScreen` fits a box of exactly `DeviceProfile.previewAspect` inside the leftover slot and that box *is* the `SurfaceView` extent. |
 | **Pinch is the only zoom input.** | The wheel is a read-out, not a control: it has no pointer input, so nothing can be dragged sideways and no part of the framebuffer can be occluded by a touch target. |
 | **One accent colour.** | `CameraColors.Yellow` (`#FFD60A`) marks selection (active mode, ƒ needle, "Done") and nothing else. `Red` (`#FF453A`) is reserved for recording. |
-| **Glass, not slabs.** | `CameraColors.Glass` (55 % `#1C1C1E`) capsules with a 0.5 dp `#1FFFFFFF` hairline. The old opaque `#D00B0B0E` toolbar and acrylic cards are gone. |
+| **Glass, not slabs.** | `CameraColors.Glass` capsules with a hairline **plus a frosted texture** (`ui/effects/MatteGlass.kt`): a sheen along the top edge and a 64×64 grain tile repeated by the GPU. Flat translucency looked like a tinted rectangle. |
 | **Motion has meaning.** | Everything is a Compose spring (`dampingRatio` 0.6–0.9, `StiffnessLow`…`StiffnessHigh`), 110–460 ms. No `LinearInterpolator`, no `ValueAnimator`. |
 | **Nothing clips.** | Every animated control composes at its *maximum* size and sets `clip = false` on its `graphicsLayer`; expansion animations run with `clip = false`. The shutter's pulse ring is drawn inside its own 96 dp box. |
 | **Thumb-reachable.** | Shutter, modes, lens chips and the ƒ row sit in the bottom half; flash/Pro in the top corners; everything ≥ 48 dp of touch target. |
@@ -91,15 +91,15 @@ whole screen without being clipped by the toolbar or the frame.
 | `Viewfinder` | `Viewfinder.kt` | `AndroidView(SurfaceView)` filling the box the caller sized to `previewAspect`. Rule-of-thirds grid, AE/AF reticle (spring-in, pivot at the tap), capture bloom, tap-to-focus + pinch-to-zoom detectors. |
 | `GlassIconButton` | `Controls.kt` | 44 dp glass circle inside a 48 dp touch target; press scales to 0.90 with `clip = false`. |
 | `StatusPill` | `Controls.kt` | Black 42 % capsule, `AnimatedContent` crossfade on text change. |
-| `ZoomChips` | `ZoomChips.kt` | 0.6× / 1× / 2× with a single white disc travelling between positions; `zoom` is the live engine value, so a pinch moves it too. Between stops the disc fades and the nearest label brightens. While the wheel is up the row fades to 0 and shrinks to 0.84 — it *becomes* the wheel. |
+| `ZoomChips` | `ZoomChips.kt` | **UW** (+ `0.6×` beneath) / 1× / 2× with a single white disc travelling between positions; `zoom` is the live engine value, so a pinch moves it too. Between stops the disc fades and the nearest label brightens. While the wheel is up the row fades to 0 and shrinks to 0.84 — it *becomes* the wheel. |
 | `ModeCarousel` | `Controls.kt` | `PHOTO · PORTRAIT · PRO`, `Yellow` for the selection, `animateColorAsState`. |
 | `IosSlider` | `Controls.kt` | 4 dp track, 20 dp white knob, tap or drag, integer snapping for the ƒ/EV ladders, `CLOCK_TICK` haptic on drag. |
 | `TogglePill` | `Controls.kt` | White when active — used for Grid / RAW / Timer. |
 | `GalleryTile` | `Controls.kt` | 52 dp tile showing the real decoded bokeh frame, else the gallery glyph. |
-| `ProSheet` | `Controls.kt` | Settings panel with no title and no Done button: continuous ƒ slider (log scale), continuous ±4 EV slider, Grid / Timer, live telemetry. Rendered by `ProMenuOverlay`, which hangs it under the top bar and slides it **down**; tapping the scrim or the top-bar Pro button closes it. |
-| `TopBar` | `Controls.kt` | `Box` so the status pill stays optically centred while the corner buttons change width. |
+| `ProSheet` | `Controls.kt` | Settings panel with no title and no Done button: framing segments (1:1 · **4:3** · 16:9 · Full), aperture (Portrait/Pro only), continuous ±4 EV, 12MP/50MP, Grid, Timer, telephoto assist, live telemetry. Rendered by `ProMenuOverlay`, which hangs it under the top bar and slides it **down**; tapping the scrim or the top-bar Pro button closes it. |
+| `TopBar` | `Controls.kt` | Flash + RAW on the left, status centred, Pro on the right. The whole header is a HUD: it fades out 2 s after the last interaction and returns on the next touch. |
 | `BottomBar` | `Controls.kt` | Pro sheet → modes → shutter row. Publishes the shutter and gallery centres via `onGloballyPositioned` for the hand-off animation. |
-| `ZoomDial` | `ZoomDial.kt` | Zoom wheel, **read-only**: top arc only (202°→338°), 47 ticks whose alpha follows `sin()`, a radial backdrop that fades to fully transparent before the bottom, travelled thread + needle + glow knob, callout pop per stop. No pointer input — zoom is pinch-only. |
+| `ZoomDial` | `ZoomDial.kt` | Zoom wheel, **read-only**: top arc (161°→379°, 218° of travel at a 196 dp diameter), 56 ticks whose alpha follows `sin()`, radial backdrop fading to nothing before the bottom, travelled thread + needle + glow knob, callout centred and lifted into the arc's opening. No pointer input — zoom is pinch-only. |
 | `NotiIcons` | `ui/icons/NotiIcons.kt` | Nine hand-built `ImageVector`s on a 24 unit grid, 1.7 stroke, round caps. Resolution-independent, so scaling can never resample or crop a glyph. |
 
 ---
@@ -109,6 +109,9 @@ whole screen without being clipped by the toolbar or the frame.
 | Gesture | Result | Engine call |
 |---|---|---|
 | Tap the frame | Reticle springs in at the tap point | `focusAt(sensorX, sensorY)` on the privileged session |
+| **Hold** the frame | AE/AF locks: the reticle morphs into a padlock badge and stays until tapped | `focusAt(...)` + locked AE/AF |
+| Tap while locked | Releases the lock | — |
+| Pinch past 2× with TELE on | Session hands over to the physical telephoto lens | `setPhysicalLens(tele)` |
 | Pinch the frame | Chips morph into the wheel, zoom follows the pinch | `setZoom(z)`, throttled to 0.02 steps |
 | Tap a lens chip | Jump to 0.6× / 1× / 2× (chips stay on screen) | `setZoom(z)` |
 | Tap the shutter | Bloom + ring pulse + shutter→gallery flight | capture request with the current ƒ and EV |
@@ -117,7 +120,10 @@ whole screen without being clipped by the toolbar or the frame.
 | Tap RAW | Toggles RAW capture (beside the flash, not in the sheet) | raw plane dump |
 | Tap flash | Off → Auto → On, icon + status pill update | `setFlashMode(mode)` |
 | Portrait mode | ƒ ladder appears in the bottom bar | — |
-| Tap gallery | Opens the system gallery | `ACTION_VIEW` |
+| Tap gallery | Tile pops on arrival; opens the system gallery | `ACTION_VIEW` |
+| Framing 1:1 / 4:3 / 16:9 / Full | Crops the viewfinder box (never stretches) | — |
+| 12MP / 50MP | Rebuilds the still stream at 8160 × 6120 | session restart |
+| RAW press | Badge morphs into a bayer CFA sensor icon, then back | raw plane dump |
 
 Sensor-space mapping for a tap (`CameraController.onFocusAt`) mirrors the shader:
 with `PREVIEW_ROTATION_90` the normalised tap `(u, v)` becomes `sensorX = v`,
@@ -148,6 +154,10 @@ deliberately asymmetric: **press down is crisp, release is springy**.
 | Chips → wheel morph | chips fade 140 ms + shrink to 0.84 + drop 6 dp; wheel scales 0.55 → 1 from `TransformOrigin(0.5, 0)` on `slide()`, so the arc unfurls out of the chip line |
 | Settings sheet | slides **down** from under the top bar + fade 160 ms + scale 0.96 → 1 from the top edge; exit 130–160 ms; scrim fades 180 ms |
 | Gallery flight | 460 ms `FastOutSlowIn`, 96 dp tile, 26 dp arc lift |
+| Gallery landing | tile pops 1.10× and a white flash washes out over 420 ms |
+| Capture pulse | two staggered rings (main + chase) on one 560 ms clock, both drawn in the draw phase |
+| Header HUD | in 180 ms, out 420 ms, animated alpha read inside `graphicsLayer` |
+| AE/AF lock | square contracts to 0.82, corners round, padlock + "AE/AF LOCK" fade in on `slide()`; unlock reverses over 180 ms |
 
 ### Layout-safe animation rules
 
@@ -167,15 +177,25 @@ deliberately asymmetric: **press down is crisp, release is springy**.
 `VibrationEffect` (falling back to `HapticFeedbackConstants` below Android 10).
 Predefined effects respect the system touch-feedback setting.
 
-| Event | Effect |
+Haptics are **soft by design**. The old implementation used `VibrationEffect`
+predefined effects, which drive the main actuator at full strength — every tap felt
+like a notification. The vocabulary now goes through `View.performHapticFeedback`
+first, which uses the same tuned path as the keyboard, respects the user's haptic
+intensity, and is inherently a tick rather than a pulse.
+
+| Event | Constant (first that is supported wins) |
 |---|---|
-| Zoom wheel detent / chip crossing a stop | `EFFECT_TICK` |
-| Chip, mode, toggle selection | `EFFECT_CLICK` |
-| Plain button | `EFFECT_CLICK` (keyboard-tap fallback) |
-| Finger down on the shutter | `EFFECT_HEAVY_CLICK` |
-| Frame captured | `EFFECT_DOUBLE_CLICK` |
-| AE/AF lock | `EFFECT_CLICK` |
-| Gesture end (pinch, wheel release) | `GESTURE_END` |
+| Pinch crossing a lens stop | `SEGMENT_TICK` (API 34) → `CLOCK_TICK` |
+| Chip / mode / toggle / framing selection | `CONTEXT_CLICK` → `VIRTUAL_KEY` |
+| Plain button | `KEYBOARD_TAP` → `VIRTUAL_KEY` |
+| Finger down on the shutter | `LONG_PRESS` → `VIRTUAL_KEY` |
+| Frame captured | `CONFIRM` → `VIRTUAL_KEY` |
+| AE/AF hold to lock | `LONG_PRESS` → `CONTEXT_CLICK` |
+| AE/AF released | `CONTEXT_CLICK` → `VIRTUAL_KEY` |
+| Gesture end | `GESTURE_END` → `CLOCK_TICK` |
+
+Only if every constant is unavailable (or touch feedback is off system-wide) does it
+fall back to a 10 ms, amplitude-30 one-shot — never a full-strength vibration.
 
 ---
 
