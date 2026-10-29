@@ -42,7 +42,7 @@ the shipping layout lives in [`design/index.html`](design/index.html).
 | **Haptics** | Single `VIRTUAL_KEY` blip, then full-strength vibrator effects | `CameraHaptics`: soft `performHapticFeedback` vocabulary (segment ticks, context clicks, confirm) with an amplitude-limited one-shot only as a last resort |
 | **Icons** | 24 vector drawables + PNG-tinted bitmaps | Nine hand-built `ImageVector`s (24-unit grid, 1.7 stroke) — resolution independent, can never be resampled or cropped |
 | **Shutter** | Static layered drawable | `ShutterButton`: ring/gap/disc, spring compression, capture pulse drawn *inside* its own 96 dp box |
-| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; RAW sits beside the flash; 0.6×/1×/2× chips + pinch (the only zoom input) drive `SCALER_CROP_REGION`; continuous ƒ slider drives the CoC pass |
+| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; RAW sits beside the flash; 0.6×/1×/2× chips, a pinch on the scene or a drag along the chip row (the two zoom gestures) drive `SCALER_CROP_REGION`; continuous ƒ slider drives the CoC pass |
 | **Focus** | Static yellow square | Spring-in AE/AF reticle + hardware focus scan at the tap point |
 | **Settings** | Chevron drawer with dead buttons | Sheet sliding down from the top bar: continuous ƒ and ±4 EV sliders, Grid / Timer, live telemetry (no title, no Done — tap outside) |
 | **Gallery** | Always-empty tile | Real bokeh frame decoded from the capture, plus a shutter→gallery flight |

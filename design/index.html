@@ -889,24 +889,87 @@
     disc.style.opacity = onStop ? "1" : "0";
   }
 
-  function setZoom(z) {
-    state.zoom = z;
+  // `summon` is separate on purpose: changing the zoom is not the same event as
+  // performing a zoom gesture. Chip taps and the lens flip change the value and
+  // must leave the chips alone; only a pinch or a chip-row drag brings the wheel
+  // up. Keying visibility off "the zoom changed" is exactly what used to pop the
+  // wheel whenever the lens was flipped (the flip resets zoom to 1x).
+  function setZoom(z, summon = false) {
+    // Clamp once, then derive every read-out from the clamped value. The old code
+    // clamped the state but printed the raw gesture value, so a hard pinch could
+    // show "3.5×" while the camera was actually pinned at 2×.
+    const zv = Math.min(ZMAX, Math.max(ZMIN, z));
+    state.zoom = zv;
     chips.forEach(([id, val]) => {
       const b = $(id);
-      const on = Math.abs(val - z) < 0.08;
+      const on = Math.abs(val - zv) < 0.08;
       b.classList.toggle("sel", on);
-      b.classList.toggle("near", !on && Math.abs(val - z) < 0.6);
+      b.classList.toggle("near", !on && Math.abs(val - zv) < 0.6);
     });
     moveDisc();
-    el.dialZoom.textContent = fmtZoom(z);
-    el.dialSub.textContent = MM(z) + " MM";
-    drawTicks(z);
-    showWheel();
+    el.dialZoom.textContent = fmtZoom(zv);
+    el.dialSub.textContent = MM(zv) + " MM";
+    drawTicks(zv);
+    if (summon) showWheel();
   }
   const fmtZoom = z => (Math.abs(z - Math.round(z)) < 0.05 ? Math.round(z) : z.toFixed(1)) + "×";
-  chips.forEach(([id, val]) => $(id).addEventListener("click", () => setZoom(val)));
+  // A chip tap is a destination, not a gesture: it selects the stop and leaves the
+  // chips where they are. `suppressTap` is set by the scrub handler below so that
+  // finishing a drag on top of a chip does not also select it.
+  let suppressTap = false;
+  chips.forEach(([id, val]) => $(id).addEventListener("click", () => {
+    if (suppressTap) { suppressTap = false; return; }
+    setZoom(val);
+  }));
   addEventListener("resize", moveDisc);
   requestAnimationFrame(moveDisc);
+
+  // ── chip-row scrub ───────────────────────────────────────────────────────
+  // Dragging the row is the same gesture family as a pinch: the chips collapse
+  // and the wheel takes over. The listener sits on #zoomstack, which stays put
+  // while .lensrow fades to pointer-events:none, so the drag survives the wheel
+  // arriving — otherwise the gesture would die the moment it worked.
+  (() => {
+    const stack = $("zoomstack");
+    let drag = null;
+
+    stack.addEventListener("pointerdown", e => {
+      if (e.button !== undefined && e.button !== 0) return;
+      drag = { id: e.pointerId, startX: e.clientX, x: e.clientX, moved: false };
+    });
+
+    stack.addEventListener("pointermove", e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const total = e.clientX - drag.startX;
+      if (!drag.moved) {
+        if (Math.abs(total) < 5) return;   // touch slop: a tap is still a tap
+        drag.moved = true;
+        drag.x = e.clientX - total;        // scrub from the slop point
+        // Capture only once this is definitely a drag: capturing on pointerdown
+        // would swallow the chip's own click, because pointerup would be retargeted
+        // at the row instead of the button under the finger.
+        try { stack.setPointerCapture(e.pointerId); } catch (_) {}
+        showWheel();
+      }
+      const dx = e.clientX - drag.x;
+      drag.x = e.clientX;
+      // Exponential: same finger travel moves the same proportion of the range at
+      // 0.6x and at 2x. Mirrors CameraController.onZoomDrag (~180 px doubles).
+      setZoom(state.zoom * Math.exp(dx / 180), true);
+    });
+
+    const end = e => {
+      if (!drag || (e.pointerId !== undefined && e.pointerId !== drag.id)) return;
+      if (drag.moved) {
+        suppressTap = true;
+        // The click event (if any) fires after this, so clear the latch then.
+        setTimeout(() => { suppressTap = false; }, 0);
+      }
+      drag = null;
+    };
+    stack.addEventListener("pointerup", end);
+    stack.addEventListener("pointercancel", end);
+  })();
 
   // ── orbit dial ───────────────────────────────────────────────────────────
   const ticksG = $("dialTicks");
@@ -959,8 +1022,8 @@
   drawTicks(1);
 
   let dialTimer;
-  // The wheel only appears for a pinch in the app; the mock also shows it when a
-  // chip is tapped so the morph is visible in the preview.
+  // The wheel appears for a zoom *gesture* only: a pinch on the scene, or a drag
+  // on the chip row. Tapping a chip and flipping the lens deliberately do not.
   function showWheel() {
     el.dial.classList.add("show");
     $("zoomstack").classList.add("wheel");
@@ -970,6 +1033,41 @@
       $("zoomstack").classList.remove("wheel");
     }, 1600);
   }
+
+  // ── pinch to zoom ────────────────────────────────────────────────────────
+  // Two pointers on the scene: scale the zoom by the change in finger spacing and
+  // bring the wheel up, which is the app's pinch path (Viewfinder ->
+  // actions.onZoomGesture -> CameraController.showDial).
+  (() => {
+    const vf = el.viewfinder;
+    const pts = new Map();
+    let spacing = 0;
+
+    const spread = () => {
+      const p = [...pts.values()];
+      return p.length < 2 ? 0 : Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    };
+
+    vf.addEventListener("pointerdown", e => {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      spacing = spread();
+    });
+
+    vf.addEventListener("pointermove", e => {
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size < 2) return;
+      const now = spread();
+      if (spacing > 0 && now > 0) setZoom(state.zoom * (now / spacing), true);
+      spacing = now;
+      el.reticle.classList.remove("show");   // a pinch is not a focus tap
+    });
+
+    const drop = e => { pts.delete(e.pointerId); spacing = spread(); };
+    vf.addEventListener("pointerup", drop);
+    vf.addEventListener("pointercancel", drop);
+    vf.addEventListener("pointerleave", drop);
+  })();
 
   // ── tap to focus ─────────────────────────────────────────────────────────
   el.viewfinder.addEventListener("pointerdown", e => {

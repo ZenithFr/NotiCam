@@ -17,7 +17,7 @@ back to code.
 |---|---|
 | **Nothing is painted over the framebuffer.** | `CameraScreen` is one `Column`: top bar → `weight(1f)` frame slot → lens chips → ƒ row → bottom bar. The chrome is *outside* the 4:3 region by construction, so no control can overlap the live image. Only the transient zoom dial floats on top, and only while the user is rotating it. |
 | **The frame is never stretched *or* sideways.** | The sensor streams 1440 × 1080; `composite.comp` rotates it **90° clockwise** into the swapchain, so the box is 3:4 portrait and the scene is upright in the hand. `CameraScreen` fits a box of exactly `DeviceProfile.previewAspect` inside the leftover slot and that box *is* the `SurfaceView` extent. |
-| **Pinch is the only zoom input.** | The wheel is a read-out, not a control: it has no pointer input, so nothing can be dragged sideways and no part of the framebuffer can be occluded by a touch target. |
+| **Two zoom gestures, and the wheel is neither.** | A **pinch on the scene** and a **drag along the chip row** both scrub the zoom and bring the wheel up. The wheel itself has no pointer input — it is a read-out, so no part of it can be grabbed and no framebuffer is occluded by its touch target. Tapping a chip is a *destination*, not a gesture: it selects the stop and leaves the chips alone. Visibility is keyed on the gesture, never on "the zoom value changed" — a lens flip also resets the zoom to 1×, and keying it on the value is what used to pop the wheel on a rotate. |
 | **One accent colour.** | `CameraColors.Yellow` (`#FFD60A`) marks selection (active mode, ƒ needle, "Done") and nothing else. `Red` (`#FF453A`) is reserved for recording. |
 | **Matte transparency, not glassmorphism.** | Chrome is a *thin flat shade* — 8 % white over the dark surface, 14 % black over the live scene — carrying a 64×64 grain tile repeated by the GPU (`ui/effects/Matte.kt`). No sheen, no hairline rim, no backdrop blur: a specular top-edge highlight is what makes a surface read as glass, so there isn't one. The grain alone is what tells you a control is there. |
 | **Motion has meaning.** | Everything is a Compose spring (`dampingRatio` 0.6–0.9, `StiffnessLow`…`StiffnessHigh`), 110–460 ms. No `LinearInterpolator`, no `ValueAnimator`. |
@@ -118,7 +118,7 @@ straight over the scene.
 | `ProSheet` | `Controls.kt` | Settings panel with no title and no Done button: framing segments (1:1 · **4:3** · 16:9 · Full), aperture (Portrait/Pro only), continuous ±4 EV, 12MP/50MP, Grid, Timer, telephoto assist, live telemetry. Rendered by `ProMenuOverlay`, which hangs it under the top bar and slides it **down**; tapping the scrim or the top-bar Pro button closes it. |
 | `TopBar` | `Controls.kt` | Flash + RAW on the left, status centred, Pro on the right. The whole header is a HUD: it fades out 2 s after the last interaction and returns on the next touch. |
 | `BottomBar` | `Controls.kt` | Pro sheet → modes → shutter row. Publishes the shutter and gallery centres via `onGloballyPositioned` for the hand-off animation. |
-| `ZoomDial` | `ZoomDial.kt` | Zoom wheel, **read-only**: top arc (161°→379°, 218° of travel at a 196 dp diameter), 56 ticks whose alpha follows `sin()`, radial backdrop fading to nothing before the bottom, travelled thread + needle + glow knob, callout centred and lifted into the arc's opening. No pointer input — zoom is pinch-only. |
+| `ZoomDial` | `ZoomDial.kt` | Zoom wheel, **read-only**: top arc (161°→379°, 218° of travel at a 196 dp diameter), 56 ticks whose alpha follows `sin()`, flat vertical shade fading to nothing before the bottom, travelled thread + needle + glow knob, callout centred and lifted into the arc's opening. No pointer input: it is spawned by a pinch or by a chip-row drag, never dragged itself. |
 | `NotiIcons` | `ui/icons/NotiIcons.kt` | Nine hand-built `ImageVector`s on a 24 unit grid, 1.7 stroke, round caps. Resolution-independent, so scaling can never resample or crop a glyph. |
 
 ---
@@ -131,7 +131,10 @@ straight over the scene.
 | **Hold** the frame | AE/AF locks: the reticle morphs into a padlock badge and stays until tapped | `focusAt(...)` + locked AE/AF |
 | Tap while locked | Releases the lock | — |
 | Pinch past 2× with TELE on | Session hands over to the physical telephoto lens | `setPhysicalLens(tele)` |
-| Pinch the frame | Chips morph into the wheel, zoom follows the pinch | `setZoom(z)`, throttled to 0.02 steps |
+| Pinch the frame | Chips morph into the wheel, zoom follows the pinch | `onZoomGesture(s)` → `showDial()` + `setZoom(z)`, throttled to 0.02 steps |
+| Drag the chip row | Same morph; zoom scrubs exponentially (~180 px doubles) | `onZoomDragStart/Drag/End` → `showDial()` |
+| Tap a chip | Selects the stop, wheel stays down | `onZoomSelected(z)` — never calls `showDial()` |
+| Flip the lens | Resets to 1×, wheel stays down | `onSwitchLens()` — deliberately not a zoom gesture |
 | Tap a lens chip | Jump to 0.6× / 1× / 2× (chips stay on screen) | `setZoom(z)` |
 | Tap the shutter | Bloom + ring pulse + shutter→gallery flight | capture request with the current ƒ and EV |
 | Tap Pro | Settings sheet slides down from under the top bar; button becomes a white ✕ | — |
