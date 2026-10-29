@@ -1,0 +1,28 @@
+#version 450
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) buffer OutputBuf {
+    float result;
+};
+
+void main() {
+    float a = 1.000001;
+    // 50,000 iterations of 100 dependent FMAs = 5,000,000 FMAs
+    for (int i = 0; i < 50000; ++i) {
+        #define FMA10 \
+            a = fma(a, 1.0000001, -0.0000001); \
+            a = fma(a, 0.9999999,  0.0000001); \
+            a = fma(a, 1.0000001, -0.0000001); \
+            a = fma(a, 0.9999999,  0.0000001); \
+            a = fma(a, 1.0000001, -0.0000001); \
+            a = fma(a, 0.9999999,  0.0000001); \
+            a = fma(a, 1.0000001, -0.0000001); \
+            a = fma(a, 0.9999999,  0.0000001); \
+            a = fma(a, 1.0000001, -0.0000001); \
+            a = fma(a, 0.9999999,  0.0000001);
+
+        FMA10 FMA10 FMA10 FMA10 FMA10
+        FMA10 FMA10 FMA10 FMA10 FMA10
+    }
+    result = a;
+}

@@ -1,0 +1,108 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Bindings:
+// 0: Color (RGBA8, working resolution)
+// 1: CoC (R16F, working resolution)
+// 2: Alpha (R8, working resolution)
+// 3: Output Blurred Background (RGBA8)
+
+layout(binding = 0) uniform sampler2D uColor;
+layout(binding = 1) uniform sampler2D uCoc;
+layout(binding = 2) uniform sampler2D uAlpha;
+layout(binding = 3, rgba8) writeonly uniform image2D uOutBlurred;
+
+layout(push_constant) uniform GatherPushConstants {
+    uint width;          // Working pass width (720 for preview, 2040 for still)
+    uint height;         // Working pass height (540 for preview, 1536 for still)
+    uint numTaps;        // 16 for preview, 32 for still
+    float specularBoost; // e.g. 1.2
+    float maxRadiusPx;   // 20.0 for preview (720w), 80.0 for still (2040w)
+} pc;
+
+const float GOLDEN_ANGLE = 2.39996323;
+
+float hash21(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+// Gamma to linear
+vec3 srgbToLinear(vec3 c) {
+    return pow(c, vec3(2.2));
+}
+
+// Linear to gamma
+vec3 linearToSrgb(vec3 c) {
+    return pow(c, vec3(1.0 / 2.2));
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= pc.width || coord.y >= pc.height) {
+        return;
+    }
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(pc.width, pc.height);
+    
+    // CoC is stored as a fraction of frame width; convert to local pass pixels
+    float centerCocNorm = texture(uCoc, uv).r;
+    float maxR = (pc.maxRadiusPx > 0.0) ? pc.maxRadiusPx : (float(pc.width) * 0.04);
+    float centerRadius = clamp(abs(centerCocNorm) * float(pc.width), 0.0, maxR);
+
+    // If center CoC is negligible, output original color directly
+    if (centerRadius < 0.5) {
+        vec4 original = texture(uColor, uv);
+        imageStore(uOutBlurred, coord, original);
+        return;
+    }
+
+    vec3 accumColor = vec3(0.0);
+    float accumWeight = 0.0;
+    float nTaps = float(pc.numTaps);
+
+    // Per-pixel spiral phase offset (jitter eliminates discrete concentric discs)
+    float phase = hash21(vec2(coord)) * 6.2831853;
+
+    for (uint i = 0; i < pc.numTaps; ++i) {
+        float fi = float(i);
+        float theta = fi * GOLDEN_ANGLE + phase;
+        float r = sqrt((fi + 0.5) / nTaps);
+
+        // Offset in pixel units
+        vec2 offsetPx = vec2(cos(theta), sin(theta)) * (r * centerRadius);
+        vec2 sampleUv = uv + offsetPx / vec2(pc.width, pc.height);
+
+        vec4 sampleRgba = texture(uColor, sampleUv);
+        float sampleAlpha = texture(uAlpha, sampleUv).r;
+        float sampleCocNorm = texture(uCoc, sampleUv).r;
+        float sampleRadius = clamp(abs(sampleCocNorm) * float(pc.width), 0.0, maxR);
+
+        float dist = r * centerRadius;
+
+        // Bleed prevention: Background-only gather
+        // occlusion drops to 0 for foreground pixels (alpha > 0.70)
+        float occlusion = 1.0 - smoothstep(0.20, 0.70, sampleAlpha);
+
+        // Soft disc edge coverage (edge0 < edge1 strictly)
+        float coverage = smoothstep(dist - 1.0, dist + 1.0, sampleRadius);
+
+        float weight = occlusion * coverage;
+
+        // Specular boost in linear color space
+        vec3 linearColor = srgbToLinear(sampleRgba.rgb);
+        float luma = dot(linearColor, vec3(0.299, 0.587, 0.114));
+        if (luma > 0.8) {
+            linearColor *= pc.specularBoost;
+        }
+
+        accumColor += linearColor * weight;
+        accumWeight += weight;
+    }
+
+    vec3 finalLinear = (accumWeight > 1e-4) ? (accumColor / accumWeight) : srgbToLinear(texture(uColor, uv).rgb);
+    vec3 finalSrgb = linearToSrgb(clamp(finalLinear, 0.0, 1.0));
+
+    imageStore(uOutBlurred, coord, vec4(finalSrgb, 1.0));
+}

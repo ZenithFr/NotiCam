@@ -1,0 +1,49 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Bindings:
+// 0: Sampled Camera YUV AHB via YCbCr conversion sampler
+// 1: Output full-res RGBA8 color (1440x1080)
+// 2: Output full-res R8 luma (1440x1080)
+// 3: Output upright NPU input (384x512)
+
+layout(binding = 0) uniform sampler2D uCameraYuv;
+layout(binding = 1, rgba8) writeonly uniform image2D uOutColor;
+layout(binding = 2, r8) writeonly uniform image2D uOutLuma;
+layout(binding = 3, rgba8) writeonly uniform image2D uOutNpuInput;
+
+layout(push_constant) uniform PushConstants {
+    uint width;      // 1440
+    uint height;     // 1080
+    uint npuWidth;   // 384
+    uint npuHeight;  // 512
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= pc.width || coord.y >= pc.height) {
+        return;
+    }
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(pc.width, pc.height);
+    vec4 rgba = texture(uCameraYuv, uv);
+
+    // Locked Luma definition matching ML training & Vulkan runtime:
+    float luma = clamp(0.299 * rgba.r + 0.587 * rgba.g + 0.114 * rgba.b, 0.0, 1.0);
+
+    imageStore(uOutColor, coord, rgba);
+    imageStore(uOutLuma, coord, vec4(luma, 0.0, 0.0, 1.0));
+
+    // NPU staging downsample (384x512 upright portrait)
+    // Sensor orientation is 90 deg clockwise.
+    // Map (x_npu, y_npu) -> sensor UV:
+    // npu_x in [0, 384], npu_y in [0, 512]
+    if (coord.x < pc.npuWidth && coord.y < pc.npuHeight) {
+        vec2 npuUv = (vec2(coord) + 0.5) / vec2(pc.npuWidth, pc.npuHeight);
+        // 90 deg rotation mapping:
+        // upright_x corresponds to sensor_y, upright_y corresponds to 1.0 - sensor_x
+        vec2 sensorUv = vec2(1.0 - npuUv.y, npuUv.x);
+        vec4 npuRgba = texture(uCameraYuv, sensorUv);
+        imageStore(uOutNpuInput, coord, npuRgba);
+    }
+}

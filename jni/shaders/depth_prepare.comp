@@ -1,0 +1,76 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Bindings:
+// 0: Raw DPE Disparity (R8, 448x288)
+// 1: Working-res Luma (R8, 720x540)
+// 2: Output Working-res Metric Depth (R32F, 720x540)
+
+layout(binding = 0) uniform sampler2D uDisparity;
+layout(binding = 1) uniform sampler2D uLuma;
+layout(binding = 2, r32f) writeonly uniform image2D uOutDepth;
+
+layout(push_constant) uniform DepthPushConstants {
+    uint width;
+    uint height;
+    float depth_k;       // 14.8017 from calibration
+    float depth_c;       // 0.2646 from calibration
+    float crop_scale_x;  // 1.0 strictly (0 px horizontal offset)
+    float crop_scale_y;  // 1.1667 (1080 / 925.714)
+} pc;
+
+float disparityToDepth(float d_norm) {
+    float d_raw = d_norm * 255.0;
+    if (d_raw < 1.0) {
+        return 10.0; // Infinity / background default
+    }
+    // Clamp metric depth Z in [0.25, 10.0] meters
+    return clamp(pc.depth_k / (d_raw + pc.depth_c), 0.25, 10.0);
+}
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= pc.width || coord.y >= pc.height) {
+        return;
+    }
+
+    vec2 uv = (vec2(coord) + 0.5) / vec2(pc.width, pc.height);
+    
+    // Explicit transformation between color coordinates (1440x1080, 4:3) and depth coordinates (448x288, 14:9):
+    // depth_to_color: v_color = 0.0713 + 0.8571 * v_depth
+    // color_to_depth: v_depth = (v_color - 0.0713) / 0.8571 = (v_color - 0.5) * pc.crop_scale_y + 0.5
+    // Horizontal scale is strictly 1.0 (u_depth = u_color, crop_scale_x = 1.0, offset = 0)
+    // 77 px vertical letterbox offset is applied only when sampling depth; never to alpha lookup.
+    vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * pc.crop_scale_y + 0.5);
+
+    float centerLuma = texture(uLuma, uv).r;
+
+    // 5x5 Joint-Bilateral Upsampling guided by Luma edges
+    float sumWeights = 0.0;
+    float sumDepth = 0.0;
+    vec2 texelSize = 1.0 / vec2(448.0, 288.0);
+
+    const float sigma_s_sq = 2.0 * 1.5 * 1.5;
+    const float sigma_r_sq = 2.0 * 0.15 * 0.15;
+
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            vec2 sampleUv = depthUv + vec2(dx, dy) * texelSize;
+            float rawD = texture(uDisparity, sampleUv).r;
+            float sampleDepth = disparityToDepth(rawD);
+
+            float sampleLuma = texture(uLuma, uv + vec2(dx, dy) / vec2(pc.width, pc.height)).r;
+
+            float spatialDistSq = float(dx * dx + dy * dy);
+            float lumaDiffSq = (sampleLuma - centerLuma) * (sampleLuma - centerLuma);
+
+            float weight = exp(-spatialDistSq / sigma_s_sq) * exp(-lumaDiffSq / sigma_r_sq);
+            sumDepth += sampleDepth * weight;
+            sumWeights += weight;
+        }
+    }
+
+    // Clamp final filtered depth Z in [0.25, 10.0] meters
+    float finalDepth = clamp(sumDepth / max(sumWeights, 1e-4), 0.25, 10.0);
+    imageStore(uOutDepth, coord, vec4(finalDepth, 0.0, 0.0, 1.0));
+}

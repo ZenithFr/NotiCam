@@ -1,0 +1,18 @@
+{
+  "depth_width": 448,
+  "depth_height": 288,
+  "color_width": 1440,
+  "color_height": 1080,
+  "crop_axis": "letterbox",
+  "crop_offset_x_px": 0,
+  "crop_offset_y_px": 77,
+  "crop_scale_x": 1.0,
+  "crop_scale_y": 1.1667,
+  "depth_k": 14.8017,
+  "depth_c": 0.2646,
+  "fit_r_squared": 0.9998,
+  "dpe_supported_sizes": [
+    {"width": 448, "height": 288, "aspect": "14:9"},
+    {"width": 448, "height": 224, "aspect": "16:9"}
+  ]
+}

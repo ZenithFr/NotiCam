@@ -1,0 +1,48 @@
+#version 450
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// Bindings:
+// 0: Sharp Original Color (RGBA8, 1440x1080)
+// 1: Blurred Background (RGBA8, working resolution)
+// 2: Full-Res Alpha Matte (R8, 1440x1080)
+// 3: Present Surface Target (RGBA8, upright e.g. 1080x1440)
+
+layout(binding = 0) uniform sampler2D uOriginalColor;
+layout(binding = 1) uniform sampler2D uBlurredColor;
+layout(binding = 2) uniform sampler2D uAlpha;
+layout(binding = 3, rgba8) writeonly uniform image2D uOutPresent;
+
+layout(push_constant) uniform CompositePushConstants {
+    uint outWidth;       // 1080 (upright viewport width)
+    uint outHeight;      // 1440 (upright viewport height)
+    int rotate90;        // 1 to apply 90 deg clockwise sensor rotation
+} pc;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    if (coord.x >= pc.outWidth || coord.y >= pc.outHeight) {
+        return;
+    }
+
+    vec2 uv;
+    if (pc.rotate90 != 0) {
+        // Map upright screen coordinates [0..1080, 0..1440]
+        // to sensor coordinates [0..1440, 0..1080] rotated 90 deg clockwise:
+        // sensor_x = (outHeight - 1 - y) / outHeight
+        // sensor_y = x / outWidth
+        float outU = (float(coord.x) + 0.5) / float(pc.outWidth);
+        float outV = (float(coord.y) + 0.5) / float(pc.outHeight);
+        uv = vec2(1.0 - outV, outU);
+    } else {
+        uv = (vec2(coord) + 0.5) / vec2(pc.outWidth, pc.outHeight);
+    }
+
+    vec4 sharpRgba = texture(uOriginalColor, uv);
+    vec4 blurredRgba = texture(uBlurredColor, uv);
+    float alpha = texture(uAlpha, uv).r;
+
+    // Alpha composition: alpha=1.0 is sharp foreground, alpha=0.0 is blurred background
+    vec3 compositeRgb = mix(blurredRgba.rgb, sharpRgba.rgb, alpha);
+
+    imageStore(uOutPresent, coord, vec4(compositeRgb, 1.0));
+}

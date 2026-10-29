@@ -1,0 +1,40 @@
+# Build outputs and generated binaries
+build/
+bin/
+gen/
+obj/
+ndk-out/
+.gradle/
+local.properties
+lib/
+release/
+libs/arm64-v8a/
+*.apk
+*.aab
+*.dex
+
+# Intermediate native compilation artifacts
+jni/build/
+jni/lib/
+*.o
+*.o.d
+
+# Compiled SPIR-V shaders (rebuilt dynamically by build.sh via glslc)
+assets/shaders/*.spv
+jni/shaders/*.spv
+
+# Machine learning training intermediate exports and ONNX
+assets/models/tflite_out/
+assets/models/*.onnx
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
