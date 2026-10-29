@@ -32,6 +32,12 @@ struct GatherPushConstants {
     float maxRadiusPx;
 };
 
+// Presentation orientation of the *preview*.
+// The sensor streams landscape (1440x1080) and the presenter copies it 1:1 into
+// the swapchain, so when the surface is a portrait box the frame must be rotated.
+// Keep this in sync with SensorProfile.PREVIEW_ROTATION_90 on the Kotlin side.
+static constexpr int kPreviewRotate90 = 0;
+
 struct CompositePushConstants {
     uint32_t outWidth;
     uint32_t outHeight;
@@ -274,6 +280,69 @@ bool VulkanPipeline::createSwapchain(ANativeWindow* window) {
     return true;
 }
 
+// Tears down every resource that is sized to the swapchain extent and rebuilds
+// them for the surface's current size. Called from renderFrame() when the
+// window changes; safe to call at any time because it waits for the device.
+bool VulkanPipeline::recreateSwapchain() {
+    if (mDevice == VK_NULL_HANDLE || mSurface == VK_NULL_HANDLE) return false;
+
+    vkDeviceWaitIdle(mDevice);
+
+    if (mSetCompPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetCompPreview);
+        mSetCompPreview = VK_NULL_HANDLE;
+    }
+    if (mViewPreviewOut != VK_NULL_HANDLE) {
+        vkDestroyImageView(mDevice, mViewPreviewOut, nullptr);
+        mViewPreviewOut = VK_NULL_HANDLE;
+    }
+    if (mImgPreviewOut != VK_NULL_HANDLE) {
+        vkDestroyImage(mDevice, mImgPreviewOut, nullptr);
+        mImgPreviewOut = VK_NULL_HANDLE;
+    }
+    if (mMemPreviewOut != VK_NULL_HANDLE) {
+        vkFreeMemory(mDevice, mMemPreviewOut, nullptr);
+        mMemPreviewOut = VK_NULL_HANDLE;
+    }
+    if (mPreviewCmdPool != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(mDevice, mPreviewCmdPool, nullptr);
+        mPreviewCmdPool = VK_NULL_HANDLE;
+    }
+    for (int i = 0; i < MAX_FRAMES_IN_FLIGHT; ++i) {
+        if (mImageAvailableSemaphores[i] != VK_NULL_HANDLE) {
+            vkDestroySemaphore(mDevice, mImageAvailableSemaphores[i], nullptr);
+            mImageAvailableSemaphores[i] = VK_NULL_HANDLE;
+        }
+        if (mRenderFinishedSemaphores[i] != VK_NULL_HANDLE) {
+            vkDestroySemaphore(mDevice, mRenderFinishedSemaphores[i], nullptr);
+            mRenderFinishedSemaphores[i] = VK_NULL_HANDLE;
+        }
+        if (mRenderFences[i] != VK_NULL_HANDLE) {
+            vkDestroyFence(mDevice, mRenderFences[i], nullptr);
+            mRenderFences[i] = VK_NULL_HANDLE;
+        }
+        mPreviewCmds[i] = VK_NULL_HANDLE;
+    }
+    if (mSwapchain != VK_NULL_HANDLE) {
+        vkDestroySwapchainKHR(mDevice, mSwapchain, nullptr);
+        mSwapchain = VK_NULL_HANDLE;
+    }
+    mSwapchainInitialized = false;
+    mCurrentFrame = 0;
+
+    if (!createSwapchain(mWindow)) {
+        LOGE("recreateSwapchain: createSwapchain failed");
+        return false;
+    }
+    if (!initPreviewResources()) {
+        LOGE("recreateSwapchain: initPreviewResources failed");
+        return false;
+    }
+
+    LOGI("Swapchain rebuilt for new surface size %ux%u", mSwapchainExtent.width, mSwapchainExtent.height);
+    return true;
+}
+
 bool VulkanPipeline::initPreviewResources() {
     if (!mSwapchainInitialized || !mStillBokehInitialized) return false;
 
@@ -350,6 +419,27 @@ bool VulkanPipeline::initPreviewResources() {
 
 bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop) {
     if (!mInitialized || !colorBuffer) return false;
+
+    // The SurfaceView can be re-measured at any time (Compose layout pass, inset
+    // change, display mode switch). The swapchain extent captured at creation
+    // time is what the composite shader squashes the sensor frame into, so a
+    // stale extent is exactly what makes a 4:3 preview look stretched.
+    if (mSwapchainInitialized && mSurface != VK_NULL_HANDLE) {
+        VkSurfaceCapabilitiesKHR liveCaps{};
+        if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(mPhysicalDevice, mSurface, &liveCaps) == VK_SUCCESS) {
+            uint32_t liveW = liveCaps.currentExtent.width;
+            uint32_t liveH = liveCaps.currentExtent.height;
+            bool sizeKnown = liveW != 0xFFFFFFFFu && liveH != 0xFFFFFFFFu && liveW > 0 && liveH > 0;
+            if (sizeKnown && (liveW != mSwapchainExtent.width || liveH != mSwapchainExtent.height)) {
+                LOGI("Surface resized %ux%u -> %ux%u, rebuilding swapchain",
+                     mSwapchainExtent.width, mSwapchainExtent.height, liveW, liveH);
+                if (!recreateSwapchain()) {
+                    mSwapchainInitialized = false;
+                    return false;
+                }
+            }
+        }
+    }
 
     if (!mSwapchainInitialized) {
         if (mWindow != nullptr) {
@@ -568,7 +658,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     CocPushConstants pcCoc{ mStillW, mStillH, 5.56f, fStop, 8.16f, 0.6f, 15.0f, 720.0f };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
-    CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, 0 };
+    CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90 };
 
     VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
 

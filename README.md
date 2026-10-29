@@ -1,6 +1,8 @@
 # AuxCam Portrait Engine (Android)
 
-A production-grade, zero-copy native Vulkan portrait bokeh camera engine engineered for the MediaTek Dimensity 7350 Pro (`GalagaIND` / `A001`, Mali-G615 MC2, APU 655).
+A production-grade, zero-copy native Vulkan portrait bokeh camera engine engineered for
+**one phone: the CMF Phone 2 Pro** (MediaTek Dimensity 7300 Pro, Mali-G615 MC2, 1080 × 2392
+@ 120 Hz). The capture UI is **Jetpack Compose**; the AIDL/Shizuku/Vulkan engine is unchanged.
 
 ---
 
@@ -24,34 +26,36 @@ AuxCam unlocks synchronized multi-camera ISP streaming directly through a privil
 
 ---
 
-## 🎛️ Capture UI (Apple Camera language)
+## 🎛️ Capture UI (Apple Camera language, Jetpack Compose)
 
-The viewfinder chrome was rebuilt from the ground up around the iOS Camera /
-Portrait UI. Tokens, components and the full interaction map live in
-[`design/DESIGN.md`](design/DESIGN.md); a clickable mock of the shipping layout
-lives in [`design/index.html`](design/index.html).
+The viewfinder chrome is Compose end to end: tokens, components and the full
+interaction map live in [`design/DESIGN.md`](design/DESIGN.md); a clickable mock of
+the shipping layout lives in [`design/index.html`](design/index.html).
 
 | | Before | After |
 |---|---|---|
+| **Stack** | `Activity` + `FrameLayout` + hand-written `View` subclasses | `ComponentActivity` → `CameraController` → `CameraScreen`; one immutable `CameraUiState` |
 | **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: floating glass controls, one accent (`#FFD60A`) |
-| **Viewfinder** | Pushed down by an 88 dp header, boxed in | Floats to the top edge; chrome overlays the scene |
-| **Modes** | `PHOTO · 50M PRO · VIDEO · PORTRAIT` white/grey text | `PHOTO · PORTRAIT · PRO` with a systemYellow selection |
-| **Shutter** | Static layered drawable | Custom `ShutterButton`: compresses on press, ring pulse + haptic |
-| **Flash** | Painted but inert | Cycles off → auto → on and sets `CONTROL_AE_MODE` on the still request |
-| **Zoom** | Dead pill badges | Lens chips + pinch + orbit dial → real `SCALER_CROP_REGION` |
-| **Aperture** | — | 22-stop ƒ ladder (Portrait) driving the physical CoC of the bokeh engine |
-| **Focus** | Static yellow square | Spring-in AE/AF reticle with a hardware focus scan at the tap |
-| **Pro controls** | Chevron drawer with dead EV/ISO/shutter buttons | Glass sheet: ƒ, EV (±4 EV), Grid, RAW, Timer, live telemetry |
-| **Gallery** | Always-empty tile | Real bokeh frame decoded from the capture, plus a fly-to-gallery animation |
+| **Layout** | Absolute chrome painted over the preview | `Column`: top bar → `weight(1f)` frame → chips → ƒ row → bottom bar. **Nothing can overlap the 4:3 framebuffer** |
+| **Preview geometry** | 4:3 view, swapchain frozen at first size → stretched image | Frame measured to `previewAspect`, swapchain recreated on extent change, `composite.comp` aspect-fits as a second guarantee |
+| **Motion** | `ValueAnimator` + interpolators, several controls clipped mid-animation | Compose springs, oversized paint boxes, `clip = false` everywhere it can matter |
+| **Icons** | 24 vector drawables + PNG-tinted bitmaps | Nine hand-built `ImageVector`s (24-unit grid, 1.7 stroke) — resolution independent, can never be resampled or cropped |
+| **Shutter** | Static layered drawable | `ShutterButton`: ring/gap/disc, spring compression, capture pulse drawn *inside* its own 96 dp box |
+| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; lens chips + pinch + radial dial drive `SCALER_CROP_REGION`; 22-stop ƒ ladder drives the CoC pass |
+| **Focus** | Static yellow square | Spring-in AE/AF reticle + hardware focus scan at the tap point |
+| **Pro controls** | Chevron drawer with dead buttons | Glass sheet: ƒ, ±4 EV, Grid, RAW, Timer, live telemetry |
+| **Gallery** | Always-empty tile | Real bokeh frame decoded from the capture, plus a shutter→gallery flight |
 
 Highlights of the implementation:
 
-- **`res/values/`** — `colors.xml`, `dimens.xml`, `styles.xml` design tokens (8-pt grid, iOS type scale).
-- **`res/drawable/ios_*`** — glass capsules/circles, ripples, iOS slider track & knob, toolbar scrim.
-- **`ShutterButton`** — ring/gap/disc anatomy with press compression and capture pulse.
-- **`FocusOverlayView`** — rule-of-thirds grid + spring-in focus reticle.
-- **`CameraUserService`** — new AIDL surface (`setFlashMode`, `setEvCompensation`, `setZoom`, `focusAt`, `setPhysicalLens`) mapping 1:1 onto Camera2 controls.
-- **`tools/verify_ui.py`** — resource-graph + Java syntax gate, now part of `build.sh`.
+- **`src/com/zenith/auxcam/MainActivity.kt`** — `ComponentActivity`, edge-to-edge window flags, the four JNI entry points, `setContent { NotiCamTheme { CameraScreen(...) } }`.
+- **`CameraController.kt`** — owns the engine, the Shizuku binding, the `ImageReader`s and the single source of truth (`CameraUiState`); implements the `CameraActions` interface the composables call.
+- **`ui/theme/Theme.kt`** — `CameraColors`, `CameraSpacing`, `CameraType`.
+- **`ui/components/`** — `ShutterButton`, `Viewfinder`, `Controls` (top bar, mode carousel, sliders, Pro sheet, gallery tile, bottom bar), `ZoomDial`.
+- **`ui/icons/NotiIcons.kt`** — the icon set.
+- **`DeviceProfile.kt`** — every CMF Phone 2 Pro constant (display, sensor streams, lens ladder, camera id).
+- **`CameraUserService`** — AIDL surface (`setFlashMode`, `setEvCompensation`, `setZoom`, `focusAt`, `setPhysicalLens`) mapping 1:1 onto Camera2 controls.
+- **`tools/verify_ui.py`** — resource graph, brace/string balance, project-import resolution, Compose member cross-checks, composable imports; runs in `build.sh` and in Gradle's `check`.
 
 ---
 
@@ -84,12 +88,21 @@ Camera HAL (Stream 0 & Stream 1)
 
 ```
 auxcam-app/
-├── AndroidManifest.xml        # Application manifest with Camera & Shizuku permissions
-├── build.sh                   # Standalone shell build script (NDK + AAPT2 + D8 + Apksigner)
-├── src/                       # Java / AIDL source files
+├── settings.gradle.kts        # Gradle + AGP 8.7.3 + Kotlin 2.0.21 + Compose
+├── build.gradle.kts           # app module: compileSdk 35, minSdk 28, arm64-v8a only
+├── AndroidManifest.xml        # Camera & Shizuku permissions, Vulkan 1.3 feature gate
+├── build.sh                   # Fallback shell build (NDK + AAPT2 + D8 + Apksigner)
+├── src/                       # Kotlin (Compose UI) + Java (service) + AIDL
 │   └── com/zenith/auxcam/
-│       ├── MainActivity.java
-│       ├── CameraUserService.java
+│       ├── MainActivity.kt            # Compose host + JNI entry points
+│       ├── CameraScreen.kt            # the column: chrome outside the 4:3 frame
+│       ├── CameraController.kt        # engine + state owner (CameraActions)
+│       ├── CameraUiState.kt           # @Immutable snapshot
+│       ├── DeviceProfile.kt           # CMF Phone 2 Pro constants
+│       ├── ui/theme/Theme.kt          # CameraColors / CameraSpacing / CameraType
+│       ├── ui/icons/NotiIcons.kt      # nine ImageVectors
+│       ├── ui/components/             # ShutterButton, Viewfinder, Controls, ZoomDial
+│       ├── CameraUserService.java     # privileged Camera2 user service
 │       ├── IAuxCamService.aidl
 │       └── IAuxCamCallback.aidl
 ├── jni/                       # C++ native Vulkan bokeh engine
@@ -105,12 +118,10 @@ auxcam-app/
 │       ├── gather.comp
 │       ├── composite.comp
 │       └── convert.comp
-├── res/                       # Apple Camera design system (layout, drawables, tokens)
-│   ├── layout/activity_main.xml
-│   ├── drawable/ios_*.xml     # glass capsules, ripples, iOS slider, icons
-│   └── values/                # colors.xml, dimens.xml, styles.xml, strings.xml
+├── res/                       # window theme only — everything visual is Compose
+│   └── values/                # themes.xml (black, edge-to-edge), strings.xml
 ├── design/                    # DESIGN.md + clickable UI mock (index.html)
-├── tools/verify_ui.py         # UI resource-graph & Java syntax gate
+├── tools/verify_ui.py         # resource graph + Kotlin/Compose sanity gate
 ├── assets/                    # Precompiled SPIR-V shaders & assets
 ├── libs/                      # JAR dependencies (Shizuku, TensorFlow Lite)
 ├── lib/                       # Native compiled shared libraries (arm64-v8a)
@@ -124,32 +135,33 @@ auxcam-app/
 ## 🛠️ Building & Installing
 
 ### Prerequisites
-- Linux / macOS with `bash`
 - Android SDK (`build-tools 34.0.0+`, `platforms/android-35`)
-- Android NDK (`r27b+`)
-- Java Development Kit (`JDK 17+`)
-- `glslc` (Vulkan shader compiler)
+- Android NDK (`r27b+`) — the Vulkan engine is built by `jni/Android.mk`
+- JDK 17+
+- `glslc` (Vulkan shader compiler) — `compileShaders` runs before `preBuild`
 
 ### Build Command
 ```bash
-# Optional: Set environment variables if using custom SDK/NDK locations
 export ANDROID_HOME=/path/to/android-sdk
 export ANDROID_NDK_HOME=/path/to/android-ndk
 
-# Run build
-./build.sh
+./gradlew assembleDebug        # or: ./gradlew installDebug
+# shaders only:  ./gradlew compileShaders     (-PskipShaders to bypass)
+# verify UI:     python3 tools/verify_ui.py
 ```
+
+The legacy `./build.sh` (NDK + AAPT2 + D8 + Apksigner, no Gradle) still works and
+runs `tools/verify_ui.py` first.
 
 ### Installation
 ```bash
-# Install to connected device via ADB
-adb install -r release/auxcam_aligned.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 ---
 
 ## 📱 Device Setup & Permissions
 1. Ensure **Shizuku** is running and authorized on the device.
-2. Launch **AuxCam**; grant the Shizuku permission prompt.
-3. The app connects to the privileged `CameraUserService` running under the shell UID to access physical stereo Camera ID `5`.
+2. Launch **NotiCam**; grant the Shizuku permission prompt.
+3. The app connects to the privileged `CameraUserService` running under the shell UID to access physical stereo Camera ID `5` on the CMF Phone 2 Pro (the only device this build is tuned for; anything else gets a visible warning in the top bar).
 4. Live viewfinder immediately begins streaming real-time portrait bokeh.

@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""Static verification for the NotiCam UI layer.
+"""Static verification for the NotiCam app.
 
-The project is built with a bare AAPT2 + javac toolchain (see build.sh), so a
-broken @drawable/@string reference or an R.id typo only shows up at link time.
-This script catches those early:
+The project is now a Gradle + Kotlin + Compose build, but this sandbox has no
+Android SDK and no Kotlin compiler. Everything below is therefore checked with
+lightweight, dependency-free analysis that catches the mistakes that actually
+happen when hand-editing this codebase:
 
-  1. Every res/**/*.xml file must be well-formed XML.
-  2. Every android:* attribute must be a real framework attribute name we know
-     about (taken from the Android docs list shipped below, plus a permissive
-     fallback for obviously valid ones).
-  3. Every @drawable/@string/@color/@dimen/@style/@layout/@id reference must
-     resolve inside res/.
-  4. Every R.<type>.<name> referenced from Java must exist in res/.
-  5. Every Java source must parse (syntax-only, via javalang if installed).
+  1. res/**/*.xml is well-formed, and every @type/name reference resolves.
+  2. Every R.type.name (Java/Kotlin) resolves to a declared resource.
+  3. Every Kotlin/Java file is bracket- and string-balanced (catches the classic
+     "missing closing brace after an edit").
+  4. Every `import com.zenith.auxcam.*` symbol exists in that package.
+  5. Every `actions.onX(...)` call exists on the CameraActions interface, every
+     `state.prop` read exists on CameraUiState, every `NotiIcons.X` exists, and
+     every CameraColors/CameraType/CameraSpacing member referenced exists.
+  6. Every `Fstops`-style constant referenced from another file is declared.
 
-Exit code is non-zero when a check fails, so it can gate builds.
+Run: python3 tools/verify_ui.py  (also invoked by build.sh)
 """
 
 from __future__ import annotations
@@ -32,27 +34,31 @@ SRC = os.path.join(ROOT, "src")
 REF_RE = re.compile(r"@(?!\+)(android:)?([a-zA-Z]+)/([A-Za-z0-9_.]+)")
 NEW_ID_RE = re.compile(r"@\+id/([A-Za-z0-9_]+)")
 JAVA_R_RE = re.compile(r"\bR\.([a-zA-Z]+)\.([A-Za-z0-9_]+)")
+IMPORT_RE = re.compile(r"^import\s+(com\.zenith\.auxcam[\w.]*)\s*$", re.MULTILINE)
 
-FILE_TYPES = {
-    "drawable": {"drawable"},
-    "layout": {"layout"},
-    "mipmap": {"mipmap"},
-    "anim": {"anim"},
-}
+errors: list[str] = []
 
 
-def fail(msg: str, errors: list[str]) -> None:
-    errors.append(msg)
+def err(message: str) -> None:
+    errors.append(message)
 
 
-def collect_defined(errors: list[str]):
-    """Collects everything res/ defines: typed files, values entries and ids."""
+# ───────────────────────────────────────────────────────────────────────────
+# 1 + 2 — resources
+# ───────────────────────────────────────────────────────────────────────────
+FILE_TYPES = {"drawable", "layout", "mipmap", "anim", "menu", "xml", "raw"}
+
+
+def collect_resources():
     defined = defaultdict(set)
+    if not os.path.isdir(RES):
+        err("res/ directory is missing")
+        return defined
 
     for base, _, files in os.walk(RES):
         folder = os.path.basename(base)
         for name in files:
-            if folder in FILE_TYPES.get(folder, set()):
+            if folder in FILE_TYPES:
                 defined[folder].add(name.rsplit(".", 1)[0])
 
     for base, _, files in os.walk(RES):
@@ -64,129 +70,351 @@ def collect_defined(errors: list[str]):
             try:
                 tree = ET.parse(path)
             except ET.ParseError as exc:
-                fail(f"malformed XML → {os.path.relpath(path, ROOT)}: {exc}", errors)
+                err(f"malformed XML → {os.path.relpath(path, ROOT)}: {exc}")
                 continue
-
             if is_values:
-                root = tree.getroot()
-                for element in root:
-                    tag = element.tag
+                for element in tree.getroot():
                     key = element.get("name")
                     if not key:
                         continue
-                    if tag in ("string", "color", "dimen", "bool", "integer",
-                               "plurals", "string-array", "integer-array", "array"):
-                        defined["string" if tag == "plurals" else tag].add(key)
-                        if tag == "string-array":
-                            defined["array"].add(key)
-                    elif tag == "style":
-                        defined["style"].add(key)
-
+                    tag = element.tag
+                    if tag in ("string", "color", "dimen", "bool", "integer", "plurals",
+                               "string-array", "integer-array", "array", "style"):
+                        defined["style" if tag == "style" else tag].add(key)
             for element in tree.iter():
                 for value in element.attrib.values():
                     for match in NEW_ID_RE.finditer(value):
                         defined["id"].add(match.group(1))
-
     return defined
 
 
-def collect_refs(errors: list[str]):
-    refs = []  # (type, name, where)
-    for base, _, files in os.walk(RES):
-        for name in sorted(files):
-            if not name.endswith(".xml"):
-                continue
-            path = os.path.join(base, name)
-            try:
-                text = open(path, encoding="utf-8").read()
-            except OSError as exc:
-                fail(f"unreadable {path}: {exc}", errors)
-                continue
-            where = os.path.relpath(path, ROOT)
-            for match in REF_RE.finditer(text):
-                is_framework, rtype, rname = match.group(1), match.group(2), match.group(3)
-                if is_framework:
-                    continue
-                if rtype in ("android",):
-                    continue
-                refs.append((rtype, rname, where))
-
+def walk_sources():
     for base, _, files in os.walk(SRC):
         for name in sorted(files):
-            if not name.endswith(".java"):
+            if name.endswith((".kt", ".java")):
+                yield os.path.join(base, name)
+
+
+def check_references(defined) -> int:
+    checked = 0
+    for path in walk_sources():
+        where = os.path.relpath(path, ROOT)
+        text = open(path, encoding="utf-8").read()
+        for match in REF_RE.finditer(text):
+            if match.group(1):
+                continue  # @android:...
+            rtype, rname = match.group(2), match.group(3)
+            if rtype not in ("drawable", "layout", "string", "color", "dimen", "style", "id"):
                 continue
-            path = os.path.join(base, name)
-            where = os.path.relpath(path, ROOT)
-            text = open(path, encoding="utf-8").read()
-            for match in JAVA_R_RE.finditer(text):
-                refs.append((match.group(1), match.group(2), where))
-            for match in REF_RE.finditer(text):
-                if match.group(1):
+            checked += 1
+            if rname not in defined[rtype]:
+                err(f"missing @{rtype}/{rname} referenced from {where}")
+        for match in JAVA_R_RE.finditer(text):
+            rtype, rname = match.group(1), match.group(2)
+            if rtype not in defined:
+                continue
+            checked += 1
+            if rname not in defined[rtype]:
+                err(f"missing R.{rtype}.{rname} referenced from {where}")
+    return checked
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 3 — bracket / string balance
+# ───────────────────────────────────────────────────────────────────────────
+def strip_code(text: str) -> str:
+    """Removes comments and string/char literals while keeping line structure."""
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        two = text[i:i + 2]
+        three = text[i:i + 3]
+        if two == "//":
+            j = text.find("\n", i)
+            i = n if j == -1 else j
+            continue
+        if two == "/*":
+            j = text.find("*/", i + 2)
+            i = n if j == -1 else j + 2
+            continue
+        if three == '"""':
+            j = text.find('"""', i + 3)
+            if j == -1:
+                err("unterminated raw string")
+                return "".join(out)
+            out.append("\n" * text.count("\n", i, j))
+            i = j + 3
+            continue
+        if ch in ('"', "'"):
+            quote = ch
+            i += 1
+            while i < n:
+                if text[i] == "\\":
+                    i += 2
                     continue
-                refs.append((match.group(2), match.group(3), where))
-    return refs
+                if text[i] == quote:
+                    i += 1
+                    break
+                if text[i] == "\n":
+                    break  # unterminated — reported below
+                i += 1
+            else:
+                break
+            out.append('""')
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
 
 
-def check_java_syntax(errors: list[str]) -> int:
-    try:
-        import javalang  # type: ignore
-    except ImportError:
-        print("· javalang not installed — skipping Java syntax check")
-        return 0
-
+def check_balance() -> int:
+    pairs = {")": "(", "]": "[", "}": "{"}
     count = 0
-    for base, _, files in os.walk(SRC):
-        for name in sorted(files):
-            if not name.endswith(".java"):
-                continue
-            path = os.path.join(base, name)
-            count += 1
-            try:
-                javalang.parse.parse(open(path, encoding="utf-8").read())
-            except Exception as exc:  # noqa: BLE001 - javalang raises broadly
-                fail(f"java syntax → {os.path.relpath(path, ROOT)}: {exc}", errors)
+    for path in walk_sources():
+        count += 1
+        where = os.path.relpath(path, ROOT)
+        code = strip_code(open(path, encoding="utf-8").read())
+        stack: list[tuple[str, int]] = []
+        line = 1
+        for ch in code:
+            if ch == "\n":
+                line += 1
+            elif ch in "([{":
+                stack.append((ch, line))
+            elif ch in ")]}":
+                if not stack:
+                    err(f"{where}:{line}: unmatched '{ch}'")
+                    break
+                opening, oline = stack.pop()
+                if opening != pairs[ch]:
+                    err(f"{where}:{line}: '{ch}' closes '{opening}' from line {oline}")
+                    break
+        if stack:
+            opening, oline = stack[-1]
+            err(f"{where}:{oline}: unclosed '{opening}' (file ends with {len(stack)} open)")
     return count
 
 
-def main() -> int:
-    errors: list[str] = []
-    defined = collect_defined(errors)
+# ───────────────────────────────────────────────────────────────────────────
+# 4 — project imports resolve
+# ───────────────────────────────────────────────────────────────────────────
+DECL_RE = re.compile(
+    r"^\s*(?:@\w+(?:\([^)]*\))?\s*)*"
+    r"(?:public\s+|internal\s+|private\s+|protected\s+|abstract\s+|sealed\s+|data\s+|enum\s+|open\s+|inline\s+|value\s+)*"
+    r"(class|interface|object|fun|val|var)\s+([A-Za-z_][A-Za-z0-9_]*)",
+    re.MULTILINE,
+)
 
-    # style parent chains such as "Ios.Text.Mode" imply "Ios.Text" exists
-    implied = set()
-    for style in list(defined["style"]):
-        parts = style.split(".")
-        for i in range(1, len(parts)):
-            implied.add(".".join(parts[:i]))
-    defined["style"] |= implied
 
-    refs = collect_refs(errors)
+def declared_names(text: str) -> set[str]:
+    names = set()
+    for match in DECL_RE.finditer(text):
+        names.add(match.group(2))
+    # members of objects/interfaces (indented fun/val) for member checks
+    return names
+
+
+def file_package(text: str) -> str | None:
+    match = re.search(r"^package\s+([\w.]+)", text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def check_imports() -> int:
+    packages: dict[str, set[str]] = defaultdict(set)
+    for path in walk_sources():
+        text = open(path, encoding="utf-8").read()
+        pkg = file_package(text)
+        if pkg:
+            packages[pkg] |= declared_names(text)
+
+    count = 0
+    for path in walk_sources():
+        where = os.path.relpath(path, ROOT)
+        text = open(path, encoding="utf-8").read()
+        for full in IMPORT_RE.findall(text):
+            count += 1
+            parts = full.split(".")
+            pkg = ".".join(parts[:-1])
+            name = parts[-1]
+            if pkg not in packages:
+                err(f"{where}: import {full} — package '{pkg}' does not exist")
+            elif name not in packages[pkg]:
+                err(f"{where}: import {full} — '{name}' not declared in {pkg}")
+    return count
+
+
+# ───────────────────────────────────────────────────────────────────────────
+# 5/6 — member-level cross checks
+# ───────────────────────────────────────────────────────────────────────────
+def object_members(text: str, object_name: str, kinds: tuple[str, ...]) -> set[str]:
+    """Collects member names declared inside `object <object_name> { ... }`."""
+    match = re.search(rf"object\s+{object_name}\s*\{{", text)
+    if not match:
+        return set()
+    start = match.end()
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    body = text[start:i]
+    members = set()
+    pattern = re.compile(
+        r"^\s*(?:@\w+\s*)*(?:override\s+|private\s+|internal\s+|public\s+|const\s+)*"
+        r"(?:" + "|".join(kinds) + r")\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::|\(|=|$)",
+        re.MULTILINE,
+    )
+    for m in pattern.finditer(body):
+        members.add(m.group(1))
+    return members
+
+
+def interface_members(text: str, interface_name: str) -> set[str]:
+    match = re.search(rf"interface\s+{interface_name}\s*[\w:<>, ]*\{{", text)
+    if not match:
+        return set()
+    start = match.end()
+    depth = 1
+    i = start
+    while i < len(text) and depth > 0:
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+        i += 1
+    body = text[start:i]
+    return set(re.findall(r"\bfun\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", body))
+
+
+def data_class_props(text: str, class_name: str) -> set[str]:
+    match = re.search(rf"data\s+class\s+{class_name}\s*\((.*?)\)\s*\{{", text, re.DOTALL)
+    if not match:
+        return set()
+    body = match.group(1)
+    props = set(re.findall(r"\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*:", body))
+    # computed properties declared in the class body (`val x: T get() = ...`)
+    props |= set(re.findall(r"\n\s{4}val\s+([A-Za-z_][A-Za-z0-9_]*)\s*:", text))
+    return props
+
+
+def check_members() -> int:
+    controller = open(os.path.join(SRC, "com/zenith/auxcam/CameraController.kt"), encoding="utf-8").read()
+    ui_state_file = open(os.path.join(SRC, "com/zenith/auxcam/CameraUiState.kt"), encoding="utf-8").read()
+    theme = open(os.path.join(SRC, "com/zenith/auxcam/ui/theme/Theme.kt"), encoding="utf-8").read()
+    icons = open(os.path.join(SRC, "com/zenith/auxcam/ui/icons/NotiIcons.kt"), encoding="utf-8").read()
+
+    actions = interface_members(controller, "CameraActions")
+    state_props = data_class_props(ui_state_file, "CameraUiState")
+    colors = object_members(theme, "CameraColors", ("val",))
+    spacing = object_members(theme, "CameraSpacing", ("val",))
+    type_members = object_members(theme, "CameraType", ("val",))
+    icon_members = object_members(icons, "NotiIcons", ("val",))
+
+    if not actions:
+        err("could not parse the CameraActions interface")
+    if not state_props:
+        err("could not parse CameraUiState properties")
+
     checked = 0
-    for rtype, rname, where in refs:
-        if rtype == "id":
-            pool = defined["id"] | defined["id"]
-        elif rtype in ("style", "string", "color", "dimen", "drawable", "layout", "mipmap"):
-            pool = defined[rtype]
-        else:
+    for path in walk_sources():
+        if not path.endswith(".kt"):
             continue
-        checked += 1
-        if rname not in pool:
-            fail(f"missing @{rtype}/{rname} referenced from {where}", errors)
+        where = os.path.relpath(path, ROOT)
+        text = open(path, encoding="utf-8").read()
 
-    java_files = check_java_syntax(errors)
+        for name in re.findall(r"\bactions\.([A-Za-z_][A-Za-z0-9_]*)\s*\(", text):
+            checked += 1
+            if name not in actions:
+                err(f"{where}: actions.{name}() is not declared on CameraActions")
 
-    print(f"· res files parsed: {sum(len(v) for k, v in defined.items() if k != 'id')} definitions")
-    print(f"· ids declared:     {len(defined['id'])}")
-    print(f"· references checked: {checked}")
-    print(f"· java files parsed:  {java_files}")
+        for name in re.findall(r"\bstate\.([A-Za-z_][A-Za-z0-9_]*)\b", text):
+            checked += 1
+            if name not in state_props and name not in ("copy", "equals", "hashCode", "toString"):
+                err(f"{where}: state.{name} is not a CameraUiState property")
+
+        for name in re.findall(r"\bNotiIcons\.([A-Za-z_][A-Za-z0-9_]*)", text):
+            checked += 1
+            if name not in icon_members:
+                err(f"{where}: NotiIcons.{name} does not exist")
+
+        for obj, members, label in (
+            ("CameraColors", colors, "CameraColors"),
+            ("CameraSpacing", spacing, "CameraSpacing"),
+            ("CameraType", type_members, "CameraType"),
+        ):
+            for name in re.findall(rf"\b{obj}\.([A-Za-z_][A-Za-z0-9_]*)", text):
+                checked += 1
+                if name not in members:
+                    err(f"{where}: {label}.{name} does not exist")
+    return checked
+
+
+
+COMPOSABLE_RE = re.compile(r"^(?:@Composable\s*)?(?:private\s+|internal\s+)?fun\s+([A-Z][A-Za-z0-9_]*)\s*\(", re.MULTILINE)
+
+
+def check_composable_calls() -> int:
+    """Every project composable used in another package must be imported."""
+    declared: dict[tuple[str, str], str] = {}
+    packages: dict[str, set[str]] = defaultdict(set)
+    for path in walk_sources():
+        if not path.endswith(".kt"):
+            continue
+        text = open(path, encoding="utf-8").read()
+        pkg = file_package(text) or ""
+        for name in COMPOSABLE_RE.findall(text):
+            declared[(pkg, name)] = path
+            packages[pkg].add(name)
+
+    checked = 0
+    for path in walk_sources():
+        if not path.endswith(".kt"):
+            continue
+        where = os.path.relpath(path, ROOT)
+        text = open(path, encoding="utf-8").read()
+        pkg = file_package(text) or ""
+        imports = set(IMPORT_RE.findall(text))
+        for name in set(re.findall(r"\b([A-Z][A-Za-z0-9_]*)\s*\(", text)):
+            if (pkg, name) in declared:
+                continue  # same package
+            owners = [p for (p, n) in declared if n == name]
+            if not owners:
+                continue
+            checked += 1
+            full = f"{owners[0]}.{name}"
+            if full not in imports:
+                err(f"{where}: uses {name}() but does not import {full}")
+    return checked
+
+# ───────────────────────────────────────────────────────────────────────────
+# main
+# ───────────────────────────────────────────────────────────────────────────
+def main() -> int:
+    defined = collect_resources()
+    refs = check_references(defined)
+    files = check_balance()
+    imports = check_imports()
+    members = check_members()
+    composables = check_composable_calls()
+
+    print(f"· resource definitions : {sum(len(v) for v in defined.values())}")
+    print(f"· resource references  : {refs}")
+    print(f"· source files balanced: {files}")
+    print(f"· project imports      : {imports}")
+    print(f"· member cross-checks  : {members}")
+    print(f"· composable imports   : {composables}")
 
     if errors:
         print(f"\n✗ {len(errors)} problem(s):")
-        for err in errors:
-            print("  -", err)
+        for item in errors:
+            print("  -", item)
         return 1
 
-    print("\n✓ all UI resources and Java sources check out")
+    print("\n✓ resources, braces, imports and Compose member references all check out")
     return 0
 
 

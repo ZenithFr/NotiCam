@@ -65,13 +65,14 @@ public class CameraUserService extends IAuxCamService.Stub {
     private int mDepthW = 448, mDepthH = 288;
     private int mStillW = 4080, mStillH = 3072;
 
-    private final Runnable mAfResetRunnable = new Runnable() {
+    private final class AfResetRunnable implements Runnable {
         @Override
         public void run() {
             mAfRegion = null;
             refreshRepeatingRequest();
         }
-    };
+    }
+    private final Runnable mAfResetRunnable = new AfResetRunnable();
 
     // Sparse frame statistics
     private long mLastColorFrameTimeNs = 0;
@@ -743,6 +744,11 @@ public class CameraUserService extends IAuxCamService.Stub {
         public void onConfigureFailed(CameraCaptureSession session) {
             Log.e(TAG, "Session configuration failed!");
             mService.notifyError("CameraCaptureSession configuration failed");
+            if (mService.mPhysicalId != null && !"0".equals(mService.mPhysicalId)) {
+                Log.i(TAG, "Reverting to primary physical lens '0'");
+                mService.mPhysicalId = "0";
+                mService.restartWithLens("0");
+            }
         }
     }
 
