@@ -5,12 +5,12 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
@@ -29,6 +29,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.zenith.auxcam.DeviceProfile
+import com.zenith.auxcam.ui.effects.matte
+import com.zenith.auxcam.ui.effects.rememberMatteGrain
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
@@ -111,7 +115,8 @@ fun ZoomChips(
         ) {
             stops.forEachIndexed { index, stop ->
                 ZoomChip(
-                    label = formatStop(stop),
+                    label = DeviceProfile.zoomLabel(stop),
+                    caption = DeviceProfile.zoomCaption(stop),
                     selected = index == nearest && onStop,
                     dimmed = !onStop && index == nearest,
                     size = chipSize,
@@ -129,6 +134,7 @@ fun ZoomChips(
 @Composable
 private fun ZoomChip(
     label: String,
+    caption: String?,
     selected: Boolean,
     dimmed: Boolean,
     size: Dp,
@@ -137,6 +143,7 @@ private fun ZoomChip(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
+    val grain = rememberMatteGrain()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.88f else 1f,
         animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
@@ -160,8 +167,11 @@ private fun ZoomChip(
                 scaleY = scale
                 clip = false
             }
-            .border(0.5.dp, CameraColors.Separator, CircleShape)
+            // Flat film, no rim: the chip is a shade of the background plus grain,
+            // not a bordered tile. The travelling white disc still marks selection.
+            .background(CameraColors.Matte, CircleShape)
             .clip(CircleShape)
+            .matte(grain, CircleShape, strength = if (selected) 0.3f else 1f)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -170,13 +180,23 @@ private fun ZoomChip(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = label,
-            style = CameraType.Lens,
-            color = if (selected) CameraColors.OnLight else CameraColors.Label.copy(alpha = labelAlpha),
-        )
+        // Two-line chip: the UW chip reads "UW" with "0.6×" beneath it.
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = label,
+                style = CameraType.Lens,
+                color = if (selected) CameraColors.OnLight else CameraColors.Label.copy(alpha = labelAlpha),
+            )
+            if (caption != null) {
+                Text(
+                    text = caption,
+                    style = CameraType.Lens,
+                    fontSize = 8.sp,
+                    color = if (selected) CameraColors.OnLight.copy(alpha = 0.7f)
+                    else CameraColors.Label.copy(alpha = labelAlpha * 0.6f),
+                )
+            }
+        }
     }
 }
 
-private fun formatStop(stop: Float): String =
-    if (abs(stop - stop.roundToInt()) < 0.05f) "${stop.roundToInt()}×" else String.format("%.1f×", stop)

@@ -25,7 +25,6 @@ export ANDROID_HOME="/home/zenith/Android/Sdk"
 export ANDROID_SDK_ROOT="/home/zenith/Android/Sdk"
 export ANDROID_NDK_ROOT="/home/zenith/Work/android-ndk-r27b"
 export NDK_DIR="/home/zenith/Work/android-ndk-r27b"
-
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TASK="${1:-debug}"
 

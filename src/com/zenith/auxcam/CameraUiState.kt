@@ -16,6 +16,28 @@ enum class CaptureMode(val label: String) {
 /** Flash request state, mapped 1:1 onto `CONTROL_AE_MODE`. */
 enum class FlashMode { Off, Auto, On }
 
+/** Output resolution. `High` is the 50 MP binned-off mode of the CMF Phone 2 Pro. */
+enum class Resolution(val label: String, val longEdge: Int) {
+    Standard("12MP", 4080),
+    High("50MP", 8160);
+
+    fun next(): Resolution = if (this == Standard) High else Standard
+}
+
+/**
+ * Viewfinder framing. `FourThree` is the sensor's native ratio and therefore the
+ * default; the others crop the framebuffer (they never stretch it).
+ */
+enum class FrameRatio(val label: String, val aspect: Float?) {
+    Square("1:1", 1f),
+    FourThree("4:3", 4f / 3f),
+    Widescreen("16:9", 16f / 9f),
+    /** Fills the available slot, cropping as needed. */
+    Full("FULL", null);
+
+    fun next(): FrameRatio = entries[(ordinal + 1) % entries.size]
+}
+
 /**
  * Immutable snapshot of everything the Compose UI renders. Held in a single
  * `MutableState` inside [CameraController] so recomposition is granular and the
@@ -39,6 +61,21 @@ data class CameraUiState(
     val grid: Boolean = false,
     val raw: Boolean = false,
     val timerSeconds: Int = 0,
+
+    /** 12MP vs 50MP output. */
+    val resolution: Resolution = Resolution.Standard,
+
+    /**
+     * Telephoto assist: above 2x the engine switches to the physical tele lens
+     * instead of digitally cropping the main sensor.
+     */
+    val telephoto: Boolean = false,
+
+    /** Viewfinder framing, default 4:3 (sensor native). */
+    val frameRatio: FrameRatio = FrameRatio.FourThree,
+
+    /** AE/AF held: the reticle becomes a lock badge until the user taps again. */
+    val aeAfLocked: Boolean = false,
 
     val proSheetOpen: Boolean = false,
 
@@ -84,6 +121,17 @@ data class CameraUiState(
     /** True while the zoom surface is showing (pinch in progress or just ended). */
     val zoomActive: Boolean
         get() = zoomDialVisible
+
+    /**
+     * Aspect the viewfinder box must use, in *screen* terms (portrait), or `null`
+     * when the caller should simply fill the slot.
+     */
+    val frameAspect: Float?
+        get() = frameRatio.aspect?.let { if (DeviceProfile.PREVIEW_ROTATION_90) 1f / it else it }
+
+    /** Aperture control is meaningful in Portrait and Pro only. */
+    val apertureVisible: Boolean
+        get() = mode == CaptureMode.Portrait || mode == CaptureMode.Pro
 
     val focalLabel: String
         get() = String.format("%.0f MM", DeviceProfile.FOCAL_MAIN_MM * zoom)

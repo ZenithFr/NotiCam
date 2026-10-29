@@ -10,13 +10,31 @@
     --label-2:rgba(255,255,255,.65);
     --label-3:rgba(255,255,255,.4);
     --sep:rgba(255,255,255,.12);
-    --glass:rgba(28,28,30,.55);
-    --glass-strong:rgba(20,20,22,.9);
+    /* Flat film over dark chrome (8 % white) and the flat shade over the scene
+       (14 % black). Two values, no gradients, no rims - the matte grain is the
+       only texture. Mirrors CameraColors.Matte / MatteScrim. */
+    --matte:rgba(255,255,255,.08);
+    --matte-scrim:rgba(0,0,0,.14);
     --yellow:#ffd60a;
     --red:#ff453a;
     --gutter:16px;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  /* Matte texture: a tiny repeating grain and nothing else.
+     There is deliberately no sheen gradient here - that white top-edge highlight
+     was a specular reflection, and a specular reflection is what makes a surface
+     read as glass. Grain is diffuse scatter, which is what matte means.
+     Same trick as Matte.kt, which tiles one 64x64 noise bitmap on the GPU. */
+  .matte-texture{
+    position:relative;isolation:isolate;
+  }
+  .matte-texture::after{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background-image:
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/><feComponentTransfer><feFuncA type='linear' slope='.075'/></feComponentTransfer></filter><rect width='64' height='64' filter='url(%23n)'/></svg>");
+    background-size:64px 64px;
+    mix-blend-mode:screen;opacity:.95;
+  }
   html,body{margin:0;height:100%}
   /* The page is exactly one viewport tall and never scrolls: the phone is fitted
      to whatever space is left (`fitDevice()`), so the *entire* screen is always
@@ -100,12 +118,12 @@
   /* ─────────── top bar (in flow, above the frame) ─────────── */
   .topbar{
     position:relative;z-index:30;display:flex;align-items:center;
+    transition:opacity .42s ease;
     height:56px;flex:0 0 auto;padding:0 var(--gutter);gap:8px;
   }
   .iconbtn{
     width:44px;height:44px;border:0;border-radius:50%;display:grid;place-items:center;
-    background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-    box-shadow:inset 0 0 0 .5px var(--sep);
+    background:var(--matte);
     color:#fff;cursor:pointer;transition:transform .16s ease,background .16s ease;
   }
   .iconbtn:active{transform:scale(.9);background:rgba(255,255,255,.16)}
@@ -114,15 +132,15 @@
   .rawpill{
     height:30px;padding:0 11px;border:0;border-radius:15px;cursor:pointer;
     font-size:11px;font-weight:600;letter-spacing:.04em;
-    color:var(--label-2);background:var(--glass);box-shadow:inset 0 0 0 .5px var(--sep);
+    color:var(--label-2);background:var(--matte);
     transition:background .18s ease,color .18s ease,transform .16s cubic-bezier(.2,.9,.3,1.3);
   }
   .rawpill:active{transform:scale(.92)}
   .rawpill.on{background:#fff;color:#000;box-shadow:none}
+  .topbar.hud-hidden{opacity:0;pointer-events:none}
   .pillstatus{
     font-size:11px;letter-spacing:.04em;color:var(--label-2);
-    padding:7px 12px;border-radius:12px;background:rgba(0,0,0,.4);
-    backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+    padding:7px 12px;border-radius:12px;background:var(--matte);
     white-space:nowrap;max-width:216px;overflow:hidden;text-overflow:ellipsis;
   }
 
@@ -142,11 +160,14 @@
   .chip{
     width:44px;height:44px;border-radius:50%;border:0;cursor:pointer;position:relative;
     display:grid;place-items:center;font-size:12px;font-weight:600;letter-spacing:.02em;
-    color:rgba(255,255,255,.6);background:transparent;box-shadow:inset 0 0 0 .5px var(--sep);
+    color:rgba(255,255,255,.6);background:var(--matte);
     transition:color .2s ease,transform .16s cubic-bezier(.2,.9,.3,1.3);
   }
   .chip:active{transform:scale(.88)}
-  .chip.sel{color:#000;box-shadow:none}
+  .chip.sel{color:#000}
+  .chip i{font-style:normal;display:block;line-height:1}
+  .chip b{display:block;font-size:8px;font-weight:600;line-height:1.1;opacity:.65}
+  .chip.sel b{opacity:.7}
   .chip.near{color:rgba(255,255,255,.9)}
 
   /* ─────────── quick aperture (portrait) ─────────── */
@@ -172,10 +193,6 @@
   .bottom{
     position:relative;padding:18px 24px 34px;display:flex;flex-direction:column;align-items:center;
   }
-  .bottom::before{
-    content:"";position:absolute;left:0;right:0;top:0;height:100%;pointer-events:none;
-    background:linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,.55) 30%, #000 100%);
-  }
   .bottom > *:not(.sheet){position:relative}
 
   /* The menu is an overlay anchored to the chrome band: it translates up from
@@ -184,10 +201,8 @@
   /* Settings sheet: hangs from under the top bar and slides DOWN out of it. */
   .sheet{
     position:absolute;left:24px;right:24px;top:104px;z-index:2;
-    background:var(--glass-strong);border-radius:24px;
-    box-shadow:inset 0 0 0 .5px rgba(255,255,255,.16);
+    background:var(--matte-scrim);border-radius:24px;
     padding:14px 18px 16px;
-    backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
     transform:translateY(-16px) scale(.96);opacity:0;pointer-events:none;
     transform-origin:50% 0;
     transition:transform .42s cubic-bezier(.34,1.24,.44,1),opacity .2s ease;
@@ -195,7 +210,7 @@
   .sheet.open{transform:none;opacity:1;pointer-events:auto}
   /* Starts under the top bar so flash / RAW / Pro stay legible and tappable. */
   .scrim{
-    position:absolute;left:0;right:0;top:104px;bottom:0;background:rgba(0,0,0,.38);opacity:0;
+    position:absolute;left:0;right:0;top:104px;bottom:0;background:rgba(0,0,0,.30);opacity:0;
     pointer-events:none;transition:opacity .2s ease;z-index:1;
   }
   .scrim.on{opacity:1;pointer-events:auto}
@@ -209,9 +224,21 @@
   .ticks{display:flex;justify-content:space-between;font-size:9px;color:var(--label-3);margin:0 0 10px;padding:0 2px}
   .divider{height:1px;background:var(--sep);margin:0 0 12px}
   .toggles{display:flex;gap:8px}
+  .segmented{display:flex;gap:8px;margin-bottom:16px}
+  .seg{
+    flex:1;height:32px;border:0;border-radius:16px;cursor:pointer;
+    font-size:11px;font-weight:600;letter-spacing:.03em;
+    color:var(--label-2);background:var(--matte);
+    transition:background .19s ease,color .19s ease,transform .16s cubic-bezier(.2,.9,.3,1.3);
+  }
+  .seg:active{transform:scale(.94)}
+  .seg.sel{background:#fff;color:#000;box-shadow:none}
+  .toggle.tele{display:flex;align-items:center;justify-content:center;gap:7px}
+  #apertureBlock{transition:opacity .2s ease}
+  #apertureBlock.hidden{display:none}
   .toggle{
     flex:1;height:34px;border:0;border-radius:17px;cursor:pointer;font-size:12px;font-weight:600;
-    color:#fff;background:rgba(28,28,30,.55);box-shadow:inset 0 0 0 .5px var(--sep);
+    color:#fff;background:var(--matte);
     transition:background .18s,color .18s,transform .12s;
   }
   .toggle:active{transform:scale(.96)}
@@ -233,7 +260,7 @@
   .shutterrow{display:flex;align-items:center;width:100%;margin-top:10px;padding:0 10px}
   .gallery{
     width:52px;height:52px;border-radius:10px;overflow:hidden;position:relative;cursor:pointer;
-    background:rgba(255,255,255,.08);box-shadow:inset 0 0 0 .5px rgba(255,255,255,.2);
+    background:rgba(255,255,255,.08);
     display:grid;place-items:center;transition:transform .2s;
   }
   .gallery img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .2s}
@@ -271,8 +298,9 @@
     transform-origin:50% 0;
     transform:translateX(-50%) scale(.55);
     border-radius:50%;pointer-events:none;
-    background:radial-gradient(circle at 50% 20%,
-      rgba(20,20,22,.95) 0%, rgba(20,20,22,.55) 42%, rgba(20,20,22,.12) 68%, rgba(20,20,22,0) 82%);
+    /* Flat shade falling away downward - no hotspot, so the disc is not "lit". */
+    background:linear-gradient(to bottom,
+      rgba(0,0,0,.14) 0%, rgba(0,0,0,.077) 62%, rgba(0,0,0,0) 100%);
     display:grid;place-items:center;opacity:0;
     transition:opacity .2s ease,transform .42s cubic-bezier(.34,1.28,.44,1);z-index:1;
   }
@@ -283,7 +311,7 @@
     transition:opacity .2s ease,transform .36s cubic-bezier(.34,1.2,.44,1);
   }
   .zoomstack.wheel .lensrow{opacity:0;transform:scale(.84) translateY(6px);pointer-events:none}
-  .dial > div{margin-top:-12px}
+  .dial > div{margin-top:-24px;width:100%;text-align:center}
   .dial .big{font-size:34px;font-weight:500;letter-spacing:.02em;transition:transform .3s cubic-bezier(.34,1.4,.44,1)}
   .dial .sub{font-size:11px;letter-spacing:.06em;color:rgba(255,255,255,.6);margin-top:2px;text-align:center}
   .dial svg.ticks{position:absolute;inset:0;width:100%;height:100%}
@@ -344,12 +372,12 @@
   <div class="camera">
     <!-- top chrome: flash · status · pro (outside the 4:3 region) -->
   <div class="topbar">
-    <button class="iconbtn" id="flash" aria-label="Flash"></button>
-    <button class="rawpill" id="rawBadge">RAW</button>
+    <button class="iconbtn matte-texture" id="flash" aria-label="Flash"></button>
+    <button class="rawpill matte-texture" id="rawBadge">RAW</button>
     <div class="spacer"></div>
     <div class="pillstatus" id="status">Ready</div>
     <div class="spacer"></div>
-    <button class="iconbtn" id="pro" aria-label="Pro controls"></button>
+    <button class="iconbtn matte-texture" id="pro" aria-label="Pro controls"></button>
   </div>
 
     <!-- viewfinder: measured to exactly 4:3 (1440x1080 sensor) -->
@@ -375,14 +403,23 @@
       </div>
     <div class="lensrow" id="lensrow">
       <div class="chipdisc" id="chipdisc"></div>
-      <button class="chip sel" id="chip1" style="position:relative;z-index:1">0.6×</button>
+      <button class="chip sel" id="chip1" style="position:relative;z-index:1"><i>UW</i><b>0.6×</b></button>
       <button class="chip" id="chip2" style="position:relative;z-index:1">1×</button>
       <button class="chip" id="chip5" style="position:relative;z-index:1">2×</button>
     </div>
     </div><!-- /zoomstack -->
 
     <div class="scrim" id="scrim"></div>
-<div class="sheet" id="sheet">
+<div class="sheet matte-texture" id="sheet">
+      <div class="section" style="margin-bottom:8px">Framing</div>
+      <div class="segmented" id="framing">
+        <button class="seg" data-ratio="1:1">1:1</button>
+        <button class="seg sel" data-ratio="4:3">4:3</button>
+        <button class="seg" data-ratio="16:9">16:9</button>
+        <button class="seg" data-ratio="full">Full</button>
+      </div>
+
+      <div id="apertureBlock">
       <div class="rowlabel" style="margin-bottom:2px">
         <span class="aperture-ico" id="icoAperture2"></span>
         <span class="section" style="flex:1">Aperture</span>
@@ -392,6 +429,7 @@
         <div class="track"></div><div class="fill"></div><div class="knob"></div>
       </div>
       <div class="ticks"><span>1.4</span><span>2.8</span><span>5.6</span><span>11</span><span>16</span></div>
+      </div>
 
       <div class="rowlabel">
         <span class="section" style="flex:1">Exposure</span>
@@ -405,8 +443,21 @@
       <div class="divider"></div>
 
       <div class="toggles">
-        <button class="toggle" id="tGrid">Grid</button>
-        <button class="toggle" id="tTimer">Timer</button>
+        <button class="toggle matte-texture" id="tRes">12MP</button>
+        <button class="toggle matte-texture" id="tGrid">Grid</button>
+        <button class="toggle matte-texture" id="tTimer">Timer</button>
+      </div>
+      <div class="toggles" style="margin-top:8px">
+        <button class="toggle matte-texture tele" id="tTele">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+            <rect x="1" y="7" width="12.5" height="10" rx="2.4"/>
+            <rect x="13.5" y="9.6" width="8" height="4.8" rx="1.2"/>
+            <path d="M21.5 8.6v6.8" stroke-width="2"/>
+            <rect x="3.8" y="4" width="4.4" height="3.2" rx="1"/>
+          </svg>
+          <span id="teleLabel">TELE OFF</span>
+        </button>
       </div>
 
       <div class="telemetry" id="telemetry">VIEWFINDER · 30 FPS · DEPTH · 30 FPS · Δt 0.0 ms</div>
@@ -443,7 +494,7 @@
           <span class="pulse" id="pulse"></span>
         </button>
         <div class="spacer"></div>
-        <button class="iconbtn" id="flip" aria-label="Switch lens"></button>
+        <button class="iconbtn matte-texture" id="flip" aria-label="Switch lens"></button>
       </div>
     </div>
   </div>
@@ -473,7 +524,7 @@
     <div class="sw"><i style="background:#ffd60a"></i><span>systemYellow</span></div>
     <div class="sw"><i style="background:#fff"></i><span>label</span></div>
     <div class="sw"><i style="background:rgba(255,255,255,.65)"></i><span>label 65%</span></div>
-    <div class="sw"><i style="background:rgba(28,28,30,.55)"></i><span>glass 55%</span></div>
+    <div class="sw"><i style="background:rgba(255,255,255,.08);box-shadow:inset 0 0 0 1px rgba(255,255,255,.25)"></i><span>matte 8%</span></div>
     <div class="sw"><i style="background:#141416"></i><span>sheet</span></div>
   </div>
 
@@ -482,7 +533,7 @@
     <li><span class="dot" style="background:#ffd60a"></span><div>Tap the viewfinder → yellow AE/AF reticle (drives <code>focusAt()</code>).</div></li>
     <li><span class="dot" style="background:#fff"></span><div>Press the shutter → bloom, ring pulse, and the frame flies into the gallery.</div></li>
     <li><span class="dot" style="background:rgba(255,255,255,.4)"></span><div>Switch to <b>Portrait</b> → the ƒ ladder appears in the bottom bar.</div></li>
-    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div>Open <b>Pro</b> → glass sheet slides up, button becomes a white ✕.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div>Open <b>Pro</b> → the sheet slides down from the top bar over a thin flat shade, button becomes a white ✕.</div></li>
   </ul>
 
   <p class="hint">Static preview only — the shipping chrome is Jetpack Compose, not a WebView. Dimensions mirror <code>CameraSpacing</code> / <code>DeviceProfile</code>; press animations use spring specs, which is why nothing clips while it scales.</p>
@@ -561,9 +612,19 @@
     const w = stage.clientWidth, h = stage.clientHeight;
     if (!w || !h) return;
     // 3:4 portrait — the engine rotates the 1440x1080 sensor frame 90° CW.
-    const fh = Math.min(h, (w * 4) / 3);
+    // A selected framing crops that box instead of stretching it.
+    const ratio = state && state.ratio !== undefined ? state.ratio : 4 / 3;
+    let fh, fw;
+    if (ratio === null) {
+      // Full: fill the slot.
+      fw = w; fh = h;
+    } else {
+      const screenAspect = 1 / ratio;         // portrait: height / width
+      fw = Math.min(w, h / screenAspect);
+      fh = fw * screenAspect;
+    }
     frame.style.height = fh + "px";
-    frame.style.width = (fh * 3) / 4 + "px";
+    frame.style.width = fw + "px";
   }
 
   function relayout() {
@@ -642,8 +703,56 @@
       el.pro.innerHTML = ICONS.sliders;
     }
     updateQuickAperture();
+    hudPoke();
   }
   el.pro.addEventListener("click", () => setSheet(!state.sheetOpen));
+
+  // ── header HUD: fade out 2 s after the last interaction ────────────────
+  const topbar = document.querySelector(".topbar");
+  let hudTimer;
+  function hudPoke() {
+    topbar.classList.remove("hud-hidden");
+    clearTimeout(hudTimer);
+    if (state.sheetOpen) return;          // keep it while settings are open
+    hudTimer = setTimeout(() => topbar.classList.add("hud-hidden"), 2000);
+  }
+  document.addEventListener("pointerdown", hudPoke, { capture: true });
+  hudPoke();
+
+  // ── framing 1:1 / 4:3 / 16:9 / Full ────────────────────────────────────
+  const RATIOS = { "1:1": 1, "4:3": 4 / 3, "16:9": 16 / 9, full: null };
+  document.getElementById("framing").addEventListener("click", e => {
+    const b = e.target.closest(".seg");
+    if (!b) return;
+    document.querySelectorAll("#framing .seg").forEach(s => s.classList.toggle("sel", s === b));
+    state.ratio = RATIOS[b.dataset.ratio];
+    fitStage();
+  });
+
+  // ── resolution / telephoto ─────────────────────────────────────────────
+  const resBtn = $("tRes");
+  resBtn.addEventListener("click", () => {
+    const high = resBtn.textContent === "12MP";
+    resBtn.textContent = high ? "50MP" : "12MP";
+    resBtn.classList.toggle("on", high);
+    el.status.textContent = high ? "50MP" : "12MP";
+    hudPoke();
+  });
+
+  const teleBtn = $("tTele");
+  teleBtn.addEventListener("click", () => {
+    const on = !teleBtn.classList.contains("on");
+    teleBtn.classList.toggle("on", on);
+    $("teleLabel").textContent = on ? "TELE · >2×" : "TELE OFF";
+    hudPoke();
+  });
+
+  // aperture belongs to Portrait and Pro only
+  function updateApertureVisibility() {
+    const show = state.mode === "portrait" || state.mode === "pro";
+    $("apertureBlock").classList.toggle("hidden", !show);
+  }
+  updateApertureVisibility();
   // no Done button: tap outside closes
   $("scrim").addEventListener("click", () => setSheet(false));
 
@@ -660,6 +769,8 @@
       );
     });
     updateQuickAperture();
+    updateApertureVisibility();
+    hudPoke();
   }
   document.getElementById("modes").addEventListener("click", e => {
     const b = e.target.closest(".mode");
@@ -778,30 +889,93 @@
     disc.style.opacity = onStop ? "1" : "0";
   }
 
-  function setZoom(z) {
-    state.zoom = z;
+  // `summon` is separate on purpose: changing the zoom is not the same event as
+  // performing a zoom gesture. Chip taps and the lens flip change the value and
+  // must leave the chips alone; only a pinch or a chip-row drag brings the wheel
+  // up. Keying visibility off "the zoom changed" is exactly what used to pop the
+  // wheel whenever the lens was flipped (the flip resets zoom to 1x).
+  function setZoom(z, summon = false) {
+    // Clamp once, then derive every read-out from the clamped value. The old code
+    // clamped the state but printed the raw gesture value, so a hard pinch could
+    // show "3.5×" while the camera was actually pinned at 2×.
+    const zv = Math.min(ZMAX, Math.max(ZMIN, z));
+    state.zoom = zv;
     chips.forEach(([id, val]) => {
       const b = $(id);
-      const on = Math.abs(val - z) < 0.08;
+      const on = Math.abs(val - zv) < 0.08;
       b.classList.toggle("sel", on);
-      b.classList.toggle("near", !on && Math.abs(val - z) < 0.6);
+      b.classList.toggle("near", !on && Math.abs(val - zv) < 0.6);
     });
     moveDisc();
-    el.dialZoom.textContent = fmtZoom(z);
-    el.dialSub.textContent = MM(z) + " MM";
-    drawTicks(z);
-    showWheel();
+    el.dialZoom.textContent = fmtZoom(zv);
+    el.dialSub.textContent = MM(zv) + " MM";
+    drawTicks(zv);
+    if (summon) showWheel();
   }
   const fmtZoom = z => (Math.abs(z - Math.round(z)) < 0.05 ? Math.round(z) : z.toFixed(1)) + "×";
-  chips.forEach(([id, val]) => $(id).addEventListener("click", () => setZoom(val)));
+  // A chip tap is a destination, not a gesture: it selects the stop and leaves the
+  // chips where they are. `suppressTap` is set by the scrub handler below so that
+  // finishing a drag on top of a chip does not also select it.
+  let suppressTap = false;
+  chips.forEach(([id, val]) => $(id).addEventListener("click", () => {
+    if (suppressTap) { suppressTap = false; return; }
+    setZoom(val);
+  }));
   addEventListener("resize", moveDisc);
   requestAnimationFrame(moveDisc);
 
+  // ── chip-row scrub ───────────────────────────────────────────────────────
+  // Dragging the row is the same gesture family as a pinch: the chips collapse
+  // and the wheel takes over. The listener sits on #zoomstack, which stays put
+  // while .lensrow fades to pointer-events:none, so the drag survives the wheel
+  // arriving — otherwise the gesture would die the moment it worked.
+  (() => {
+    const stack = $("zoomstack");
+    let drag = null;
+
+    stack.addEventListener("pointerdown", e => {
+      if (e.button !== undefined && e.button !== 0) return;
+      drag = { id: e.pointerId, startX: e.clientX, x: e.clientX, moved: false };
+    });
+
+    stack.addEventListener("pointermove", e => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const total = e.clientX - drag.startX;
+      if (!drag.moved) {
+        if (Math.abs(total) < 5) return;   // touch slop: a tap is still a tap
+        drag.moved = true;
+        drag.x = e.clientX - total;        // scrub from the slop point
+        // Capture only once this is definitely a drag: capturing on pointerdown
+        // would swallow the chip's own click, because pointerup would be retargeted
+        // at the row instead of the button under the finger.
+        try { stack.setPointerCapture(e.pointerId); } catch (_) {}
+        showWheel();
+      }
+      const dx = e.clientX - drag.x;
+      drag.x = e.clientX;
+      // Exponential: same finger travel moves the same proportion of the range at
+      // 0.6x and at 2x. Mirrors CameraController.onZoomDrag (~180 px doubles).
+      setZoom(state.zoom * Math.exp(dx / 180), true);
+    });
+
+    const end = e => {
+      if (!drag || (e.pointerId !== undefined && e.pointerId !== drag.id)) return;
+      if (drag.moved) {
+        suppressTap = true;
+        // The click event (if any) fires after this, so clear the latch then.
+        setTimeout(() => { suppressTap = false; }, 0);
+      }
+      drag = null;
+    };
+    stack.addEventListener("pointerup", end);
+    stack.addEventListener("pointercancel", end);
+  })();
+
   // ── orbit dial ───────────────────────────────────────────────────────────
   const ticksG = $("dialTicks");
-  // Top arc only: 48 ticks between 202° and 338°, alpha shaped like sin() so the
+  // Top arc only: 56 ticks across 218° of travel, alpha shaped like sin() so the
   // marks dissolve before the sides and the bottom of the circle stays empty.
-  const ARC_START = 202, ARC_SWEEP = 136, TICKS = 48;
+  const ARC_START = 161, ARC_SWEEP = 218, TICKS = 56;
   const C = 122;                       // centre of the 244px viewBox
   const tickOuter = 114;
 
@@ -848,9 +1022,15 @@
   drawTicks(1);
 
   let dialTimer;
-  // The wheel only appears for a pinch in the app; the mock also shows it when a
-  // chip is tapped so the morph is visible in the preview.
+  // The wheel appears for a zoom *gesture* only: a pinch on the scene, or a drag
+  // on the chip row. Tapping a chip and flipping the lens deliberately do not.
   function showWheel() {
+    // One soft tick the moment the wheel takes over — edge-triggered, because the
+    // drag calls showWheel() on every move and this must not become a rattle.
+    // Mirrors CameraController.showDial() -> softTick(). Guarded: most browsers
+    // have no vibration motor, and jsdom has no navigator.vibrate at all.
+    const wasUp = el.dial.classList.contains("show");
+    if (!wasUp && navigator.vibrate) navigator.vibrate(6);
     el.dial.classList.add("show");
     $("zoomstack").classList.add("wheel");
     clearTimeout(dialTimer);
@@ -859,6 +1039,41 @@
       $("zoomstack").classList.remove("wheel");
     }, 1600);
   }
+
+  // ── pinch to zoom ────────────────────────────────────────────────────────
+  // Two pointers on the scene: scale the zoom by the change in finger spacing and
+  // bring the wheel up, which is the app's pinch path (Viewfinder ->
+  // actions.onZoomGesture -> CameraController.showDial).
+  (() => {
+    const vf = el.viewfinder;
+    const pts = new Map();
+    let spacing = 0;
+
+    const spread = () => {
+      const p = [...pts.values()];
+      return p.length < 2 ? 0 : Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    };
+
+    vf.addEventListener("pointerdown", e => {
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      spacing = spread();
+    });
+
+    vf.addEventListener("pointermove", e => {
+      if (!pts.has(e.pointerId)) return;
+      pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (pts.size < 2) return;
+      const now = spread();
+      if (spacing > 0 && now > 0) setZoom(state.zoom * (now / spacing), true);
+      spacing = now;
+      el.reticle.classList.remove("show");   // a pinch is not a focus tap
+    });
+
+    const drop = e => { pts.delete(e.pointerId); spacing = spread(); };
+    vf.addEventListener("pointerup", drop);
+    vf.addEventListener("pointercancel", drop);
+    vf.addEventListener("pointerleave", drop);
+  })();
 
   // ── tap to focus ─────────────────────────────────────────────────────────
   el.viewfinder.addEventListener("pointerdown", e => {

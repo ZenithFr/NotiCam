@@ -41,6 +41,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.exp
 import kotlin.math.roundToInt
 
 /** Native JNI entry points, implemented by [MainActivity]. */
@@ -80,6 +81,15 @@ interface CameraActions {
     fun onZoomSelected(zoom: Float)
     fun onZoomGesture(scaleFactor: Float)
 
+    /** A drag has started on the chip row — the same gesture family as a pinch. */
+    fun onZoomDragStart()
+
+    /** Horizontal drag delta in pixels while scrubbing the chip row. */
+    fun onZoomDrag(deltaPx: Float)
+
+    /** The chip-row drag ended or was cancelled. */
+    fun onZoomDragEnd()
+
     /** @param fStop real f-number, e.g. 2.36f — continuous, not an index. */
     fun onApertureChanged(fStop: Float)
 
@@ -88,6 +98,24 @@ interface CameraActions {
     fun onGridToggle()
     fun onRawToggle()
     fun onTimerCycle()
+
+    /** 12MP <-> 50MP. */
+    fun onResolutionToggle()
+
+    /** Tele lens assist above 2x. */
+    fun onTelephotoToggle()
+
+    /** Cycle 1:1 -> 4:3 -> 16:9 -> Full. */
+    fun onFrameRatioCycle()
+
+    /** Pick a framing directly (the segmented control). */
+    fun onFrameRatioSelected(ratio: FrameRatio)
+
+    /** Long-press on the viewfinder: lock AE/AF at the current point. */
+    fun onFocusLock()
+
+    /** Tap while locked: release. */
+    fun onFocusUnlock()
     fun onShutterClick()
     fun onSwitchLens()
     /** Opens the phone's gallery on the newest picture. */
@@ -118,6 +146,9 @@ class CameraController(
         private const val Y8_FORMAT = 0x20203859
         private const val THUMB_W = 168
         private const val THUMB_H = 126
+
+        /** Above this zoom the telephoto assist hands over to the physical tele. */
+        private const val TELE_THRESHOLD = 2.0f
 
         /** Apple's Portrait aperture ladder: f/1.4 → f/16. */
         val FSTOPS = floatArrayOf(
@@ -403,9 +434,10 @@ class CameraController(
             reader.setOnImageAvailableListener({ r -> onDepthImage(r) }, handler)
         }
 
+        val (stillW, stillH) = DeviceProfile.stillSize(state.resolution)
         stillReader = ImageReader.newInstance(
-            DeviceProfile.STILL_WIDTH,
-            DeviceProfile.STILL_HEIGHT,
+            stillW,
+            stillH,
             ImageFormat.YUV_420_888,
             2,
             HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
@@ -420,6 +452,7 @@ class CameraController(
         val color = colorReader ?: return
         val depth = depthReader ?: return
         val still = stillReader ?: return
+        val (stillW, stillH) = DeviceProfile.stillSize(state.resolution)
 
         // The preview surface must exist before the engine is initialised.
         if (!holder.surface.isValid) return
@@ -437,7 +470,7 @@ class CameraController(
             val ok = svc.openStereoSession(
                 color.surface, DeviceProfile.COLOR_WIDTH, DeviceProfile.COLOR_HEIGHT,
                 depth.surface, DeviceProfile.DEPTH_WIDTH, DeviceProfile.DEPTH_HEIGHT,
-                still.surface, DeviceProfile.STILL_WIDTH, DeviceProfile.STILL_HEIGHT,
+                still.surface, stillW, stillH,
                 currentLens,
             )
             update { it.copy(status = if (ok) "Starting engine…" else "Retrying session…") }
@@ -566,6 +599,9 @@ class CameraController(
                 outPath = File(dir, "AUXCAM_$stamp.rgba").absolutePath
 
                 if (state.raw) dumpRawPlanes(image, dir, stamp)
+                // 50MP vs 12MP is decided by the capture request the service
+                // builds; log the intent here so a mismatch is visible.
+                Log.i(TAG, "capture resolution=${state.resolution.label}")
 
                 val targetFarFieldPx = 15.0f * (1.8f / state.fStop)
                 val timestamps = LongArray(3)
@@ -632,8 +668,7 @@ class CameraController(
         var raf: RandomAccessFile? = null
         return try {
             val file = File(rgbaPath)
-            val srcW = DeviceProfile.STILL_WIDTH
-            val srcH = DeviceProfile.STILL_HEIGHT
+            val (srcW, srcH) = DeviceProfile.stillSize(state.resolution)
             if (!file.exists() || file.length() < srcW.toLong() * srcH * 2L) return null
 
             raf = RandomAccessFile(file, "r")
@@ -751,31 +786,56 @@ class CameraController(
         haptic()
     }
 
+    /**
+     * Tapping a chip selects that stop and leaves the chips on screen.
+     *
+     * It must never summon the wheel: tapping a chip is a destination, not a
+     * gesture, and swapping the control the user just pressed out from under their
+     * finger is what made the old build feel jumpy.
+     */
     override fun onZoomSelected(zoom: Float) {
         applyZoom(zoom, force = true)
         haptic()
     }
 
+    /** Pinch: comes up first, so even a 1 % squeeze reveals the read-out. */
     override fun onZoomGesture(scaleFactor: Float) {
+        showDial()
         if (scaleFactor == 0f) return
-        applyZoom(state.zoom * scaleFactor, force = false, showWheel = true)
+        applyZoom(state.zoom * scaleFactor, force = false)
     }
 
-    private fun applyZoom(requested: Float, force: Boolean, showWheel: Boolean = false) {
+    override fun onZoomDragStart() {
+        // No haptic: the chips collapsing into the wheel *is* the feedback, and a
+        // pinch does not tick either. A tick here would fire on every scrub.
+        showDial()
+    }
+
+    override fun onZoomDrag(deltaPx: Float) {
+        if (deltaPx == 0f || deltaPx.isNaN()) return
+        // Exponential, so the same finger travel moves the same *proportion* of the
+        // range at 0.6x and at 2x. ~180 px doubles the zoom.
+        applyZoom(state.zoom * exp(deltaPx / 180f), force = false)
+        showDial()
+    }
+
+    override fun onZoomDragEnd() {
+        // Extend the read-out so the number the drag landed on can be read, but
+        // never summon one on the way out.
+        if (state.zoomDialVisible) armDialHide()
+    }
+
+    private fun applyZoom(requested: Float, force: Boolean) {
         val clamped = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (!force && kotlin.math.abs(clamped - state.zoom) < 0.005f) return
 
-        // Only a pinch summons the radial wheel. Tapping a chip keeps the chips
-        // on screen — they must not swap themselves out for the wheel.
-        update {
-            it.copy(
-                zoom = clamped,
-                zoomDialVisible = if (showWheel) true else it.zoomDialVisible,
-            )
-        }
-        if (showWheel) {
-            main.removeCallbacks(hideDial)
-            main.postDelayed(hideDial, 1600L)
+        update { it.copy(zoom = clamped) }
+
+        // Tele assist: cross the 2x threshold with telephoto enabled and hand the
+        // session to the physical tele lens; fall back to the main sensor below it.
+        if (state.telephoto) {
+            if (clamped > TELE_THRESHOLD && !onTele) switchToTele()
+            else if (clamped <= TELE_THRESHOLD && onTele) switchToMain()
         }
 
         // Pinch produces dozens of events per gesture — only forward real changes.
@@ -787,6 +847,51 @@ class CameraController(
                 Log.w(TAG, "setZoom failed")
             }
         }
+    }
+
+    private fun switchToTele() {
+        val tele = teleLensId ?: return
+        onTele = true
+        try {
+            service?.setPhysicalLens(tele)
+            Log.i(TAG, "tele lens $tele engaged")
+        } catch (e: RemoteException) {
+            Log.w(TAG, "tele switch failed")
+            onTele = false
+        }
+    }
+
+    private fun switchToMain() {
+        onTele = false
+        try {
+            service?.setPhysicalLens(currentLens)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "main lens revert failed")
+        }
+    }
+
+    /**
+     * Brings the radial wheel up and re-arms its timer.
+     *
+     * Called *only* from the two zoom gestures (pinch, chip-row drag) — never from
+     * a zoom value change. That is the whole fix for the wheel appearing when the
+     * lens was flipped: the flip resets the zoom to 1x, and a visibility rule
+     * keyed on "the zoom changed" cannot tell a reset from a gesture.
+     */
+    private fun showDial() {
+        armDialHide()
+        if (!state.zoomDialVisible) {
+            update { it.copy(zoomDialVisible = true) }
+            // Edge-triggered, so it fires once per summon however many pinch or
+            // drag events follow. The wheel taking over is the moment the control
+            // changes identity, and it is the only feedback a pinch gets.
+            softTick()
+        }
+    }
+
+    private fun armDialHide() {
+        main.removeCallbacks(hideDial)
+        main.postDelayed(hideDial, 1600L)
     }
 
     private val hideDial = Runnable {
@@ -813,6 +918,64 @@ class CameraController(
         } catch (e: RemoteException) {
             Log.w(TAG, "setEvCompensation failed")
         }
+    }
+
+    override fun onResolutionToggle() {
+        val next = state.resolution.next()
+        update { it.copy(resolution = next, status = "${next.label} mode") }
+        haptic()
+        // The still stream is sized when the readers are created, so the session
+        // has to be rebuilt for 50 MP to actually take effect.
+        io.execute {
+            post { recreateStillReaderAndSession() }
+        }
+    }
+
+    private fun recreateStillReaderAndSession() {
+        try {
+            stillReader?.close()
+            val (w, h) = DeviceProfile.stillSize(state.resolution)
+            stillReader = ImageReader.newInstance(
+                w,
+                h,
+                ImageFormat.YUV_420_888,
+                2,
+                HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
+            ).also { reader ->
+                reader.setOnImageAvailableListener({ r -> onStillImage(r) }, handler)
+            }
+            startStereoSession()
+        } catch (t: Throwable) {
+            Log.w(TAG, "still reader recreate failed: ${t.message}")
+        }
+    }
+
+    override fun onTelephotoToggle() {
+        update { it.copy(telephoto = !it.telephoto) }
+        haptic()
+        // Apply immediately if the current zoom already qualifies.
+        if (state.telephoto && state.zoom > TELE_THRESHOLD) switchToTele()
+    }
+
+    override fun onFrameRatioCycle() {
+        update { it.copy(frameRatio = it.frameRatio.next()) }
+        haptic()
+    }
+
+    override fun onFrameRatioSelected(ratio: FrameRatio) {
+        if (state.frameRatio == ratio) return
+        update { it.copy(frameRatio = ratio) }
+        haptic()
+    }
+
+    override fun onFocusLock() {
+        if (state.aeAfLocked) return
+        update { it.copy(aeAfLocked = true) }
+    }
+
+    override fun onFocusUnlock() {
+        if (!state.aeAfLocked) return
+        update { it.copy(aeAfLocked = false) }
     }
 
     override fun onGridToggle() {
@@ -923,6 +1086,27 @@ class CameraController(
      * The composables own gesture feedback through `CameraHaptics`; this is only
      * for controller-initiated events.
      */
+    /**
+     * A single wheel tick — the softest event in the vocabulary.
+     *
+     * The controller-side twin of `CameraHaptics.tick()`: the platform's own
+     * segment tick on API 34+, `CLOCK_TICK` below that. Deliberately *not*
+     * [haptic], which is capture-strength (`CONFIRM`) and would be far too heavy
+     * for a control appearing — and it never reaches for the vibrator.
+     */
+    private fun softTick() {
+        try {
+            val view = activity.window.decorView
+            if (Build.VERSION.SDK_INT >= 34) {
+                view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
+            } else {
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "softTick failed")
+        }
+    }
+
     private fun haptic() {
         try {
             val view = activity.window.decorView
@@ -969,6 +1153,13 @@ class CameraController(
 
         val defaultIndex = physicalLenses.indexOf("0")
         currentLens = if (defaultIndex >= 0) "0" else physicalLenses.firstOrNull() ?: "0"
+
+        // The CMF Phone 2 Pro exposes main + ultra-wide + tele behind camera id 5.
+        // Pick the tele as the highest physical id that is not the active one; the
+        // fallback keeps tele-assist inert on devices that only have two lenses.
+        teleLensId = physicalLenses
+            .filter { it != currentLens }
+            .maxOrNull()
         update {
             it.copy(
                 lensCount = physicalLenses.size.coerceAtLeast(1),

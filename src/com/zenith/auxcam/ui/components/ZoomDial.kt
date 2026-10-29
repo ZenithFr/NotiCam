@@ -7,6 +7,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
@@ -57,7 +58,7 @@ import kotlin.math.sin
 fun ZoomDial(
     zoom: Float,
     modifier: Modifier = Modifier,
-    diameter: Dp = 208.dp,
+    diameter: Dp = 196.dp,
 ) {
     val stops = DeviceProfile.ZOOM_STOPS
     val lo = stops.first()
@@ -95,17 +96,20 @@ fun ZoomDial(
             val radius = size.minDimension / 2f
             val tickOuter = radius - 3.dp.toPx()
 
-            // Backdrop: bright at the arc, gone before the bottom edge.
+            // Backdrop: one flat shade, falling away towards the bottom edge.
+            //
+            // The old version was a radial gradient centred *above* the disc, i.e. a
+            // specular hotspot — the wheel looked lit. A vertical ramp has no
+            // hotspot: the same shade everywhere at a given height, which reads as
+            // flat matte film that dissolves downward (and keeps the phase-2 rule
+            // that only the top arc carries the indicator).
             drawCircle(
-                brush = Brush.radialGradient(
+                brush = Brush.verticalGradient(
                     colorStops = arrayOf(
-                        0.00f to CameraColors.GlassStrong,
-                        0.50f to CameraColors.GlassStrong.copy(alpha = 0.55f),
-                        0.80f to CameraColors.GlassStrong.copy(alpha = 0.10f),
+                        0.00f to CameraColors.MatteScrim,
+                        0.62f to CameraColors.MatteScrim.copy(alpha = 0.55f),
                         1.00f to Color.Transparent,
                     ),
-                    center = Offset(center.x, center.y - radius * 0.34f),
-                    radius = radius * 1.3f,
                 ),
                 radius = radius,
                 center = center,
@@ -118,7 +122,7 @@ fun ZoomDial(
                 if (falloff <= 0.02f) continue
 
                 val major = i % 6 == 0
-                val length = (if (major) 9f else 4.5f).dp.toPx()
+                val length = (if (major) 9f else 5f).dp.toPx()
                 val angle = Math.toRadians((START_DEGREES + SWEEP_DEGREES * t).toDouble())
                 val dir = Offset(cos(angle).toFloat(), sin(angle).toFloat())
                 drawLine(
@@ -170,10 +174,13 @@ fun ZoomDial(
             )
         }
 
+        // Centred horizontally, lifted a little so the number sits inside the arc's
+        // opening rather than in the middle of the circle.
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier
-                .offset(y = (diameter * 0.16f))
+                .fillMaxWidth()
+                .offset(y = -(diameter * 0.10f))
                 .graphicsLayer {
                     scaleX = pop.value
                     scaleY = pop.value
@@ -196,10 +203,17 @@ fun ZoomDial(
     }
 }
 
-/** Top arc: starts over the left shoulder, sweeps across the top to the right. */
-private const val START_DEGREES = 202f
-private const val SWEEP_DEGREES = 136f
-private const val TICKS = 48
+/**
+ * Top arc geometry.
+ *
+ * A longer sweep (218° instead of 136°) at almost the same diameter gives the
+ * wheel a much wider travel and wider tick spacing — it reads as a longer arc
+ * rather than a bigger control. Because the alpha follows `sin()`, the extra
+ * travel simply fades out at both ends instead of adding visible bulk.
+ */
+private const val START_DEGREES = 161f
+private const val SWEEP_DEGREES = 218f
+private const val TICKS = 56
 
 /** Index of the closest entry in [DeviceProfile.ZOOM_STOPS]. */
 internal fun nearestStopIndex(zoom: Float): Int {

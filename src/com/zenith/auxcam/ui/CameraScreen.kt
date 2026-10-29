@@ -13,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -38,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,12 +47,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
@@ -71,6 +73,7 @@ import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 /**
  * Root of the capture UI.
@@ -104,17 +107,53 @@ fun CameraScreen(
     // anchored here so its arc grows out of the chips.
     var chipsTopPx by remember { mutableStateOf(0f) }
 
+    // The header (flash state, RAW, status, Pro) fades out 2 s after the last
+    // interaction and comes back on the next touch.
+    var topBarVisible by remember { mutableStateOf(true) }
+    var interactionNonce by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(interactionNonce, state.status, state.flash, state.raw, state.proSheetOpen) {
+        topBarVisible = true
+        if (state.proSheetOpen) return@LaunchedEffect
+        delay(2000)
+        topBarVisible = false
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(CameraColors.Black),
+            .background(CameraColors.Black)
+            // Any touch revives the header — it is a HUD, not a permanent bar.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent()
+                        interactionNonce++
+                    }
+                }
+            },
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
-            TopBar(state = state, actions = actions)
+            // Header fade runs on an animated alpha read inside graphicsLayer, so
+            // it is a draw-phase change (60 fps) rather than a recomposition.
+            val headerAlpha by animateFloatAsState(
+                targetValue = if (topBarVisible) 1f else 0f,
+                animationSpec = CameraMotion.fade(if (topBarVisible) 180 else 420),
+                label = "header-alpha",
+            )
+            TopBar(
+                state = state,
+                actions = actions,
+                onInteraction = { interactionNonce++ },
+                modifier = Modifier.graphicsLayer {
+                    alpha = headerAlpha
+                    clip = false
+                },
+            )
 
             if (!DeviceProfile.isTargetDevice()) {
                 DeviceWarning()
@@ -131,7 +170,9 @@ fun CameraScreen(
                 // Fit the sensor rectangle inside the slot without stretching it:
                 // width-bound when the slot is proportionally tall enough, otherwise
                 // height-bound. Expressed in dp so the surface gets exact pixels.
-                val sensorAspect = DeviceProfile.previewAspect
+                // `frameAspect` encodes the user's 1:1 / 4:3 / 16:9 / FULL choice;
+                // null means "fill the slot" (Full).
+                val sensorAspect = state.frameAspect ?: if (maxHeight.value > 0f) maxWidth / maxHeight else DeviceProfile.previewAspect
                 val widthBound = maxWidth / sensorAspect <= maxHeight
                 val frameWidth = if (widthBound) maxWidth else maxHeight * sensorAspect
                 val frameHeight = if (widthBound) maxWidth / sensorAspect else maxHeight
@@ -147,6 +188,9 @@ fun CameraScreen(
                     onSurfaceDestroyed = actions::onPreviewSurfaceDestroyed,
                     onTap = actions::onFocusAt,
                     onZoomGesture = actions::onZoomGesture,
+                    locked = state.aeAfLocked,
+                    onLock = actions::onFocusLock,
+                    onUnlock = actions::onFocusUnlock,
                     modifier = Modifier.size(frameWidth, frameHeight),
                 )
             }
@@ -177,6 +221,30 @@ fun CameraScreen(
                         scaleY = scale
                         translationY = 6.dp.toPx() * chipsMorph
                         clip = false
+                    }
+                    // Dragging the chip row sideways is a zoom scrub: it brings the
+                    // wheel up exactly like a pinch does. Tapping a chip is a
+                    // destination and must *not* summon it, which is why this is a
+                    // drag detector on the row rather than anything attached to a
+                    // chip.
+                    //
+                    // Horizontal only: a vertical swipe across the row should not
+                    // raise a wheel it cannot then move.
+                    //
+                    // The detector lives on this box, which stays composed while the
+                    // chips fade out, so a drag survives the wheel taking over —
+                    // otherwise the gesture would die the moment it succeeded.
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { actions.onZoomDragStart() },
+                            onDragEnd = { actions.onZoomDragEnd() },
+                            onDragCancel = { actions.onZoomDragEnd() },
+                        ) { change, dragAmount ->
+                            // Consuming stops the chip underneath from also reading
+                            // this as a press, so a scrub never selects a stop.
+                            change.consume()
+                            actions.onZoomDrag(dragAmount.x)
+                        }
                     }
                     .onGloballyPositioned { coords ->
                         chipsTopPx = coords.positionInRoot().y
@@ -215,11 +283,10 @@ fun CameraScreen(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .drawBottomScrim(),
-            ) {
+            // No scrim behind the bar: it already sits on the black capture
+            // surface, so the old black 55->92 % ramp was shading black with black
+            // and only added a visible band edge. Flat means flat.
+            Box(modifier = Modifier.fillMaxWidth()) {
                 BottomBar(
                     state = state,
                     actions = actions,
@@ -261,15 +328,6 @@ fun CameraScreen(
         )
     }
 }
-
-/** Subtle black ramp behind the toolbar, replacing the old solid slab. */
-private fun Modifier.drawBottomScrim(): Modifier = this.background(
-    Brush.verticalGradient(
-        0f to Color.Transparent,
-        0.28f to CameraColors.Black.copy(alpha = 0.55f),
-        1f to CameraColors.Black.copy(alpha = 0.92f),
-    ),
-)
 
 /** A single line under the top bar when running on non-target hardware. */
 @Composable
@@ -388,7 +446,7 @@ private fun ProMenuOverlay(
                     // the Pro button keeps working as the close affordance.
                     .windowInsetsPadding(WindowInsets.statusBars)
                     .padding(top = TOP_BAR_HEIGHT)
-                    .background(Color.Black.copy(alpha = 0.38f))
+                    .background(Color.Black.copy(alpha = 0.30f))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
