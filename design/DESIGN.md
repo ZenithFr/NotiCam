@@ -207,6 +207,7 @@ intensity, and is inherently a tick rather than a pulse.
 
 | Event | Constant (first that is supported wins) |
 |---|---|
+| Wheel summoned (pinch or chip-row drag) | `SEGMENT_TICK` (API 34) → `CLOCK_TICK` — once per summon |
 | Pinch crossing a lens stop | `SEGMENT_TICK` (API 34) → `CLOCK_TICK` |
 | Chip / mode / toggle / framing selection | `CONTEXT_CLICK` → `VIRTUAL_KEY` |
 | Plain button | `KEYBOARD_TAP` → `VIRTUAL_KEY` |
@@ -218,6 +219,12 @@ intensity, and is inherently a tick rather than a pulse.
 
 Only if every constant is unavailable (or touch feedback is off system-wide) does it
 fall back to a 10 ms, amplitude-30 one-shot — never a full-strength vibration.
+
+**One tick per event, not per frame.** The wheel's engage tick is edge-triggered in
+`CameraController.showDial()` (guarded by `zoomDialVisible`), because a pinch emits
+dozens of scale events and a drag emits one per frame: firing on each would turn the
+softest haptic in the vocabulary into a continuous rattle. The same guard exists in
+the mock, which mirrors the tick with a guarded `navigator.vibrate(6)`.
 
 ---
 

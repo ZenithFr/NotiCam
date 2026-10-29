@@ -1025,6 +1025,12 @@
   // The wheel appears for a zoom *gesture* only: a pinch on the scene, or a drag
   // on the chip row. Tapping a chip and flipping the lens deliberately do not.
   function showWheel() {
+    // One soft tick the moment the wheel takes over — edge-triggered, because the
+    // drag calls showWheel() on every move and this must not become a rattle.
+    // Mirrors CameraController.showDial() -> softTick(). Guarded: most browsers
+    // have no vibration motor, and jsdom has no navigator.vibrate at all.
+    const wasUp = el.dial.classList.contains("show");
+    if (!wasUp && navigator.vibrate) navigator.vibrate(6);
     el.dial.classList.add("show");
     $("zoomstack").classList.add("wheel");
     clearTimeout(dialTimer);

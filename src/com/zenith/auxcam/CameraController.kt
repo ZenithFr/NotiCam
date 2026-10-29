@@ -852,7 +852,13 @@ class CameraController(
      */
     private fun showDial() {
         armDialHide()
-        if (!state.zoomDialVisible) update { it.copy(zoomDialVisible = true) }
+        if (!state.zoomDialVisible) {
+            update { it.copy(zoomDialVisible = true) }
+            // Edge-triggered, so it fires once per summon however many pinch or
+            // drag events follow. The wheel taking over is the moment the control
+            // changes identity, and it is the only feedback a pinch gets.
+            softTick()
+        }
     }
 
     private fun armDialHide() {
@@ -1036,6 +1042,27 @@ class CameraController(
      * The composables own gesture feedback through `CameraHaptics`; this is only
      * for controller-initiated events.
      */
+    /**
+     * A single wheel tick — the softest event in the vocabulary.
+     *
+     * The controller-side twin of `CameraHaptics.tick()`: the platform's own
+     * segment tick on API 34+, `CLOCK_TICK` below that. Deliberately *not*
+     * [haptic], which is capture-strength (`CONFIRM`) and would be far too heavy
+     * for a control appearing — and it never reaches for the vibrator.
+     */
+    private fun softTick() {
+        try {
+            val view = activity.window.decorView
+            if (Build.VERSION.SDK_INT >= 34) {
+                view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
+            } else {
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "softTick failed")
+        }
+    }
+
     private fun haptic() {
         try {
             val view = activity.window.decorView
