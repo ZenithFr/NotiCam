@@ -13,6 +13,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -46,7 +47,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
@@ -222,6 +222,30 @@ fun CameraScreen(
                         translationY = 6.dp.toPx() * chipsMorph
                         clip = false
                     }
+                    // Dragging the chip row sideways is a zoom scrub: it brings the
+                    // wheel up exactly like a pinch does. Tapping a chip is a
+                    // destination and must *not* summon it, which is why this is a
+                    // drag detector on the row rather than anything attached to a
+                    // chip.
+                    //
+                    // Horizontal only: a vertical swipe across the row should not
+                    // raise a wheel it cannot then move.
+                    //
+                    // The detector lives on this box, which stays composed while the
+                    // chips fade out, so a drag survives the wheel taking over —
+                    // otherwise the gesture would die the moment it succeeded.
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures(
+                            onDragStart = { actions.onZoomDragStart() },
+                            onDragEnd = { actions.onZoomDragEnd() },
+                            onDragCancel = { actions.onZoomDragEnd() },
+                        ) { change, dragAmount ->
+                            // Consuming stops the chip underneath from also reading
+                            // this as a press, so a scrub never selects a stop.
+                            change.consume()
+                            actions.onZoomDrag(dragAmount.x)
+                        }
+                    }
                     .onGloballyPositioned { coords ->
                         chipsTopPx = coords.positionInRoot().y
                     },
@@ -259,11 +283,10 @@ fun CameraScreen(
                 }
             }
 
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .drawBottomScrim(),
-            ) {
+            // No scrim behind the bar: it already sits on the black capture
+            // surface, so the old black 55->92 % ramp was shading black with black
+            // and only added a visible band edge. Flat means flat.
+            Box(modifier = Modifier.fillMaxWidth()) {
                 BottomBar(
                     state = state,
                     actions = actions,
@@ -302,15 +325,6 @@ fun CameraScreen(
         )
     }
 }
-
-/** Subtle black ramp behind the toolbar, replacing the old solid slab. */
-private fun Modifier.drawBottomScrim(): Modifier = this.background(
-    Brush.verticalGradient(
-        0f to Color.Transparent,
-        0.28f to CameraColors.Black.copy(alpha = 0.55f),
-        1f to CameraColors.Black.copy(alpha = 0.92f),
-    ),
-)
 
 /** A single line under the top bar when running on non-target hardware. */
 @Composable
@@ -429,7 +443,7 @@ private fun ProMenuOverlay(
                     // the Pro button keeps working as the close affordance.
                     .windowInsetsPadding(WindowInsets.statusBars)
                     .padding(top = TOP_BAR_HEIGHT)
-                    .background(Color.Black.copy(alpha = 0.38f))
+                    .background(Color.Black.copy(alpha = 0.30f))
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,

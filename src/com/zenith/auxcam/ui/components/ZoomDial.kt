@@ -96,17 +96,20 @@ fun ZoomDial(
             val radius = size.minDimension / 2f
             val tickOuter = radius - 3.dp.toPx()
 
-            // Backdrop: bright at the arc, gone before the bottom edge.
+            // Backdrop: one flat shade, falling away towards the bottom edge.
+            //
+            // The old version was a radial gradient centred *above* the disc, i.e. a
+            // specular hotspot — the wheel looked lit. A vertical ramp has no
+            // hotspot: the same shade everywhere at a given height, which reads as
+            // flat matte film that dissolves downward (and keeps the phase-2 rule
+            // that only the top arc carries the indicator).
             drawCircle(
-                brush = Brush.radialGradient(
+                brush = Brush.verticalGradient(
                     colorStops = arrayOf(
-                        0.00f to CameraColors.GlassStrong,
-                        0.50f to CameraColors.GlassStrong.copy(alpha = 0.55f),
-                        0.80f to CameraColors.GlassStrong.copy(alpha = 0.10f),
+                        0.00f to CameraColors.MatteScrim,
+                        0.62f to CameraColors.MatteScrim.copy(alpha = 0.55f),
                         1.00f to Color.Transparent,
                     ),
-                    center = Offset(center.x, center.y - radius * 0.34f),
-                    radius = radius * 1.3f,
                 ),
                 radius = radius,
                 center = center,

@@ -40,6 +40,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlin.math.exp
 import kotlin.math.roundToInt
 
 /** The four JNI entry points, implemented by [MainActivity]. */
@@ -75,6 +76,15 @@ interface CameraActions {
     fun onModeSelected(mode: CaptureMode)
     fun onZoomSelected(zoom: Float)
     fun onZoomGesture(scaleFactor: Float)
+
+    /** A drag has started on the chip row — the same gesture family as a pinch. */
+    fun onZoomDragStart()
+
+    /** Horizontal drag delta in pixels while scrubbing the chip row. */
+    fun onZoomDrag(deltaPx: Float)
+
+    /** The chip-row drag ended or was cancelled. */
+    fun onZoomDragEnd()
 
     /** @param fStop real f-number, e.g. 2.36f — continuous, not an index. */
     fun onApertureChanged(fStop: Float)
@@ -748,32 +758,50 @@ class CameraController(
         haptic()
     }
 
+    /**
+     * Tapping a chip selects that stop and leaves the chips on screen.
+     *
+     * It must never summon the wheel: tapping a chip is a destination, not a
+     * gesture, and swapping the control the user just pressed out from under their
+     * finger is what made the old build feel jumpy.
+     */
     override fun onZoomSelected(zoom: Float) {
         applyZoom(zoom, force = true)
         haptic()
     }
 
+    /** Pinch: comes up first, so even a 1 % squeeze reveals the read-out. */
     override fun onZoomGesture(scaleFactor: Float) {
+        showDial()
         if (scaleFactor == 0f) return
-        applyZoom(state.zoom * scaleFactor, force = false, showWheel = true)
+        applyZoom(state.zoom * scaleFactor, force = false)
     }
 
-    private fun applyZoom(requested: Float, force: Boolean, showWheel: Boolean = false) {
+    override fun onZoomDragStart() {
+        // No haptic: the chips collapsing into the wheel *is* the feedback, and a
+        // pinch does not tick either. A tick here would fire on every scrub.
+        showDial()
+    }
+
+    override fun onZoomDrag(deltaPx: Float) {
+        if (deltaPx == 0f || deltaPx.isNaN()) return
+        // Exponential, so the same finger travel moves the same *proportion* of the
+        // range at 0.6x and at 2x. ~180 px doubles the zoom.
+        applyZoom(state.zoom * exp(deltaPx / 180f), force = false)
+        showDial()
+    }
+
+    override fun onZoomDragEnd() {
+        // Extend the read-out so the number the drag landed on can be read, but
+        // never summon one on the way out.
+        if (state.zoomDialVisible) armDialHide()
+    }
+
+    private fun applyZoom(requested: Float, force: Boolean) {
         val clamped = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (!force && kotlin.math.abs(clamped - state.zoom) < 0.005f) return
 
-        // Only a pinch summons the radial wheel. Tapping a chip keeps the chips
-        // on screen — they must not swap themselves out for the wheel.
-        update {
-            it.copy(
-                zoom = clamped,
-                zoomDialVisible = if (showWheel) true else it.zoomDialVisible,
-            )
-        }
-        if (showWheel) {
-            main.removeCallbacks(hideDial)
-            main.postDelayed(hideDial, 1600L)
-        }
+        update { it.copy(zoom = clamped) }
 
         // Tele assist: cross the 2x threshold with telephoto enabled and hand the
         // session to the physical tele lens; fall back to the main sensor below it.
@@ -812,6 +840,30 @@ class CameraController(
         } catch (e: RemoteException) {
             Log.w(TAG, "main lens revert failed")
         }
+    }
+
+    /**
+     * Brings the radial wheel up and re-arms its timer.
+     *
+     * Called *only* from the two zoom gestures (pinch, chip-row drag) — never from
+     * a zoom value change. That is the whole fix for the wheel appearing when the
+     * lens was flipped: the flip resets the zoom to 1x, and a visibility rule
+     * keyed on "the zoom changed" cannot tell a reset from a gesture.
+     */
+    private fun showDial() {
+        armDialHide()
+        if (!state.zoomDialVisible) {
+            update { it.copy(zoomDialVisible = true) }
+            // Edge-triggered, so it fires once per summon however many pinch or
+            // drag events follow. The wheel taking over is the moment the control
+            // changes identity, and it is the only feedback a pinch gets.
+            softTick()
+        }
+    }
+
+    private fun armDialHide() {
+        main.removeCallbacks(hideDial)
+        main.postDelayed(hideDial, 1600L)
     }
 
     private val hideDial = Runnable {
@@ -990,6 +1042,27 @@ class CameraController(
      * The composables own gesture feedback through `CameraHaptics`; this is only
      * for controller-initiated events.
      */
+    /**
+     * A single wheel tick — the softest event in the vocabulary.
+     *
+     * The controller-side twin of `CameraHaptics.tick()`: the platform's own
+     * segment tick on API 34+, `CLOCK_TICK` below that. Deliberately *not*
+     * [haptic], which is capture-strength (`CONFIRM`) and would be far too heavy
+     * for a control appearing — and it never reaches for the vibrator.
+     */
+    private fun softTick() {
+        try {
+            val view = activity.window.decorView
+            if (Build.VERSION.SDK_INT >= 34) {
+                view.performHapticFeedback(HapticFeedbackConstants.SEGMENT_TICK)
+            } else {
+                view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "softTick failed")
+        }
+    }
+
     private fun haptic() {
         try {
             val view = activity.window.decorView

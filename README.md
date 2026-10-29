@@ -35,14 +35,14 @@ the shipping layout lives in [`design/index.html`](design/index.html).
 | | Before | After |
 |---|---|---|
 | **Stack** | `Activity` + `FrameLayout` + hand-written `View` subclasses | `ComponentActivity` → `CameraController` → `CameraScreen`; one immutable `CameraUiState` |
-| **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: floating glass controls, one accent (`#FFD60A`) |
+| **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: flat see-through matte film, no rims, one accent (`#FFD60A`) |
 | **Layout** | Absolute chrome painted over the preview | `Column`: top bar → `weight(1f)` frame → chips → ƒ row → bottom bar. **Nothing can overlap the 4:3 framebuffer** |
 | **Preview geometry** | 4:3 landscape view (sideways), swapchain frozen at first size → stretched image | `composite.comp` rotates the sensor frame 90° CW → 3:4 portrait, upright; frame measured to `previewAspect`, swapchain recreated on extent change, aspect-fit as a second guarantee |
 | **Motion** | `ValueAnimator` + interpolators, several controls clipped mid-animation | One `CameraMotion` vocabulary: crisp press / springy release, slide-in Pro menu, travelling zoom-chip indicator, arc zoom wheel with detents, `clip = false` everywhere it can matter |
 | **Haptics** | Single `VIRTUAL_KEY` blip, then full-strength vibrator effects | `CameraHaptics`: soft `performHapticFeedback` vocabulary (segment ticks, context clicks, confirm) with an amplitude-limited one-shot only as a last resort |
 | **Icons** | 24 vector drawables + PNG-tinted bitmaps | Nine hand-built `ImageVector`s (24-unit grid, 1.7 stroke) — resolution independent, can never be resampled or cropped |
 | **Shutter** | Static layered drawable | `ShutterButton`: ring/gap/disc, spring compression, capture pulse drawn *inside* its own 96 dp box |
-| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; RAW sits beside the flash; 0.6×/1×/2× chips + pinch (the only zoom input) drive `SCALER_CROP_REGION`; continuous ƒ slider drives the CoC pass |
+| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; RAW sits beside the flash; 0.6×/1×/2× chips, a pinch on the scene or a drag along the chip row (the two zoom gestures) drive `SCALER_CROP_REGION`; continuous ƒ slider drives the CoC pass |
 | **Focus** | Static yellow square | Spring-in AE/AF reticle + hardware focus scan at the tap point |
 | **Settings** | Chevron drawer with dead buttons | Sheet sliding down from the top bar: continuous ƒ and ±4 EV sliders, Grid / Timer, live telemetry (no title, no Done — tap outside) |
 | **Gallery** | Always-empty tile | Real bokeh frame decoded from the capture, plus a shutter→gallery flight |
@@ -54,7 +54,7 @@ Highlights of the implementation:
 - **`ui/theme/Theme.kt`** — `CameraColors`, `CameraSpacing`, `CameraType`.
 - **`ui/components/`** — `ShutterButton`, `Viewfinder`, `Controls` (top bar, mode carousel, sliders, Pro sheet, gallery tile, bottom bar), `ZoomChips` (travelling indicator), `ZoomDial` (arc wheel).
 - **`ui/feedback/Haptics.kt`** — the soft haptic vocabulary.
-- **`ui/effects/MatteGlass.kt`** — frosted-glass sheen + GPU-tiled grain.
+- **`ui/effects/Matte.kt`** — the matte grain: one GPU-tiled 64×64 noise bitmap, no sheen, no rim, no blur.
 - **`ui/theme/Theme.kt` → `CameraMotion`** — every spring and tween in the app.
 - **`ui/icons/NotiIcons.kt`** — the icon set.
 - **`DeviceProfile.kt`** — every CMF Phone 2 Pro constant (display, sensor streams, lens ladder, camera id).
