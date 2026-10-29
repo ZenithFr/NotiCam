@@ -37,8 +37,7 @@ class CameraHaptics(private val view: View) {
 
     private val hasPredefined =
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            vibrator != null &&
-            runCatching { vibrator.hasVibrator() }.getOrDefault(false)
+            (vibrator?.hasVibrator() == true)
 
     /**
      * One detent of the zoom wheel: the lightest event in the vocabulary, so it

@@ -183,12 +183,7 @@ fun Viewfinder(
                 .pointerInput(enabled) {
                     if (!enabled) return@pointerInput
                     var lastStop = -1
-                    detectTransformGestures(
-                        onGestureEnd = {
-                            lastStop = -1
-                            haptics.gestureEnd()
-                        },
-                    ) { _, _, scale, _ ->
+                    detectTransformGestures { _, _, scale, _ ->
                         if (scale == 1f) return@detectTransformGestures
                         onZoomGesture(scale)
                         // Tick once per lens stop crossed, not per pointer event.

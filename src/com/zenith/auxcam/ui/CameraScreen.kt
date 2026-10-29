@@ -52,7 +52,7 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -200,7 +200,7 @@ fun CameraScreen(
                     .height(36.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                AnimatedVisibility(
+                androidx.compose.animation.AnimatedVisibility(
                     visible = state.quickApertureVisible,
                     enter = fadeIn(tween(170)) + slideInVertically(
                         animationSpec = CameraMotion.slide<IntOffset>(),
