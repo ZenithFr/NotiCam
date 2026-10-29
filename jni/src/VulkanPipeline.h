@@ -32,6 +32,7 @@ private:
     bool selectPhysicalDevice();
     bool createLogicalDevice();
     bool createSwapchain(ANativeWindow* window);
+    bool recreateSwapchain();
     bool loadShaders();
     bool createStorageImages();
     bool initStillBokehResources(uint32_t width = 1020, uint32_t height = 768);

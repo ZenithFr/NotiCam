@@ -17,21 +17,46 @@
     --gutter:16px;
   }
   *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  /* Frosted texture: a tiny repeating grain + a top-edge sheen. Same trick as
+     MatteGlass.kt, which tiles one 64x64 noise bitmap on the GPU. */
+  .glass-texture{
+    position:relative;isolation:isolate;
+  }
+  .glass-texture::after{
+    content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+    background-image:
+      linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.02) 42%, rgba(255,255,255,0) 100%),
+      url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='64' height='64'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='saturate' values='0'/><feComponentTransfer><feFuncA type='linear' slope='.055'/></feComponentTransfer></filter><rect width='64' height='64' filter='url(%23n)'/></svg>");
+    background-size:100% 100%, 64px 64px;
+    mix-blend-mode:screen;opacity:.9;
+  }
   html,body{margin:0;height:100%}
+  /* The page is exactly one viewport tall and never scrolls: the phone is fitted
+     to whatever space is left (`fitDevice()`), so the *entire* screen is always
+     visible no matter how short the preview pane is. Centring with
+     `align-items:center` used to clip the TOP of the phone in short panes. */
   body{
     background:radial-gradient(1200px 700px at 30% -10%, #1b1b22 0%, #0a0a0c 55%, #060607 100%);
     color:#fff;
     font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
-    display:flex;align-items:center;justify-content:center;gap:64px;
-    padding:40px 32px;min-height:100%;
+    display:flex;align-items:stretch;justify-content:center;gap:44px;
+    padding:20px;height:100vh;height:100dvh;overflow:hidden;
   }
 
   /* ─────────── phone shell ─────────── */
+  /* The slot is a plain flex box; the phone inside is absolutely positioned and
+     scaled, so the fit is never circular (a transformed child cannot size it). */
+  .phone-slot{
+    position:relative;flex:1 1 auto;min-width:0;min-height:0;height:100%;
+  }
   .device{
-    position:relative;width:390px;height:844px;border-radius:56px;
+    position:absolute;left:50%;top:50%;
+    width:390px;height:844px;border-radius:56px;
+    transform:translate(-50%,-50%) scale(var(--phone-scale,1));
+    transform-origin:center center;
     background:#000;
     box-shadow:0 0 0 11px #16161a, 0 0 0 13px #2c2c32, 0 40px 90px -20px rgba(0,0,0,.9), 0 0 140px rgba(120,140,255,.06);
-    overflow:hidden;flex:0 0 auto;
+    overflow:hidden;
   }
   .island{
     position:absolute;top:11px;left:50%;transform:translateX(-50%);
@@ -45,10 +70,21 @@
   .status .icons{display:flex;gap:5px;align-items:center;opacity:.95}
 
   /* ─────────── camera column ─────────── */
-  .camera{position:absolute;inset:0;display:flex;flex-direction:column}
+  /* Layout contract (mirrors CameraScreen.kt): the chrome is laid out *above*
+     and *below* the 4:3 frame in a flex column. Nothing is painted over the
+     framebuffer — no absolute-positioned toolbar, no scrim across the scene. */
+  .camera{position:absolute;inset:0;display:flex;flex-direction:column;padding-top:48px}
 
+  /* The stage gets whatever height the fixed chrome does not use (the CSS twin
+     of `Modifier.weight(1f)`), and `fitStage()` sizes the frame to exactly 3:4
+     inside it — never stretched, never overlapping. */
+  .stage{
+    flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;
+    background:#000;overflow:hidden;
+  }
   .viewfinder{
-    position:relative;width:100%;aspect-ratio:4/3;flex:0 0 auto;overflow:hidden;background:#111;
+    position:relative;flex:0 0 auto;width:100%;height:auto;aspect-ratio:3/4;
+    overflow:hidden;background:#111;
   }
   .viewfinder img{
     position:absolute;inset:0;width:100%;height:100%;object-fit:cover;
@@ -74,12 +110,12 @@
   }
   .reticle.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
 
-  /* ─────────── top bar ─────────── */
+  /* ─────────── top bar (in flow, above the frame) ─────────── */
   .topbar{
-    position:absolute;top:0;left:0;right:0;z-index:30;display:flex;align-items:center;
-    padding:48px var(--gutter) 6px;gap:8px;pointer-events:none;
+    position:relative;z-index:30;display:flex;align-items:center;
+    transition:opacity .42s ease;
+    height:56px;flex:0 0 auto;padding:0 var(--gutter);gap:8px;
   }
-  .topbar > *{pointer-events:auto}
   .iconbtn{
     width:44px;height:44px;border:0;border-radius:50%;display:grid;place-items:center;
     background:var(--glass);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
@@ -89,6 +125,15 @@
   .iconbtn:active{transform:scale(.9);background:rgba(255,255,255,.16)}
   .iconbtn.white{background:#fff;color:#000;box-shadow:none}
   .spacer{flex:1}
+  .rawpill{
+    height:30px;padding:0 11px;border:0;border-radius:15px;cursor:pointer;
+    font-size:11px;font-weight:600;letter-spacing:.04em;
+    color:var(--label-2);background:var(--glass);box-shadow:inset 0 0 0 .5px var(--sep);
+    transition:background .18s ease,color .18s ease,transform .16s cubic-bezier(.2,.9,.3,1.3);
+  }
+  .rawpill:active{transform:scale(.92)}
+  .rawpill.on{background:#fff;color:#000;box-shadow:none}
+  .topbar.hud-hidden{opacity:0;pointer-events:none}
   .pillstatus{
     font-size:11px;letter-spacing:.04em;color:var(--label-2);
     padding:7px 12px;border-radius:12px;background:rgba(0,0,0,.4);
@@ -97,16 +142,30 @@
   }
 
   /* ─────────── lens chips ─────────── */
-  .lensrow{display:flex;justify-content:center;gap:10px;margin-top:14px}
-  .chip{
-    width:42px;height:42px;border-radius:50%;border:0;cursor:pointer;
-    display:grid;place-items:center;font-size:12px;font-weight:600;letter-spacing:.02em;
-    color:#fff;background:rgba(28,28,30,.55);box-shadow:inset 0 0 0 .5px var(--sep);
-    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-    transition:background .18s ease,color .18s ease,transform .16s ease;
+  /* One disc travels between chips — the selection reads as a single movement
+     instead of three independent background fades (ZoomChips.kt). */
+  /* The disc is positioned with a CSS variable, not with measured rects: the old
+     getBoundingClientRect() maths ran before layout and mis-aligned the disc. */
+  .chipdisc{
+    --i:0; --s:1;
+    position:absolute;top:0;left:50%;margin-left:-22px;width:44px;height:44px;
+    border-radius:50%;background:#fff;
+    transform:translateX(calc(-50% + var(--i) * 50px)) scale(var(--s));
+    transition:transform .42s cubic-bezier(.34,1.32,.44,1),opacity .18s ease;
+    pointer-events:none;
   }
-  .chip:active{transform:scale(.92)}
-  .chip.sel{background:#fff;color:#000;box-shadow:none}
+  .chip{
+    width:44px;height:44px;border-radius:50%;border:0;cursor:pointer;position:relative;
+    display:grid;place-items:center;font-size:12px;font-weight:600;letter-spacing:.02em;
+    color:rgba(255,255,255,.6);background:transparent;box-shadow:inset 0 0 0 .5px var(--sep);
+    transition:color .2s ease,transform .16s cubic-bezier(.2,.9,.3,1.3);
+  }
+  .chip:active{transform:scale(.88)}
+  .chip.sel{color:#000;box-shadow:none}
+  .chip i{font-style:normal;display:block;line-height:1}
+  .chip b{display:block;font-size:8px;font-weight:600;line-height:1.1;opacity:.65}
+  .chip.sel b{opacity:.7}
+  .chip.near{color:rgba(255,255,255,.9)}
 
   /* ─────────── quick aperture (portrait) ─────────── */
   .quickap{
@@ -127,31 +186,37 @@
   }
   .slider:active .knob{box-shadow:0 0 0 9px rgba(255,255,255,.16),0 1px 4px rgba(0,0,0,.5)}
 
-  .grow{flex:1}
-
   /* ─────────── bottom chrome ─────────── */
   .bottom{
     position:relative;padding:18px 24px 34px;display:flex;flex-direction:column;align-items:center;
   }
   .bottom::before{
-    content:"";position:absolute;left:0;right:0;top:-90px;height:130px;pointer-events:none;
-    background:linear-gradient(to top, #000 0%, rgba(0,0,0,.7) 45%, rgba(0,0,0,0) 100%);
+    content:"";position:absolute;left:0;right:0;top:0;height:100%;pointer-events:none;
+    background:linear-gradient(to bottom, rgba(0,0,0,0) 0%, rgba(0,0,0,.55) 30%, #000 100%);
   }
-  .bottom > *{position:relative}
+  .bottom > *:not(.sheet){position:relative}
 
+  /* The menu is an overlay anchored to the chrome band: it translates up from
+     below the fold and never changes the layout height, so the 4:3 frame is not
+     resized while it animates (ProMenuOverlay in CameraScreen.kt). */
+  /* Settings sheet: hangs from under the top bar and slides DOWN out of it. */
   .sheet{
-    width:100%;background:var(--glass-strong);border-radius:24px;
+    position:absolute;left:24px;right:24px;top:104px;z-index:2;
+    background:var(--glass-strong);border-radius:24px;
     box-shadow:inset 0 0 0 .5px rgba(255,255,255,.16);
-    padding:14px 18px 16px;margin-bottom:16px;
+    padding:14px 18px 16px;
     backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
-    transform:translateY(14px);opacity:0;pointer-events:none;
-    transition:transform .26s cubic-bezier(.2,.8,.2,1),opacity .2s;
-    max-height:0;overflow:hidden;padding-top:0;padding-bottom:0;margin-bottom:0;
+    transform:translateY(-16px) scale(.96);opacity:0;pointer-events:none;
+    transform-origin:50% 0;
+    transition:transform .42s cubic-bezier(.34,1.24,.44,1),opacity .2s ease;
   }
-  .sheet.open{
-    transform:none;opacity:1;pointer-events:auto;
-    max-height:420px;padding-top:14px;padding-bottom:16px;margin-bottom:16px;
+  .sheet.open{transform:none;opacity:1;pointer-events:auto}
+  /* Starts under the top bar so flash / RAW / Pro stay legible and tappable. */
+  .scrim{
+    position:absolute;left:0;right:0;top:104px;bottom:0;background:rgba(0,0,0,.38);opacity:0;
+    pointer-events:none;transition:opacity .2s ease;z-index:1;
   }
+  .scrim.on{opacity:1;pointer-events:auto}
   .sheet-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
   .section{
     font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--label-3);
@@ -162,6 +227,18 @@
   .ticks{display:flex;justify-content:space-between;font-size:9px;color:var(--label-3);margin:0 0 10px;padding:0 2px}
   .divider{height:1px;background:var(--sep);margin:0 0 12px}
   .toggles{display:flex;gap:8px}
+  .segmented{display:flex;gap:8px;margin-bottom:16px}
+  .seg{
+    flex:1;height:32px;border:0;border-radius:16px;cursor:pointer;
+    font-size:11px;font-weight:600;letter-spacing:.03em;
+    color:var(--label-2);background:rgba(28,28,30,.55);box-shadow:inset 0 0 0 .5px var(--sep);
+    transition:background .19s ease,color .19s ease,transform .16s cubic-bezier(.2,.9,.3,1.3);
+  }
+  .seg:active{transform:scale(.94)}
+  .seg.sel{background:#fff;color:#000;box-shadow:none}
+  .toggle.tele{display:flex;align-items:center;justify-content:center;gap:7px}
+  #apertureBlock{transition:opacity .2s ease}
+  #apertureBlock.hidden{display:none}
   .toggle{
     flex:1;height:34px;border:0;border-radius:17px;cursor:pointer;font-size:12px;font-weight:600;
     color:#fff;background:rgba(28,28,30,.55);box-shadow:inset 0 0 0 .5px var(--sep);
@@ -215,20 +292,38 @@
     opacity:0;pointer-events:none;z-index:50;will-change:transform,opacity;
   }
 
-  /* orbit dial overlay */
+  /* The chips and the wheel are two states of one control. The wheel is anchored
+     to the chip row so its arc sits on top of the chips, and it scales out of that
+     line (transform-origin at the top) while the chips collapse into it. */
+  .zoomstack{position:relative;z-index:20;margin-top:14px}
   .dial{
-    position:absolute;left:50%;top:44%;width:236px;height:236px;transform:translate(-50%,-50%) scale(.92);
-    border-radius:50%;background:rgba(20,20,22,.9);box-shadow:inset 0 0 0 1px rgba(255,255,255,.12);
-    backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
-    display:grid;place-items:center;opacity:0;pointer-events:none;transition:opacity .24s,transform .24s;z-index:45;
+    position:absolute;left:50%;top:-52px;width:244px;height:244px;
+    transform-origin:50% 0;
+    transform:translateX(-50%) scale(.55);
+    border-radius:50%;pointer-events:none;
+    background:radial-gradient(circle at 50% 20%,
+      rgba(20,20,22,.95) 0%, rgba(20,20,22,.55) 42%, rgba(20,20,22,.12) 68%, rgba(20,20,22,0) 82%);
+    display:grid;place-items:center;opacity:0;
+    transition:opacity .2s ease,transform .42s cubic-bezier(.34,1.28,.44,1);z-index:1;
   }
-  .dial.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
-  .dial .big{font-size:34px;font-weight:500;letter-spacing:.02em}
+  .dial.show{opacity:1;transform:translateX(-50%) scale(1)}
+  /* chips collapse into the arc while the wheel is up */
+  .lensrow{
+    position:relative;z-index:2;display:flex;justify-content:center;gap:6px;height:44px;
+    transition:opacity .2s ease,transform .36s cubic-bezier(.34,1.2,.44,1);
+  }
+  .zoomstack.wheel .lensrow{opacity:0;transform:scale(.84) translateY(6px);pointer-events:none}
+  .dial > div{margin-top:-24px;width:100%;text-align:center}
+  .dial .big{font-size:34px;font-weight:500;letter-spacing:.02em;transition:transform .3s cubic-bezier(.34,1.4,.44,1)}
   .dial .sub{font-size:11px;letter-spacing:.06em;color:rgba(255,255,255,.6);margin-top:2px;text-align:center}
-  .dial svg.ticks{position:absolute;inset:0}
+  .dial svg.ticks{position:absolute;inset:0;width:100%;height:100%}
 
   /* ─────────── side spec panel ─────────── */
-  .spec{max-width:340px;color:rgba(255,255,255,.72);font-size:13px;line-height:1.6}
+  .spec{
+    flex:0 1 360px;max-width:360px;max-height:100%;overflow:auto;
+    color:rgba(255,255,255,.72);font-size:13px;line-height:1.6;
+    overscroll-behavior:contain;
+  }
   .spec h1{font-size:24px;letter-spacing:-.02em;color:#fff;margin:0 0 4px;font-weight:600}
   .spec h1 span{color:var(--yellow)}
   .spec p.lede{margin:0 0 22px;color:rgba(255,255,255,.5);font-size:13px}
@@ -250,14 +345,21 @@
     color:rgba(255,255,255,.7)
   }
   @media (max-width:1080px){
-    body{flex-direction:column;gap:36px;padding:24px 16px 60px}
-    .spec{max-width:390px}
-    .device{transform:scale(.92);transform-origin:top center}
+    body{flex-direction:column;gap:18px;padding:16px}
+    /* the phone keeps the roomy part of a narrow pane; the notes scroll */
+    .phone-slot{flex:1 1 auto;order:1}
+    .spec{flex:0 0 auto;order:2;max-width:560px;max-height:30%;margin:0 auto;width:100%}
+  }
+  /* On a short pane the app preview wins: the notes are supplementary, the phone
+     is the deliverable. */
+  @media (max-height:760px){
+    .spec{display:none}
   }
 </style>
 </head>
 <body>
 
+<div class="phone-slot" id="phoneSlot">
 <div class="device" id="device">
   <div class="island"></div>
   <div class="status">
@@ -270,7 +372,18 @@
   </div>
 
   <div class="camera">
-    <!-- viewfinder -->
+    <!-- top chrome: flash · status · pro (outside the 4:3 region) -->
+  <div class="topbar">
+    <button class="iconbtn glass-texture" id="flash" aria-label="Flash"></button>
+    <button class="rawpill glass-texture" id="rawBadge">RAW</button>
+    <div class="spacer"></div>
+    <div class="pillstatus" id="status">Ready</div>
+    <div class="spacer"></div>
+    <button class="iconbtn glass-texture" id="pro" aria-label="Pro controls"></button>
+  </div>
+
+    <!-- viewfinder: measured to exactly 4:3 (1440x1080 sensor) -->
+    <div class="stage" id="stage">
     <div class="viewfinder" id="viewfinder">
       <img src="sample_portrait.jpg" alt="Live bokeh preview" />
       <div class="grid" id="grid">
@@ -279,13 +392,79 @@
       <div class="reticle" id="reticle"></div>
       <div class="bloom" id="bloom"></div>
     </div>
+    </div>
 
     <!-- lens chips -->
-    <div class="lensrow">
-      <button class="chip sel" id="chip1">1×</button>
-      <button class="chip" id="chip2">2×</button>
-      <button class="chip" id="chip5">5×</button>
+    <div class="zoomstack" id="zoomstack">
+      <div class="dial" id="dial">
+        <svg class="ticks" viewBox="0 0 244 244" id="dialTicks"></svg>
+        <div>
+          <div class="big" id="dialZoom">1×</div>
+          <div class="sub" id="dialSub">24 MM</div>
+        </div>
+      </div>
+    <div class="lensrow" id="lensrow">
+      <div class="chipdisc" id="chipdisc"></div>
+      <button class="chip sel" id="chip1" style="position:relative;z-index:1"><i>UW</i><b>0.6×</b></button>
+      <button class="chip" id="chip2" style="position:relative;z-index:1">1×</button>
+      <button class="chip" id="chip5" style="position:relative;z-index:1">2×</button>
     </div>
+    </div><!-- /zoomstack -->
+
+    <div class="scrim" id="scrim"></div>
+<div class="sheet glass-texture" id="sheet">
+      <div class="section" style="margin-bottom:8px">Framing</div>
+      <div class="segmented" id="framing">
+        <button class="seg" data-ratio="1:1">1:1</button>
+        <button class="seg sel" data-ratio="4:3">4:3</button>
+        <button class="seg" data-ratio="16:9">16:9</button>
+        <button class="seg" data-ratio="full">Full</button>
+      </div>
+
+      <div id="apertureBlock">
+      <div class="rowlabel" style="margin-bottom:2px">
+        <span class="aperture-ico" id="icoAperture2"></span>
+        <span class="section" style="flex:1">Aperture</span>
+        <span class="val" id="sheetApValue">ƒ 1.8</span>
+      </div>
+      <div class="slider" id="sheetApSlider">
+        <div class="track"></div><div class="fill"></div><div class="knob"></div>
+      </div>
+      <div class="ticks"><span>1.4</span><span>2.8</span><span>5.6</span><span>11</span><span>16</span></div>
+      </div>
+
+      <div class="rowlabel">
+        <span class="section" style="flex:1">Exposure</span>
+        <span class="val" id="evValue">0 EV</span>
+      </div>
+      <div class="slider" id="evSlider">
+        <div class="track"></div><div class="fill"></div><div class="knob"></div>
+      </div>
+      <div class="ticks"><span>−4</span><span>0</span><span>+4</span></div>
+
+      <div class="divider"></div>
+
+      <div class="toggles">
+        <button class="toggle glass-texture" id="tRes">12MP</button>
+        <button class="toggle glass-texture" id="tGrid">Grid</button>
+        <button class="toggle glass-texture" id="tTimer">Timer</button>
+      </div>
+      <div class="toggles" style="margin-top:8px">
+        <button class="toggle glass-texture tele" id="tTele">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.5" stroke-linejoin="round">
+            <rect x="1" y="7" width="12.5" height="10" rx="2.4"/>
+            <rect x="13.5" y="9.6" width="8" height="4.8" rx="1.2"/>
+            <path d="M21.5 8.6v6.8" stroke-width="2"/>
+            <rect x="3.8" y="4" width="4.4" height="3.2" rx="1"/>
+          </svg>
+          <span id="teleLabel">TELE OFF</span>
+        </button>
+      </div>
+
+      <div class="telemetry" id="telemetry">VIEWFINDER · 30 FPS · DEPTH · 30 FPS · Δt 0.0 ms</div>
+    </div>
+
 
     <!-- portrait quick aperture -->
     <div class="quickap" id="quickap">
@@ -296,45 +475,9 @@
       <span class="value" id="quickApValue">ƒ 1.8</span>
     </div>
 
-    <div class="grow"></div>
-
     <!-- bottom chrome -->
     <div class="bottom">
-      <div class="sheet" id="sheet">
-        <div class="sheet-head">
-          <span class="section">Pro controls</span>
-          <button class="done" id="doneBtn">Done</button>
-        </div>
-
-        <div class="rowlabel" style="margin-bottom:2px">
-          <span class="aperture-ico" id="icoAperture2"></span>
-          <span class="section" style="flex:1">Aperture</span>
-          <span class="val" id="sheetApValue">ƒ 1.8</span>
-        </div>
-        <div class="slider" id="sheetApSlider">
-          <div class="track"></div><div class="fill"></div><div class="knob"></div>
-        </div>
-        <div class="ticks"><span>1.4</span><span>2.5</span><span>4.5</span><span>8</span><span>16</span></div>
-
-        <div class="rowlabel">
-          <span class="section" style="flex:1">Exposure</span>
-          <span class="val" id="evValue">0 EV</span>
-        </div>
-        <div class="slider" id="evSlider">
-          <div class="track"></div><div class="fill"></div><div class="knob"></div>
-        </div>
-
-        <div class="divider"></div>
-
-        <div class="toggles">
-          <button class="toggle" id="tGrid">Grid</button>
-          <button class="toggle" id="tRaw">RAW</button>
-          <button class="toggle" id="tTimer">Timer</button>
-        </div>
-
-        <div class="telemetry" id="telemetry">VIEWFINDER · 30 FPS · DEPTH · 30 FPS · Δt 0.0 ms</div>
-      </div>
-
+      
       <div class="modes" id="modes">
         <button class="mode sel" data-mode="photo">Photo</button>
         <button class="mode" data-mode="portrait">Portrait</button>
@@ -353,41 +496,28 @@
           <span class="pulse" id="pulse"></span>
         </button>
         <div class="spacer"></div>
-        <button class="iconbtn" id="flip" aria-label="Switch lens"></button>
+        <button class="iconbtn glass-texture" id="flip" aria-label="Switch lens"></button>
       </div>
     </div>
   </div>
 
-  <!-- top bar floats above the viewfinder -->
-  <div class="topbar">
-    <button class="iconbtn" id="flash" aria-label="Flash"></button>
-    <div class="spacer"></div>
-    <div class="pillstatus" id="status">Ready</div>
-    <div class="spacer"></div>
-    <button class="iconbtn" id="pro" aria-label="Pro controls"></button>
-  </div>
-
-  <div class="dial" id="dial">
-    <svg class="ticks" viewBox="0 0 236 236" id="dialTicks"></svg>
-    <div>
-      <div class="big" id="dialZoom">1.0×</div>
-      <div class="sub" id="dialSub">24 MM</div>
-    </div>
-  </div>
+  <!-- top bar was here: it now lives inside .camera, above the frame -->
 
   <img class="flyer" id="flyer" src="sample_portrait.jpg" alt="" />
 </div>
+</div><!-- /phone-slot -->
 
 <div class="spec">
   <h1>NotiCam <span>· Apple Camera</span></h1>
-  <p class="lede">Interactive mock of the new <code>res/layout/activity_main.xml</code> + drawable set. Everything below is clickable.</p>
+  <p class="lede">Interactive mock of the shipping <b>Jetpack Compose</b> screen (<code>CameraScreen.kt</code> + <code>ui/components/*</code>). Everything below is clickable. Tuned for the CMF Phone 2 Pro at 1080 × 2392.</p>
 
   <h2>What the redesign changes</h2>
   <ul>
     <li><span class="dot" style="background:#ffd60a"></span><div><b>System yellow selection.</b> Mode names and the ƒ dial are the only coloured elements — the old Nothing-red accents and neon pills are gone.</div></li>
     <li><span class="dot" style="background:rgba(255,255,255,.55)"></span><div><b>Glass, not cards.</b> 55% #1C1C1E capsules with a 0.5dp hairline instead of the heavy acrylic slabs and full-width dark bars.</div></li>
     <li><span class="dot" style="background:#fff"></span><div><b>Real Apple shutter.</b> 4dp ring + gap + disc, compresses on press, ring pulse + haptic on capture.</div></li>
-    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div><b>Viewfinder first.</b> The framebuffer is no longer boxed in under a 88dp header — the chrome floats over it and only the lens chips touch the frame.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div><b>Never over the scene.</b> Top bar, lens chips, ƒ row and shutter row are laid out <i>outside</i> the 4:3 framebuffer in one column, so no control can ever sit on top of the image. Open <b>Pro</b> and watch the frame give up height instead of being covered.</div></li>
+    <li><span class="dot" style="background:rgba(255,255,255,.35)"></span><div><b>No stretch, no crop.</b> The sensor streams 1440 × 1080; the box is measured to exactly 4:3 and the composite shader letterboxes as a second guarantee.</div></li>
     <li><span class="dot" style="background:#ff453a"></span><div><b>One-tap reach.</b> Flash, Pro sheet, tap-to-focus, pinch-zoom and the ƒ ladder all live where the thumb already is.</div></li>
   </ul>
 
@@ -408,7 +538,7 @@
     <li><span class="dot" style="background:rgba(255,255,255,.2)"></span><div>Open <b>Pro</b> → glass sheet slides up, button becomes a white ✕.</div></li>
   </ul>
 
-  <p class="hint">Static preview only — the shipping chrome is native Android views, not a WebView. Dimensions mirror the dp values in <kbd>dimens.xml</kbd> at a 390 × 844px viewport.</p>
+  <p class="hint">Static preview only — the shipping chrome is Jetpack Compose, not a WebView. Dimensions mirror <code>CameraSpacing</code> / <code>DeviceProfile</code>; press animations use spring specs, which is why nothing clips while it scales.</p>
 </div>
 
 <script>
@@ -450,14 +580,78 @@
   };
 
   const $ = id => document.getElementById(id);
+
+  // ── device fitting ───────────────────────────────────────────────────────
+  // The mock is drawn at its true size (390 x 844 CSS px) and scaled to fit
+  // whatever box the preview pane gives it, so the whole screen is always
+  // visible — top bar through shutter row — at any pane size.
+  const PHONE_W = 390, PHONE_H = 844, PHONE_RING = 15;
+  let phoneScale = 1;
+
+  function fitDevice() {
+    const slot = $("phoneSlot"), device = $("device");
+    if (!slot || !device) return;
+    // clientWidth/Height are layout px (unaffected by the transform we set).
+    const w = slot.clientWidth, h = slot.clientHeight;
+    if (!w || !h) return;
+    const s = Math.min(
+      (w - 8) / (PHONE_W + PHONE_RING * 2),
+      (h - 8) / (PHONE_H + PHONE_RING * 2),
+      1
+    );
+    phoneScale = Math.max(0.2, s);
+    device.style.setProperty("--phone-scale", phoneScale.toFixed(4));
+  }
+
+  // Screen px -> phone-local px (the reverse of `transform: scale()`).
+  const toLocal = v => v / (phoneScale || 1);
+
+  // ── frame fitting: 4:3 inside whatever space the chrome leaves ────────────
+  function fitStage() {
+    const stage = $("stage"), frame = $("viewfinder");
+    if (!stage || !frame) return;
+    // Layout px on purpose: getBoundingClientRect() would return *scaled* px.
+    const w = stage.clientWidth, h = stage.clientHeight;
+    if (!w || !h) return;
+    // 3:4 portrait — the engine rotates the 1440x1080 sensor frame 90° CW.
+    // A selected framing crops that box instead of stretching it.
+    const ratio = state && state.ratio !== undefined ? state.ratio : 4 / 3;
+    let fh, fw;
+    if (ratio === null) {
+      // Full: fill the slot.
+      fw = w; fh = h;
+    } else {
+      const screenAspect = 1 / ratio;         // portrait: height / width
+      fw = Math.min(w, h / screenAspect);
+      fh = fw * screenAspect;
+    }
+    frame.style.height = fh + "px";
+    frame.style.width = fw + "px";
+  }
+
+  function relayout() {
+    fitDevice();
+    // The stage size only changes after the new scale is applied.
+    requestAnimationFrame(fitStage);
+  }
+
+  addEventListener("resize", relayout);
+  addEventListener("orientationchange", relayout);
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(relayout);
+    ro.observe($("phoneSlot"));
+    ro.observe($("stage"));
+  }
+  addEventListener("load", relayout);
+  relayout();
   const el = {
     flash: $("flash"), pro: $("pro"), status: $("status"), flip: $("flip"),
-    sheet: $("sheet"), done: $("doneBtn"), grid: $("grid"),
+    sheet: $("sheet"), grid: $("grid"),
     viewfinder: $("viewfinder"), reticle: $("reticle"), bloom: $("bloom"),
     shutter: $("shutter"), pulse: $("pulse"), gallery: $("gallery"),
     flyer: $("flyer"), dial: $("dial"), dialZoom: $("dialZoom"),
     dialSub: $("dialSub"), quickap: $("quickap"),
-    tGrid: $("tGrid"), tRaw: $("tRaw"), tTimer: $("tTimer"),
+    tGrid: $("tGrid"), tTimer: $("tTimer"),
     sheetApSlider: $("sheetApSlider"), quickApSlider: $("quickApSlider"),
     evSlider: $("evSlider"), telemetry: $("telemetry")
   };
@@ -502,6 +696,7 @@
   function setSheet(open) {
     state.sheetOpen = open;
     el.sheet.classList.toggle("open", open);
+    $("scrim").classList.toggle("on", open);
     if (open) {
       el.pro.classList.add("white");
       el.pro.innerHTML = ICONS.close;
@@ -510,9 +705,58 @@
       el.pro.innerHTML = ICONS.sliders;
     }
     updateQuickAperture();
+    hudPoke();
   }
   el.pro.addEventListener("click", () => setSheet(!state.sheetOpen));
-  el.done.addEventListener("click", () => setSheet(false));
+
+  // ── header HUD: fade out 2 s after the last interaction ────────────────
+  const topbar = document.querySelector(".topbar");
+  let hudTimer;
+  function hudPoke() {
+    topbar.classList.remove("hud-hidden");
+    clearTimeout(hudTimer);
+    if (state.sheetOpen) return;          // keep it while settings are open
+    hudTimer = setTimeout(() => topbar.classList.add("hud-hidden"), 2000);
+  }
+  document.addEventListener("pointerdown", hudPoke, { capture: true });
+  hudPoke();
+
+  // ── framing 1:1 / 4:3 / 16:9 / Full ────────────────────────────────────
+  const RATIOS = { "1:1": 1, "4:3": 4 / 3, "16:9": 16 / 9, full: null };
+  document.getElementById("framing").addEventListener("click", e => {
+    const b = e.target.closest(".seg");
+    if (!b) return;
+    document.querySelectorAll("#framing .seg").forEach(s => s.classList.toggle("sel", s === b));
+    state.ratio = RATIOS[b.dataset.ratio];
+    fitStage();
+  });
+
+  // ── resolution / telephoto ─────────────────────────────────────────────
+  const resBtn = $("tRes");
+  resBtn.addEventListener("click", () => {
+    const high = resBtn.textContent === "12MP";
+    resBtn.textContent = high ? "50MP" : "12MP";
+    resBtn.classList.toggle("on", high);
+    el.status.textContent = high ? "50MP" : "12MP";
+    hudPoke();
+  });
+
+  const teleBtn = $("tTele");
+  teleBtn.addEventListener("click", () => {
+    const on = !teleBtn.classList.contains("on");
+    teleBtn.classList.toggle("on", on);
+    $("teleLabel").textContent = on ? "TELE · >2×" : "TELE OFF";
+    hudPoke();
+  });
+
+  // aperture belongs to Portrait and Pro only
+  function updateApertureVisibility() {
+    const show = state.mode === "portrait" || state.mode === "pro";
+    $("apertureBlock").classList.toggle("hidden", !show);
+  }
+  updateApertureVisibility();
+  // no Done button: tap outside closes
+  $("scrim").addEventListener("click", () => setSheet(false));
 
   // ── modes ────────────────────────────────────────────────────────────────
   function setMode(mode) {
@@ -527,6 +771,8 @@
       );
     });
     updateQuickAperture();
+    updateApertureVisibility();
+    hudPoke();
   }
   document.getElementById("modes").addEventListener("click", e => {
     const b = e.target.closest(".mode");
@@ -552,9 +798,10 @@
       const rect = root.getBoundingClientRect();
       const clientX = e.touches ? e.touches[0].clientX : e.clientX;
       const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-      const next = Math.round(min + t * (max - min));
-      if (next !== v) { v = next; paint(); onChange(v); }
-      else { paint(); }
+      // Continuous: no snapping, which is what makes the sliders feel smooth.
+      v = min + t * (max - min);
+      paint();
+      onChange(v);
     }
     let dragging = false;
     root.addEventListener("pointerdown", e => {
@@ -610,7 +857,14 @@
     el.tGrid.classList.toggle("on");
     el.grid.classList.toggle("on", el.tGrid.classList.contains("on"));
   });
-  el.tRaw.addEventListener("click", () => el.tRaw.classList.toggle("on"));
+  $("rawBadge").addEventListener("click", () => {
+    $("rawBadge").classList.toggle("on");
+    $("rawBadge").animate(
+      [{ transform: "scale(.9)" }, { transform: "scale(1)" }],
+      { duration: 220, easing: "cubic-bezier(.2,.9,.3,1.2)" }
+    );
+    el.status.textContent = $("rawBadge").classList.contains("on") ? "RAW + JPEG" : "JPEG only";
+  });
   el.tTimer.addEventListener("click", () => {
     const order = [null, 3, 10];
     const cur = el.tTimer.dataset.step ? Number(el.tTimer.dataset.step) : 0;
@@ -621,8 +875,21 @@
   });
 
   // ── zoom chips ───────────────────────────────────────────────────────────
-  const chips = [["chip1", 1], ["chip2", 2], ["chip5", 5]];
+  const chips = [["chip1", 0.6], ["chip2", 1], ["chip5", 2]];
+  const STOPS = chips.map(([, v]) => v);
+  const ZMIN = 0.6, ZMAX = 2;
   const MM = z => Math.round(24 * z);
+
+  // ── travelling selection disc (pure CSS offsets — always aligned) ────────
+  function moveDisc() {
+    const disc = $("chipdisc");
+    if (!disc) return;
+    const onStop = STOPS.some(v => Math.abs(v - state.zoom) < 0.08);
+    const idx = chips.findIndex(([, v]) => Math.abs(v - state.zoom) < 0.08);
+    disc.style.setProperty("--i", Math.max(0, idx));
+    disc.style.setProperty("--s", onStop ? 1 : 0.84);
+    disc.style.opacity = onStop ? "1" : "0";
+  }
 
   function setZoom(z) {
     state.zoom = z;
@@ -630,48 +897,88 @@
       const b = $(id);
       const on = Math.abs(val - z) < 0.08;
       b.classList.toggle("sel", on);
+      b.classList.toggle("near", !on && Math.abs(val - z) < 0.6);
     });
-    el.dialZoom.textContent = z.toFixed(1) + "×";
+    moveDisc();
+    el.dialZoom.textContent = fmtZoom(z);
     el.dialSub.textContent = MM(z) + " MM";
     drawTicks(z);
-    showDial();
+    showWheel();
   }
+  const fmtZoom = z => (Math.abs(z - Math.round(z)) < 0.05 ? Math.round(z) : z.toFixed(1)) + "×";
   chips.forEach(([id, val]) => $(id).addEventListener("click", () => setZoom(val)));
+  addEventListener("resize", moveDisc);
+  requestAnimationFrame(moveDisc);
 
   // ── orbit dial ───────────────────────────────────────────────────────────
   const ticksG = $("dialTicks");
+  // Top arc only: 48 ticks between 202° and 338°, alpha shaped like sin() so the
+  // marks dissolve before the sides and the bottom of the circle stays empty.
+  const ARC_START = 161, ARC_SWEEP = 218, TICKS = 56;
+  const C = 122;                       // centre of the 244px viewBox
+  const tickOuter = 114;
+
   function drawTicks(z) {
+    const norm = Math.min(1, Math.max(0, (z - 1) / (5 - 1)));
     let out = "";
-    const norm = (z - 1) / (5 - 1);
-    for (let i = 0; i < 48; i++) {
-      const a = (i / 48) * Math.PI * 2 - Math.PI / 2;
-      const cardinal = i % 12 === 0, major = i % 6 === 0;
-      const len = cardinal ? 10 : major ? 7 : 4.5;
-      const r1 = 114 - len, r2 = 114;
-      out += `<line x1="${118 + Math.cos(a) * r1}" y1="${118 + Math.sin(a) * r1}"
-                    x2="${118 + Math.cos(a) * r2}" y2="${118 + Math.sin(a) * r2}"
-                    stroke="${major ? "rgba(255,255,255,.9)" : "rgba(255,255,255,.24)"}"
-                    stroke-width="${major ? 2.5 : 1.5}" stroke-linecap="round"/>`;
+    for (let i = 0; i <= TICKS; i++) {
+      const t = i / TICKS;
+      const fade = Math.sin(t * Math.PI);
+      if (fade <= 0.02) continue;
+      const a = (ARC_START + ARC_SWEEP * t) * Math.PI / 180;
+      const major = i % 6 === 0;
+      const len = major ? 10 : 5;
+      const r1 = tickOuter - len;
+      out += `<line x1="${C + Math.cos(a) * r1}" y1="${C + Math.sin(a) * r1}"
+                    x2="${C + Math.cos(a) * tickOuter}" y2="${C + Math.sin(a) * tickOuter}"
+                    stroke="rgba(255,255,255,${(0.72 * fade * (major ? 1 : 0.55)).toFixed(3)})"
+                    stroke-width="${major ? 2 : 1.3}" stroke-linecap="round"/>`;
     }
-    const na = (270 + (norm - 0.5) * 160) * Math.PI / 180;
-    out += `<line x1="${118 + Math.cos(na) * 96}" y1="${118 + Math.sin(na) * 96}"
-                  x2="${118 + Math.cos(na) * 114}" y2="${118 + Math.sin(na) * 114}"
-                  stroke="#ffd60a" stroke-width="3" stroke-linecap="round"/>`;
+    // travelled thread
+    const arcR = tickOuter - 15;
+    if (norm > 0.001) {
+      const end = (ARC_START + ARC_SWEEP * norm) * Math.PI / 180;
+      const large = ARC_SWEEP * norm > 180 ? 1 : 0;
+      const x1 = C + Math.cos(ARC_START * Math.PI / 180) * arcR;
+      const y1 = C + Math.sin(ARC_START * Math.PI / 180) * arcR;
+      const x2 = C + Math.cos(end) * arcR;
+      const y2 = C + Math.sin(end) * arcR;
+      out += `<path d="M${x1} ${y1} A${arcR} ${arcR} 0 ${large} 1 ${x2} ${y2}"
+                   fill="none" stroke="rgba(255,214,10,.55)" stroke-width="2" stroke-linecap="round"/>`;
+    }
+    // needle + knob
+    const na = (ARC_START + ARC_SWEEP * norm) * Math.PI / 180;
+    const fade = Math.sin(norm * Math.PI);
+    out += `<line x1="${C + Math.cos(na) * (arcR - 16)}" y1="${C + Math.sin(na) * (arcR - 16)}"
+                  x2="${C + Math.cos(na) * (tickOuter - 1)}" y2="${C + Math.sin(na) * (tickOuter - 1)}"
+                  stroke="rgba(255,214,10,${(0.35 + 0.65 * fade).toFixed(3)})"
+                  stroke-width="3" stroke-linecap="round"/>`;
+    out += `<circle cx="${C + Math.cos(na) * (tickOuter - 1)}"
+                    cy="${C + Math.sin(na) * (tickOuter - 1)}" r="3.4"
+                    fill="rgba(255,214,10,${(0.55 + 0.45 * fade).toFixed(3)})"/>`;
     ticksG.innerHTML = out;
   }
   drawTicks(1);
 
   let dialTimer;
-  function showDial() {
+  // The wheel only appears for a pinch in the app; the mock also shows it when a
+  // chip is tapped so the morph is visible in the preview.
+  function showWheel() {
     el.dial.classList.add("show");
+    $("zoomstack").classList.add("wheel");
     clearTimeout(dialTimer);
-    dialTimer = setTimeout(() => el.dial.classList.remove("show"), 2200);
+    dialTimer = setTimeout(() => {
+      el.dial.classList.remove("show");
+      $("zoomstack").classList.remove("wheel");
+    }, 1600);
   }
 
   // ── tap to focus ─────────────────────────────────────────────────────────
   el.viewfinder.addEventListener("pointerdown", e => {
     const r = el.viewfinder.getBoundingClientRect();
-    const x = e.clientX - r.left, y = e.clientY - r.top;
+    // The phone is scaled by `fitDevice()`, so screen deltas must be divided
+    // back down to the phone's own coordinate space.
+    const x = toLocal(e.clientX - r.left), y = toLocal(e.clientY - r.top);
     el.reticle.style.left = x + "px";
     el.reticle.style.top = y + "px";
     el.reticle.classList.remove("show");
@@ -704,10 +1011,13 @@
     const dr = $("device").getBoundingClientRect();
     const sr = el.shutter.getBoundingClientRect();
     const gr = el.gallery.getBoundingClientRect();
-    const sx = sr.left - dr.left + sr.width / 2;
-    const sy = sr.top - dr.top + sr.height / 2;
-    const gx = gr.left - dr.left + gr.width / 2;
-    const gy = gr.top - dr.top + gr.height / 2;
+    // Phone-local coordinates (see toLocal): the flyer lives inside .device and
+    // is not affected by the phone's transform, so scale must be divided out.
+    const sx = toLocal(sr.left - dr.left + sr.width / 2);
+    const sy = toLocal(sr.top - dr.top + sr.height / 2);
+    const gx = toLocal(gr.left - dr.left + gr.width / 2);
+    const gy = toLocal(gr.top - dr.top + gr.height / 2);
+    const galleryW = toLocal(gr.width);
 
     el.flyer.style.left = (sx - 48) + "px";
     el.flyer.style.top = (sy - 48) + "px";
@@ -718,7 +1028,7 @@
       [
         { transform: "scale(.72)", opacity: 0, offset: 0 },
         { transform: "scale(1)", opacity: 1, offset: .28 },
-        { transform: `translate(${gx - sx}px, ${gy - sy}px) scale(${gr.width / 96})`, opacity: 1, offset: 1 }
+        { transform: `translate(${gx - sx}px, ${gy - sy}px) scale(${galleryW / 96})`, opacity: 1, offset: 1 }
       ],
       { duration: 470, easing: "cubic-bezier(.25,.9,.3,1)", fill: "forwards" }
     );
