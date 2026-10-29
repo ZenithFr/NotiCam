@@ -46,14 +46,35 @@ struct CompositePushConstants {
     int32_t rotate90;
 };
 
-static std::vector<char> loadSpvFile(const char* path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) return {};
-    size_t size = (size_t)file.tellg();
-    std::vector<char> buffer(size);
-    file.seekg(0);
-    file.read(buffer.data(), size);
-    return buffer;
+static std::vector<char> loadSpvFile(const char* filename) {
+    std::string baseName = filename;
+    size_t lastSlash = baseName.find_last_of('/');
+    if (lastSlash != std::string::npos) {
+        baseName = baseName.substr(lastSlash + 1);
+    }
+
+    std::string candidatePaths[] = {
+        std::string("/data/user/0/com.zenith.auxcam/files/shaders/") + baseName,
+        std::string("/data/data/com.zenith.auxcam/files/shaders/") + baseName,
+        std::string("/data/local/tmp/") + baseName,
+        std::string(filename)
+    };
+
+    for (const auto& path : candidatePaths) {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (file.is_open()) {
+            size_t size = (size_t)file.tellg();
+            if (size > 0) {
+                std::vector<char> buffer(size);
+                file.seekg(0);
+                file.read(buffer.data(), size);
+                LOGI("Loaded SPIR-V: %zu bytes from %s", size, path.c_str());
+                return buffer;
+            }
+        }
+    }
+    LOGE("Failed to find SPIR-V shader: %s", filename);
+    return {};
 }
 
 VulkanPipeline::VulkanPipeline() = default;
@@ -89,7 +110,9 @@ bool VulkanPipeline::init(ANativeWindow* window, uint32_t previewWidth, uint32_t
     LOGI("VulkanPipeline initialized successfully (%ux%u)", mWidth, mHeight);
 
     if (mWindow != nullptr) {
-        if (!initStillBokehResources(720, 540)) {
+        uint32_t workingW = (mWidth > 0) ? (mWidth / 2) : ((previewWidth > 0) ? (previewWidth / 2) : 512);
+        uint32_t workingH = (mHeight > 0) ? (mHeight / 2) : ((previewHeight > 0) ? (previewHeight / 2) : 512);
+        if (!initStillBokehResources(workingW, workingH)) {
             LOGE("Failed to init bokeh resources during init");
         }
         createSwapchain(mWindow);
@@ -258,8 +281,9 @@ bool VulkanPipeline::createSwapchain(ANativeWindow* window) {
     swInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     swInfo.clipped = VK_TRUE;
 
-    if (vkCreateSwapchainKHR(mDevice, &swInfo, nullptr, &mSwapchain) != VK_SUCCESS) {
-        LOGE("Failed to create VkSwapchainKHR");
+    VkResult scRes = vkCreateSwapchainKHR(mDevice, &swInfo, nullptr, &mSwapchain);
+    if (scRes != VK_SUCCESS) {
+        LOGE("Failed to create VkSwapchainKHR: %d", scRes);
         return false;
     }
 
@@ -331,6 +355,10 @@ bool VulkanPipeline::recreateSwapchain() {
     if (mSwapchain != VK_NULL_HANDLE) {
         vkDestroySwapchainKHR(mDevice, mSwapchain, nullptr);
         mSwapchain = VK_NULL_HANDLE;
+    }
+    if (mSurface != VK_NULL_HANDLE) {
+        vkDestroySurfaceKHR(mInstance, mSurface, nullptr);
+        mSurface = VK_NULL_HANDLE;
     }
     mSwapchainInitialized = false;
     mCurrentFrame = 0;
@@ -410,7 +438,9 @@ void VulkanPipeline::updateSurface(ANativeWindow* newWindow, uint32_t width, uin
     mCurrentFrame = 0;
 
     if (mWindow) {
-        if (!mStillBokehInitialized) initStillBokehResources(720, 540);
+        uint32_t workingW = (mWidth > 0) ? (mWidth / 2) : ((width > 0) ? (width / 2) : 512);
+        uint32_t workingH = (mHeight > 0) ? (mHeight / 2) : ((height > 0) ? (height / 2) : 512);
+        if (!mStillBokehInitialized) initStillBokehResources(workingW, workingH);
         createSwapchain(mWindow);
         initPreviewResources();
     }
@@ -517,7 +547,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     if (!mSwapchainInitialized) {
         if (mWindow != nullptr) {
-            if (!mStillBokehInitialized) initStillBokehResources(720, 540);
+            uint32_t workingW = (mWidth > 0) ? (mWidth / 2) : 512;
+            uint32_t workingH = (mHeight > 0) ? (mHeight / 2) : 512;
+            if (!mStillBokehInitialized) initStillBokehResources(workingW, workingH);
             createSwapchain(mWindow);
             initPreviewResources();
         }
@@ -539,7 +571,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     if (res != VK_SUCCESS) {
         LOGE("vkAcquireNextImageKHR returned %d", res);
         if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_SURFACE_LOST_KHR) {
-            mSwapchainInitialized = false;
+            LOGI("Swapchain out-of-date/lost (%d), rebuilding via recreateSwapchain()", res);
+            recreateSwapchain();
         }
         return false;
     }
@@ -730,7 +763,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
-    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, 720.0f };
+    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, (float)mStillW };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
     CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90 };
 
@@ -894,12 +927,12 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
         return sm;
     };
 
-    auto cocSpv = loadSpvFile("/data/local/tmp/coc.spv");
-    auto gatherSpv = loadSpvFile("/data/local/tmp/gather.spv");
-    auto compSpv = loadSpvFile("/data/local/tmp/composite.spv");
+    auto cocSpv = loadSpvFile("coc.spv");
+    auto gatherSpv = loadSpvFile("gather.spv");
+    auto compSpv = loadSpvFile("composite.spv");
 
     if (cocSpv.empty() || gatherSpv.empty() || compSpv.empty()) {
-        LOGE("Failed to load SPIR-V compute shaders from /data/local/tmp");
+        LOGE("Failed to load SPIR-V compute shaders (coc, gather, composite)");
         return false;
     }
 
@@ -1401,7 +1434,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
-    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, 720.0f };
+    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, (float)mStillW };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
     CompositePushConstants pcComp{ mFullW, mFullH, 0 };
 

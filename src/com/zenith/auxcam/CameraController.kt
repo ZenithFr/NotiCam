@@ -192,6 +192,7 @@ class CameraController(
     private var service: IAuxCamService? = null
     private var surfaceHolder: SurfaceHolder? = null
     private val stillCaptureInProgress = AtomicBoolean(false)
+    private var lastShutterTriggerNs = 0L
 
     @Volatile
     private var latestDepth: ByteArray? = null
@@ -209,6 +210,7 @@ class CameraController(
     private var currentLens = "0"
     private var onTele = false
     private var teleLensId: String? = "3"
+    private var viewfinderGeometry = ViewfinderGeometry.defaultPortrait()
 
     private var started = false
 
@@ -358,16 +360,24 @@ class CameraController(
         val frame = holder.surfaceFrame
         val width = frame.width().takeIf { it > 0 } ?: DeviceProfile.COLOR_WIDTH
         val height = frame.height().takeIf { it > 0 } ?: DeviceProfile.COLOR_HEIGHT
+        viewfinderGeometry = ViewfinderGeometry(width, height, isPortrait = true)
+        viewfinderGeometry.assertMatchesSurface(width, height)
+        Log.i(TAG, "ViewfinderGeometry derived: surface=${width}x${height}, working=${viewfinderGeometry.workingWidth}x${viewfinderGeometry.workingHeight}, cocRef=${viewfinderGeometry.cocReferenceWidth}")
         val ok = native.initEngine(holder.surface, width, height)
         Log.i(TAG, "nativeInitEngine -> $ok")
         if (service != null) startStereoSession()
     }
 
     override fun onPreviewSurfaceChanged(holder: SurfaceHolder) {
-        // The engine detects the new surface extent itself and rebuilds its
-        // swapchain (see VulkanPipeline::recreateSwapchain), so nothing to do
-        // here beyond remembering the holder.
         surfaceHolder = holder
+        val frame = holder.surfaceFrame
+        val width = frame.width()
+        val height = frame.height()
+        if (width > 0 && height > 0) {
+            viewfinderGeometry = ViewfinderGeometry(width, height, isPortrait = true)
+            viewfinderGeometry.assertMatchesSurface(width, height)
+            Log.i(TAG, "onPreviewSurfaceChanged: geometry updated to ${width}x${height}")
+        }
     }
 
     override fun onPreviewSurfaceDestroyed(holder: SurfaceHolder) {
@@ -542,6 +552,17 @@ class CameraController(
 
     // ═══════════════════════════ IMAGE STREAMS ═══════════════════════════════
 
+    /**
+     * Map f-stop (1.4..16.0) directly to target_far_field_px in [5.0, 30.0].
+     * Item 11: Switch CoC constants with lens selection (2.08x factor on Cam 3 telephoto).
+     * At f/2.8 (default), returns 15.0 px on main lens, 31.2 px on Cam 3.
+     */
+    private fun fStopToTargetFarFieldPx(fStop: Float, lensId: String = currentLens): Float {
+        val lensMultiplier = if (lensId == "3") 2.08f else 1.0f
+        val px = 15.0f * (2.8f / fStop.coerceAtLeast(1.0f)) * lensMultiplier
+        return px.coerceIn(5.0f, 30.0f * lensMultiplier)
+    }
+
     private fun onColorImage(reader: ImageReader) {
         if (stillCaptureInProgress.get()) {
             val dropped = reader.acquireLatestImage()
@@ -554,7 +575,7 @@ class CameraController(
             val buffer = image.hardwareBuffer
             if (buffer != null) {
                 try {
-                    val targetFarFieldPx = 15.0f * (1.8f / state.fStop)
+                    val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
                     native.renderFrame(
                         buffer,
                         latestDepth,
@@ -611,7 +632,7 @@ class CameraController(
                 // builds; log the intent here so a mismatch is visible.
                 Log.i(TAG, "capture resolution=${state.resolution.label}")
 
-                val targetFarFieldPx = 15.0f * (1.8f / state.fStop)
+                val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
                 val timestamps = LongArray(3)
                 native.processStill(
                     buffer,
@@ -732,9 +753,18 @@ class CameraController(
             update { it.copy(status = "Camera not ready") }
             return
         }
+        val nowNs = SystemClock.elapsedRealtimeNanos()
+        if (nowNs - lastShutterTriggerNs < 1_500_000_000L) {
+            Log.w(TAG, "triggerCapture: dropped, 1.5s shutter debounce active (queue depth 1 enforced)")
+            return
+        }
+        if (!stillCaptureInProgress.compareAndSet(false, true)) {
+            Log.w(TAG, "triggerCapture: dropped, capture already in flight (queue depth 1 enforced)")
+            return
+        }
+        lastShutterTriggerNs = nowNs
         Log.i(TAG, "triggerCapture: highQuality=$highQuality, enableZsl=$enableZsl")
-        stillCaptureInProgress.set(true)
-        main.postDelayed({ stillCaptureInProgress.set(false) }, 2500L)
+        main.postDelayed({ stillCaptureInProgress.set(false) }, 4000L) // Safety watchdog
         shutterClickNs = SystemClock.elapsedRealtimeNanos()
         update {
             it.copy(

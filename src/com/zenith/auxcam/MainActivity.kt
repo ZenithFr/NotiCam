@@ -49,6 +49,8 @@ class MainActivity : ComponentActivity(), NativeBridge {
             window.attributes = attrs
         }
 
+        extractAssetsIfNeeded()
+
         controller = CameraController(this, this)
 
         setContent {
@@ -154,6 +156,27 @@ class MainActivity : ComponentActivity(), NativeBridge {
         outPath: String,
         timestampsOut: LongArray,
     ): Boolean
+
+    private fun extractAssetsIfNeeded() {
+        try {
+            val shaderDir = java.io.File(filesDir, "shaders")
+            if (!shaderDir.exists()) shaderDir.mkdirs()
+            val shaderList = assets.list("shaders") ?: return
+            for (name in shaderList) {
+                val outFile = java.io.File(shaderDir, name)
+                if (!outFile.exists() || outFile.length() == 0L) {
+                    assets.open("shaders/$name").use { input ->
+                        outFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    Log.i(TAG, "Extracted asset shader: $name (${outFile.length()} bytes)")
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to extract shader assets: ${t.message}")
+        }
+    }
 
     private external fun nativeDestroyEngine()
 

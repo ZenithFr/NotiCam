@@ -5,6 +5,7 @@ import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
+import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
@@ -932,6 +933,12 @@ public class CameraUserService extends IAuxCamService.Stub {
             Long sensorTs = result.get(CaptureResult.SENSOR_TIMESTAMP);
             long sensorDeltaMs = (sensorTs != null) ? (sensorTs - mService.mShutterCommandNs) / 1_000_000 : 0;
             Log.i(TAG, "TIMING HAL onCaptureCompleted: " + t_hal + " ns, total HAL dt=" + dt + " ms, sensorTs=" + sensorTs + " ns, sensor_minus_t0=" + sensorDeltaMs + " ms");
+            mService.onStillCompleted();
+        }
+
+        @Override
+        public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) {
+            Log.e(TAG, "TIMING Still onCaptureFailed: reason=" + failure.getReason() + ", frameNumber=" + failure.getFrameNumber());
             mService.onStillCompleted();
         }
     }
