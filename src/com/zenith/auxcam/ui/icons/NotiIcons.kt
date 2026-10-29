@@ -212,4 +212,17 @@ object NotiIcons {
             moveTo(12f, 2.6f); lineTo(12f, 5.4f)
         }
     }.build()
+
+    /** Target crosshair: manual focus. */
+    val Focus: ImageVector = builder("Focus").apply {
+        strokePath(width = 1.6f) {
+            moveTo(5f, 9f); lineTo(5f, 5f); lineTo(9f, 5f)
+            moveTo(15f, 5f); lineTo(19f, 5f); lineTo(19f, 9f)
+            moveTo(5f, 15f); lineTo(5f, 19f); lineTo(9f, 19f)
+            moveTo(15f, 19f); lineTo(19f, 19f); lineTo(19f, 15f)
+        }
+        fillPath {
+            circle(12f, 12f, 2f)
+        }
+    }.build()
 }

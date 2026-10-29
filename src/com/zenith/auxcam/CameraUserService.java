@@ -60,6 +60,11 @@ public class CameraUserService extends IAuxCamService.Stub {
     private Rect mAfRegion;
     private Range<Integer> mCompensationRange;
     private String mPhysicalId;
+    private String mCurrentCameraId = CAMERA_ID;
+    private Float mMinFocusDistance = null;
+    private float mManualFocusDistance = 0.0f;
+    private boolean mManualFocusActive = false;
+    private boolean mAfLocked = false;
 
     private int mColorW = 1440, mColorH = 1080;
     private int mDepthW = 448, mDepthH = 288;
@@ -68,8 +73,10 @@ public class CameraUserService extends IAuxCamService.Stub {
     private final class AfResetRunnable implements Runnable {
         @Override
         public void run() {
-            mAfRegion = null;
-            refreshRepeatingRequest();
+            if (!mAfLocked && !mManualFocusActive) {
+                mAfRegion = null;
+                refreshRepeatingRequest();
+            }
         }
     }
     private final Runnable mAfResetRunnable = new AfResetRunnable();
@@ -237,32 +244,31 @@ public class CameraUserService extends IAuxCamService.Stub {
         loadCameraCharacteristics(cm);
 
         try {
-            cm.openCamera(CAMERA_ID, new DeviceStateCallback(this, colorPhysicalId), mCameraHandler);
+            cm.openCamera(mCurrentCameraId, new DeviceStateCallback(this, colorPhysicalId), mCameraHandler);
             return true;
         } catch (Throwable t) {
-            Log.e(TAG, "Failed to open Camera " + CAMERA_ID, t);
-            notifyError("Failed to open Camera " + CAMERA_ID + ": " + t.getMessage());
+            Log.e(TAG, "Failed to open Camera " + mCurrentCameraId, t);
+            notifyError("Failed to open Camera " + mCurrentCameraId + ": " + t.getMessage());
             return false;
         }
     }
 
     void onDeviceOpened(CameraDevice camera, String colorPhysicalId) {
         mCameraDevice = camera;
-        Log.i(TAG, "Camera " + CAMERA_ID + " opened successfully. Configuring 3-stream SessionConfiguration...");
+        Log.i(TAG, "Camera " + mCurrentCameraId + " opened successfully. Configuring SessionConfiguration...");
 
         try {
             OutputConfiguration colorConfig = new OutputConfiguration(mColorSurface);
-            if (colorPhysicalId != null && !colorPhysicalId.isEmpty()) {
-                colorConfig.setPhysicalCameraId(colorPhysicalId);
-                Log.i(TAG, "Pinned colorConfig to physical sensor: " + colorPhysicalId);
-            }
-
-            OutputConfiguration depthConfig = new OutputConfiguration(mDepthSurface);
             OutputConfiguration stillConfig = new OutputConfiguration(mStillSurface);
 
             List<OutputConfiguration> outputs = new ArrayList<OutputConfiguration>();
             outputs.add(colorConfig);
-            outputs.add(depthConfig);
+
+            boolean isStereoCam = CAMERA_ID.equals(mCurrentCameraId);
+            if (isStereoCam && mDepthSurface != null) {
+                OutputConfiguration depthConfig = new OutputConfiguration(mDepthSurface);
+                outputs.add(depthConfig);
+            }
             outputs.add(stillConfig);
 
             SessionConfiguration sessionConfig = new SessionConfiguration(
@@ -273,21 +279,23 @@ public class CameraUserService extends IAuxCamService.Stub {
             );
 
             mCameraDevice.createCaptureSession(sessionConfig);
-            Log.i(TAG, "createCaptureSession dispatched to HAL");
+            Log.i(TAG, "createCaptureSession dispatched to HAL for Camera " + mCurrentCameraId + " (outputs=" + outputs.size() + ")");
         } catch (Throwable t) {
-            Log.e(TAG, "Failed to configure 3-stream capture session", t);
+            Log.e(TAG, "Failed to configure capture session for Camera " + mCurrentCameraId, t);
             notifyError("Failed to configure capture session: " + t.getMessage());
         }
     }
 
     void onSessionConfigured(CameraCaptureSession session) {
         mCaptureSession = session;
-        Log.i(TAG, "Stereo 3-stream CameraCaptureSession configured and ready!");
+        Log.i(TAG, "Camera " + mCurrentCameraId + " CameraCaptureSession configured and ready!");
 
         try {
             mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             mPreviewRequestBuilder.addTarget(mColorSurface);
-            mPreviewRequestBuilder.addTarget(mDepthSurface);
+            if (CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) {
+                mPreviewRequestBuilder.addTarget(mDepthSurface);
+            }
 
             mPreviewRequestBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
             applyPreviewControls(mPreviewRequestBuilder);
@@ -320,14 +328,17 @@ public class CameraUserService extends IAuxCamService.Stub {
     /** Reads the sensor geometry used by zoom / focus / exposure mapping. */
     private void loadCameraCharacteristics(CameraManager cm) {
         try {
-            CameraCharacteristics chars = cm.getCameraCharacteristics(CAMERA_ID);
+            CameraCharacteristics chars = cm.getCameraCharacteristics(mCurrentCameraId);
             mActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             mCompensationRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
             Float maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
             mMaxDigitalZoom = (maxZoom != null && maxZoom > 1.0f) ? maxZoom : 1.0f;
+            Float minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+            mMinFocusDistance = (minFocus != null && minFocus > 0f) ? minFocus : 10.0f;
             recomputeCropRegion();
-            Log.i(TAG, "Characteristics: activeArray=" + mActiveArray
+            Log.i(TAG, "Characteristics for Camera " + mCurrentCameraId + ": activeArray=" + mActiveArray
                     + " maxDigitalZoom=" + mMaxDigitalZoom
+                    + " minFocusDist=" + mMinFocusDistance
                     + " evRange=" + mCompensationRange);
         } catch (Throwable t) {
             Log.w(TAG, "Could not read camera characteristics: " + t);
@@ -366,6 +377,9 @@ public class CameraUserService extends IAuxCamService.Stub {
             if (mCropRegion != null) {
                 b.set(CaptureRequest.SCALER_CROP_REGION, mCropRegion);
             }
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                b.set(CaptureRequest.CONTROL_ZOOM_RATIO, mZoomRatio);
+            }
             if (mCompensationRange != null) {
                 b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, clampedEvSteps());
             }
@@ -379,12 +393,31 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
-            if (mAfRegion != null) {
+            if (mManualFocusActive) {
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                b.set(CaptureRequest.LENS_FOCUS_DISTANCE, mManualFocusDistance);
+                b.set(CaptureRequest.CONTROL_AE_LOCK, false);
+                b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
+            } else if (mAfLocked) {
+                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                b.set(CaptureRequest.CONTROL_AE_LOCK, true);
+                b.set(CaptureRequest.CONTROL_AWB_LOCK, true);
+                if (mAfRegion != null) {
+                    b.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[]{
+                            new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
+                    b.set(CaptureRequest.CONTROL_AE_REGIONS, new MeteringRectangle[]{
+                            new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
+                }
+            } else if (mAfRegion != null) {
                 b.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[]{
                         new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                b.set(CaptureRequest.CONTROL_AE_LOCK, false);
+                b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
             } else {
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                b.set(CaptureRequest.CONTROL_AE_LOCK, false);
+                b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
             }
         } catch (Throwable t) {
             Log.w(TAG, "applyPreviewControls: " + t);
@@ -453,9 +486,21 @@ public class CameraUserService extends IAuxCamService.Stub {
         mCameraHandler.post(new Runnable() {
             @Override
             public void run() {
-                mZoomRatio = Math.max(1.0f, ratio);
+                // If zoom is ultra-wide (<0.9x), switch to Ultra-wide camera ("2")
+                if (ratio < 0.9f && !"2".equals(mCurrentCameraId)) {
+                    mZoomRatio = 1.0f;
+                    restartWithCamera("2");
+                    return;
+                } else if (ratio >= 0.9f && "2".equals(mCurrentCameraId)) {
+                    // Revert to main stereo camera "5"
+                    mZoomRatio = ratio;
+                    restartWithCamera(CAMERA_ID);
+                    return;
+                }
+
+                mZoomRatio = Math.max(0.6f, Math.min(mMaxDigitalZoom, ratio));
                 recomputeCropRegion();
-                Log.i(TAG, "Zoom -> " + mZoomRatio + "x, crop=" + mCropRegion);
+                Log.i(TAG, "Zoom -> " + mZoomRatio + "x on Camera " + mCurrentCameraId + ", crop=" + mCropRegion);
                 refreshRepeatingRequest();
             }
         });
@@ -467,6 +512,9 @@ public class CameraUserService extends IAuxCamService.Stub {
         mCameraHandler.post(new Runnable() {
             @Override
             public void run() {
+                if (mManualFocusActive) {
+                    mManualFocusActive = false;
+                }
                 Rect base = (mCropRegion != null) ? mCropRegion : mActiveArray;
                 if (base == null) return;
 
@@ -484,26 +532,76 @@ public class CameraUserService extends IAuxCamService.Stub {
                 region.bottom = Math.min(base.bottom, region.bottom);
                 mAfRegion = region;
 
-                Log.i(TAG, "Tap-to-focus region=" + region + " (crop=" + base + ")");
+                Log.i(TAG, "Tap-to-focus region=" + region + " (locked=" + mAfLocked + ")");
                 refreshRepeatingRequest();
                 triggerAfScan(region);
 
                 mCameraHandler.removeCallbacks(mAfResetRunnable);
-                mCameraHandler.postDelayed(mAfResetRunnable, 2000);
+                if (!mAfLocked) {
+                    mCameraHandler.postDelayed(mAfResetRunnable, 2000);
+                }
+            }
+        });
+    }
+
+    @Override
+    public void setAfLock(final boolean locked) {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                mAfLocked = locked;
+                mCameraHandler.removeCallbacks(mAfResetRunnable);
+                Log.i(TAG, "setAfLock -> " + locked + " (mAfRegion=" + mAfRegion + ")");
+                refreshRepeatingRequest();
+            }
+        });
+    }
+
+    @Override
+    public void setManualFocus(final float distanceFraction) {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                mManualFocusActive = true;
+                mAfLocked = false;
+                mCameraHandler.removeCallbacks(mAfResetRunnable);
+                float maxDist = (mMinFocusDistance != null && mMinFocusDistance > 0f) ? mMinFocusDistance : 10.0f;
+                mManualFocusDistance = Math.max(0.0f, Math.min(1.0f, distanceFraction)) * maxDist;
+                Log.i(TAG, "setManualFocus: frac=" + distanceFraction + " -> " + mManualFocusDistance + " diopters");
+                refreshRepeatingRequest();
+            }
+        });
+    }
+
+    @Override
+    public void resetFocus() {
+        if (mCameraHandler == null) return;
+        mCameraHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                mManualFocusActive = false;
+                mAfLocked = false;
+                mAfRegion = null;
+                mCameraHandler.removeCallbacks(mAfResetRunnable);
+                Log.i(TAG, "resetFocus -> continuous autofocus");
+                refreshRepeatingRequest();
             }
         });
     }
 
     /** One-shot AF/AE scan at the tapped region (does not touch the repeating request). */
     private void triggerAfScan(Rect region) {
-        if (mCameraDevice == null || mCaptureSession == null
-                || mColorSurface == null || mDepthSurface == null) {
+        if (mCameraDevice == null || mCaptureSession == null || mColorSurface == null) {
             return;
         }
         try {
             CaptureRequest.Builder af = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             af.addTarget(mColorSurface);
-            af.addTarget(mDepthSurface);
+            if (CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) {
+                af.addTarget(mDepthSurface);
+            }
             af.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
             af.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
             af.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
@@ -525,16 +623,23 @@ public class CameraUserService extends IAuxCamService.Stub {
         mCameraHandler.post(new Runnable() {
             @Override
             public void run() {
-                String target = (physicalId == null) ? "" : physicalId;
-                if (target.equals(mPhysicalId)) return;
-                restartWithLens(target);
+                String targetId;
+                if ("3".equals(physicalId)) {
+                    targetId = "3"; // Telephoto
+                } else if ("2".equals(physicalId)) {
+                    targetId = "2"; // Ultra-wide
+                } else {
+                    targetId = CAMERA_ID; // Main stereo VSDOF "5"
+                }
+                if (targetId.equals(mCurrentCameraId)) return;
+                restartWithCamera(targetId);
             }
         });
     }
 
-    /** Tears the device down and re-opens it pinned to another physical sensor. */
-    private void restartWithLens(String physicalId) {
-        Log.i(TAG, "Switching physical lens to '" + physicalId + "'");
+    /** Tears the device down and re-opens the specified camera. */
+    private void restartWithCamera(String targetCameraId) {
+        Log.i(TAG, "Switching camera device from " + mCurrentCameraId + " to '" + targetCameraId + "'");
         try {
             if (mCaptureSession != null) {
                 try {
@@ -550,20 +655,48 @@ public class CameraUserService extends IAuxCamService.Stub {
                 mCameraDevice = null;
             }
         } catch (Throwable t) {
-            Log.w(TAG, "Lens switch teardown: " + t);
+            Log.w(TAG, "Camera switch teardown: " + t);
         }
 
-        mZoomRatio = 1.0f;
-        recomputeCropRegion();
+        mCurrentCameraId = targetCameraId;
         mAfRegion = null;
 
-        boolean ok = openStereoSession(
-                mColorSurface, mColorW, mColorH,
-                mDepthSurface, mDepthW, mDepthH,
-                mStillSurface, mStillW, mStillH,
-                physicalId);
-        if (!ok) {
-            notifyError("Lens unavailable");
+        Context shellContext = mContext;
+        try {
+            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+            Object at = activityThreadClass.getMethod("systemMain").invoke(null);
+            Context systemContext = (Context) activityThreadClass.getMethod("getSystemContext").invoke(at);
+            fixAttribution(systemContext, "com.android.shell", 2000);
+            shellContext = systemContext.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
+            fixAttribution(shellContext, "com.android.shell", 2000);
+        } catch (Throwable t) {
+            Log.w(TAG, "shellContext setup fallback: " + t);
+        }
+
+        CameraManager cm = (CameraManager) shellContext.getSystemService(Context.CAMERA_SERVICE);
+        if (cm == null) {
+            notifyError("CameraManager unavailable");
+            return;
+        }
+
+        loadCameraCharacteristics(cm);
+
+        try {
+            cm.openCamera(mCurrentCameraId, new DeviceStateCallback(this, null), mCameraHandler);
+        } catch (Throwable t) {
+            Log.e(TAG, "Failed to open Camera " + mCurrentCameraId + ", falling back to " + CAMERA_ID, t);
+            if (!CAMERA_ID.equals(mCurrentCameraId)) {
+                mCurrentCameraId = CAMERA_ID;
+                loadCameraCharacteristics(cm);
+                try {
+                    cm.openCamera(CAMERA_ID, new DeviceStateCallback(this, null), mCameraHandler);
+                } catch (Throwable t2) {
+                    Log.e(TAG, "Fallback to CAMERA_ID failed", t2);
+                    notifyError("Failed to open camera: " + t.getMessage());
+                }
+            } else {
+                notifyError("Failed to open camera: " + t.getMessage());
+            }
         }
     }
 
@@ -587,7 +720,19 @@ public class CameraUserService extends IAuxCamService.Stub {
             stillBuilder.addTarget(mStillSurface);
             stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl);
             stillBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
-            stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            if (mManualFocusActive) {
+                stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                stillBuilder.set(CaptureRequest.LENS_FOCUS_DISTANCE, mManualFocusDistance);
+            } else if (mAfLocked) {
+                stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
+                stillBuilder.set(CaptureRequest.CONTROL_AE_LOCK, true);
+                if (mAfRegion != null) {
+                    stillBuilder.set(CaptureRequest.CONTROL_AF_REGIONS, new MeteringRectangle[]{
+                            new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
+                }
+            } else {
+                stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+            }
             applyCropAndExposure(stillBuilder);
             applyStillFlash(stillBuilder);
             if (highQualityNr) {
@@ -716,11 +861,16 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         @Override
         public void onError(CameraDevice camera, int error) {
-            Log.e(TAG, "Camera device error: " + error);
+            Log.e(TAG, "Camera device error on " + mService.mCurrentCameraId + ": " + error);
             try { camera.close(); } catch (Throwable ignored) {}
             mService.mCameraDevice = null;
             mService.mCaptureSession = null;
-            mService.notifyError("Camera error code: " + error);
+            if (!CAMERA_ID.equals(mService.mCurrentCameraId)) {
+                Log.i(TAG, "Fallback from failing camera " + mService.mCurrentCameraId + " to " + CAMERA_ID);
+                mService.restartWithCamera(CAMERA_ID);
+            } else {
+                mService.notifyError("Camera error code: " + error);
+            }
         }
     }
 
@@ -738,12 +888,11 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         @Override
         public void onConfigureFailed(CameraCaptureSession session) {
-            Log.e(TAG, "Session configuration failed!");
+            Log.e(TAG, "Session configuration failed on Camera " + mService.mCurrentCameraId);
             mService.notifyError("CameraCaptureSession configuration failed");
-            if (mService.mPhysicalId != null && !"0".equals(mService.mPhysicalId)) {
-                Log.i(TAG, "Reverting to primary physical lens '0'");
-                mService.mPhysicalId = "0";
-                mService.restartWithLens("0");
+            if (!CAMERA_ID.equals(mService.mCurrentCameraId)) {
+                Log.i(TAG, "Reverting to primary CAMERA_ID " + CAMERA_ID);
+                mService.restartWithCamera(CAMERA_ID);
             }
         }
     }

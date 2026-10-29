@@ -26,4 +26,11 @@ interface IAuxCamService {
     void focusAt(float sensorNormX, float sensorNormY);
     /** Re-opens the camera pinned to another physical sensor ("0" = auto). */
     void setPhysicalLens(String physicalId);
+
+    /** Lock or unlock AE and AF at current point. */
+    void setAfLock(boolean locked);
+    /** Set manual focus distance (0.0 = infinity, 1.0 = closest / macro). */
+    void setManualFocus(float distanceFraction);
+    /** Reset focus back to continuous autofocus. */
+    void resetFocus();
 }

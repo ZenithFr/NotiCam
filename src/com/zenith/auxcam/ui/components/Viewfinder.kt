@@ -220,31 +220,31 @@ fun Viewfinder(
                         style = Stroke(width = 1.4.dp.toPx(), cap = StrokeCap.Round),
                     )
                 }
-            }
 
-            // "AE/AF LOCK" caption, fading in under the reticle.
-            if (lockMorph.value > 0.01f) {
-                val labelTop = point.y + 40.dp.toPx()
-                drawRoundRect(
-                    color = Color.Black.copy(alpha = 0.45f * lockMorph.value),
-                    topLeft = Offset(point.x - 34.dp.toPx(), labelTop),
-                    size = Size(68.dp.toPx(), 16.dp.toPx()),
-                    cornerRadius = CornerRadius(8.dp.toPx()),
-                )
-                // Three short bars stand in for the label at this size: text in a
-                // Canvas would need a TextMeasurer per frame, and the bars read as
-                // "AE/AF" at a glance without that cost.
-                var barX = 0f
-                for (bars in 0 until 3) {
-                    val w = 11.dp.toPx()
-                    val x = point.x - 24.dp.toPx() + barX
+                // "AE/AF LOCK" caption, fading in under the reticle.
+                if (lockMorph.value > 0.01f) {
+                    val labelTop = point.y + 40.dp.toPx()
                     drawRoundRect(
-                        color = CameraColors.Yellow.copy(alpha = lockMorph.value * 0.85f),
-                        topLeft = Offset(x, labelTop + 6.dp.toPx()),
-                        size = Size(w, 3.4.dp.toPx()),
-                        cornerRadius = CornerRadius(1.7.dp.toPx()),
+                        color = Color.Black.copy(alpha = 0.45f * lockMorph.value),
+                        topLeft = Offset(point.x - 34.dp.toPx(), labelTop),
+                        size = Size(68.dp.toPx(), 16.dp.toPx()),
+                        cornerRadius = CornerRadius(8.dp.toPx()),
                     )
-                    barX += w + 4.dp.toPx()
+                    // Three short bars stand in for the label at this size: text in a
+                    // Canvas would need a TextMeasurer per frame, and the bars read as
+                    // "AE/AF" at a glance without that cost.
+                    var barX = 0f
+                    for (bars in 0 until 3) {
+                        val w = 11.dp.toPx()
+                        val x = point.x - 24.dp.toPx() + barX
+                        drawRoundRect(
+                            color = CameraColors.Yellow.copy(alpha = lockMorph.value * 0.85f),
+                            topLeft = Offset(x, labelTop + 6.dp.toPx()),
+                            size = Size(w, 3.4.dp.toPx()),
+                            cornerRadius = CornerRadius(1.7.dp.toPx()),
+                        )
+                        barX += w + 4.dp.toPx()
+                    }
                 }
             }
         }

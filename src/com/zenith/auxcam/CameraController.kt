@@ -116,6 +116,12 @@ interface CameraActions {
 
     /** Tap while locked: release. */
     fun onFocusUnlock()
+
+    /** Manual focus fraction changed (0.0 = inf, 1.0 = macro). */
+    fun onManualFocusChanged(fraction: Float)
+
+    /** Reset manual focus / AE/AF lock back to auto. */
+    fun onFocusReset()
     fun onShutterClick()
     fun onSwitchLens()
     /** Opens the phone's gallery on the newest picture. */
@@ -201,6 +207,8 @@ class CameraController(
     private var lastSentEvSteps = 0
     private val physicalLenses = mutableListOf<String>()
     private var currentLens = "0"
+    private var onTele = false
+    private var teleLensId: String? = "3"
 
     private var started = false
 
@@ -829,13 +837,31 @@ class CameraController(
         val clamped = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (!force && kotlin.math.abs(clamped - state.zoom) < 0.005f) return
 
+        val prevZoom = state.zoom
         update { it.copy(zoom = clamped) }
 
-        // Tele assist: cross the 2x threshold with telephoto enabled and hand the
-        // session to the physical tele lens; fall back to the main sensor below it.
-        if (state.telephoto) {
-            if (clamped > TELE_THRESHOLD && !onTele) switchToTele()
-            else if (clamped <= TELE_THRESHOLD && onTele) switchToMain()
+        // Lens switching:
+        // Ultra-wide (<0.9x): switch to ultra-wide lens "2"
+        // Telephoto (>=2.0x with telephoto enabled): switch to tele lens "3"
+        // Otherwise: main camera "0" / "5"
+        if (clamped < 0.9f) {
+            if (onTele) onTele = false
+            try {
+                service?.setPhysicalLens("2")
+            } catch (e: RemoteException) {
+                Log.w(TAG, "switch to UW failed")
+            }
+        } else if (state.telephoto && clamped >= TELE_THRESHOLD) {
+            if (!onTele) switchToTele()
+        } else {
+            if (onTele) switchToMain()
+            else if (prevZoom < 0.9f) {
+                try {
+                    service?.setPhysicalLens("0")
+                } catch (e: RemoteException) {
+                    Log.w(TAG, "revert from UW failed")
+                }
+            }
         }
 
         // Pinch produces dozens of events per gesture — only forward real changes.
@@ -850,11 +876,10 @@ class CameraController(
     }
 
     private fun switchToTele() {
-        val tele = teleLensId ?: return
         onTele = true
         try {
-            service?.setPhysicalLens(tele)
-            Log.i(TAG, "tele lens $tele engaged")
+            service?.setPhysicalLens("3")
+            Log.i(TAG, "tele lens 3 engaged")
         } catch (e: RemoteException) {
             Log.w(TAG, "tele switch failed")
             onTele = false
@@ -864,7 +889,8 @@ class CameraController(
     private fun switchToMain() {
         onTele = false
         try {
-            service?.setPhysicalLens(currentLens)
+            service?.setPhysicalLens("0")
+            Log.i(TAG, "main lens engaged")
         } catch (e: RemoteException) {
             Log.w(TAG, "main lens revert failed")
         }
@@ -942,7 +968,7 @@ class CameraController(
                 2,
                 HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
             ).also { reader ->
-                reader.setOnImageAvailableListener({ r -> onStillImage(r) }, handler)
+                reader.setOnImageAvailableListener({ r -> onStillImage(r) }, readerHandler)
             }
             startStereoSession()
         } catch (t: Throwable) {
@@ -951,10 +977,14 @@ class CameraController(
     }
 
     override fun onTelephotoToggle() {
-        update { it.copy(telephoto = !it.telephoto) }
+        val next = !state.telephoto
+        update { it.copy(telephoto = next) }
         haptic()
-        // Apply immediately if the current zoom already qualifies.
-        if (state.telephoto && state.zoom > TELE_THRESHOLD) switchToTele()
+        if (next && state.zoom >= TELE_THRESHOLD) {
+            switchToTele()
+        } else if (!next && onTele) {
+            switchToMain()
+        }
     }
 
     override fun onFrameRatioCycle() {
@@ -971,11 +1001,41 @@ class CameraController(
     override fun onFocusLock() {
         if (state.aeAfLocked) return
         update { it.copy(aeAfLocked = true) }
+        try {
+            service?.setAfLock(true)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "setAfLock(true) failed")
+        }
     }
 
     override fun onFocusUnlock() {
         if (!state.aeAfLocked) return
         update { it.copy(aeAfLocked = false) }
+        try {
+            service?.setAfLock(false)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "setAfLock(false) failed")
+        }
+    }
+
+    override fun onManualFocusChanged(fraction: Float) {
+        val clamped = fraction.coerceIn(0f, 1f)
+        update { it.copy(manualFocus = true, focusFraction = clamped) }
+        try {
+            service?.setManualFocus(clamped)
+        } catch (e: RemoteException) {
+            Log.w(TAG, "setManualFocus failed")
+        }
+    }
+
+    override fun onFocusReset() {
+        update { it.copy(manualFocus = false, aeAfLocked = false, focusFraction = 0f) }
+        haptic()
+        try {
+            service?.resetFocus()
+        } catch (e: RemoteException) {
+            Log.w(TAG, "resetFocus failed")
+        }
     }
 
     override fun onGridToggle() {
@@ -1064,6 +1124,9 @@ class CameraController(
      * so the tap has to be expressed in the same space before it reaches the HAL.
      */
     override fun onFocusAt(normalisedX: Float, normalisedY: Float) {
+        if (state.manualFocus) {
+            update { it.copy(manualFocus = false) }
+        }
         update { it.copy(focusNonce = it.focusNonce + 1) }
         haptic()
         val u = normalisedX.coerceIn(0f, 1f)

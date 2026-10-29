@@ -64,6 +64,7 @@ import com.zenith.auxcam.DeviceProfile
 import com.zenith.auxcam.ui.components.BottomBar
 import com.zenith.auxcam.ui.components.ProSheet
 import com.zenith.auxcam.ui.components.QuickApertureRow
+import com.zenith.auxcam.ui.components.QuickFocusRow
 import com.zenith.auxcam.ui.components.TopBar
 import com.zenith.auxcam.ui.components.Viewfinder
 import com.zenith.auxcam.ui.components.ZoomChips
@@ -243,7 +244,7 @@ fun CameraScreen(
                             // Consuming stops the chip underneath from also reading
                             // this as a press, so a scrub never selects a stop.
                             change.consume()
-                            actions.onZoomDrag(dragAmount.x)
+                            actions.onZoomDrag(dragAmount)
                         }
                     }
                     .onGloballyPositioned { coords ->
@@ -269,7 +270,21 @@ fun CameraScreen(
                 contentAlignment = Alignment.Center,
             ) {
                 androidx.compose.animation.AnimatedVisibility(
-                    visible = state.quickApertureVisible,
+                    visible = state.quickFocusVisible,
+                    enter = fadeIn(tween(170)) + slideInVertically(
+                        animationSpec = CameraMotion.slide<IntOffset>(),
+                        initialOffsetY = { it / 3 },
+                    ),
+                    exit = fadeOut(tween(120)) + slideOutVertically(
+                        animationSpec = tween<IntOffset>(140),
+                        targetOffsetY = { it / 3 },
+                    ),
+                ) {
+                    QuickFocusRow(state = state, actions = actions)
+                }
+
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = state.quickApertureVisible && !state.quickFocusVisible,
                     enter = fadeIn(tween(170)) + slideInVertically(
                         animationSpec = CameraMotion.slide<IntOffset>(),
                         initialOffsetY = { it / 3 },

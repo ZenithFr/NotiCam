@@ -36,6 +36,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
@@ -50,6 +51,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -594,6 +596,45 @@ fun ProSheet(
         }
 
         Spacer(Modifier.height(16.dp))
+
+        // ── Focus: Manual slider with Reset chip ───────────────────────────
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = NotiIcons.Focus,
+                contentDescription = "Focus",
+                tint = if (state.manualFocus) CameraColors.Yellow else CameraColors.LabelSecondary,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(7.dp))
+            Text("FOCUS", style = CameraType.Section, color = CameraColors.LabelTertiary)
+            Spacer(Modifier.weight(1f))
+            Text(
+                state.focusLabel,
+                style = CameraType.Value,
+                color = if (state.manualFocus) CameraColors.Yellow else CameraColors.Label,
+            )
+            if (state.manualFocus || state.aeAfLocked) {
+                Spacer(Modifier.width(8.dp))
+                ResetChip(onClick = actions::onFocusReset)
+            }
+        }
+        IosSlider(
+            value = state.focusFraction,
+            valueRange = 0f..1f,
+            onValueChange = actions::onManualFocusChanged,
+            modifier = Modifier.padding(top = 2.dp),
+        )
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text("∞", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("2.0M", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("0.5M", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Spacer(Modifier.weight(1f))
+            Text("MACRO", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+        }
+
+        Spacer(Modifier.height(16.dp))
         Box(
             Modifier
                 .fillMaxWidth()
@@ -840,6 +881,90 @@ fun QuickApertureRow(
             modifier = Modifier.width(56.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.End,
         )
+    }
+}
+
+/** Reset chip with tactile press animation and yellow accent when active. */
+@Composable
+fun ResetChip(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val haptics = rememberCameraHaptics()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.92f else 1f,
+        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
+        label = "reset-press",
+    )
+
+    Box(
+        modifier = modifier
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .clip(RoundedCornerShape(10.dp))
+            .background(CameraColors.Yellow.copy(alpha = 0.20f))
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = {
+                    haptics.tick()
+                    onClick()
+                },
+            )
+            .padding(horizontal = 7.dp, vertical = 3.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "RESET",
+            style = CameraType.Caption,
+            color = CameraColors.Yellow,
+        )
+    }
+}
+
+/** Manual focus bar with a reset chip, slider, and distance label. */
+@Composable
+fun QuickFocusRow(
+    state: CameraUiState,
+    actions: CameraActions,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = NotiIcons.Focus,
+            contentDescription = "Manual Focus",
+            tint = if (state.manualFocus) CameraColors.Yellow else CameraColors.LabelSecondary,
+            modifier = Modifier.size(15.dp),
+        )
+        Spacer(Modifier.width(6.dp))
+        Box(Modifier.weight(1f)) {
+            IosSlider(
+                value = state.focusFraction,
+                valueRange = 0f..1f,
+                onValueChange = actions::onManualFocusChanged,
+            )
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = state.focusLabel,
+            style = CameraType.Value,
+            color = if (state.manualFocus) CameraColors.Yellow else CameraColors.Label,
+            modifier = Modifier.width(54.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.End,
+        )
+        if (state.manualFocus || state.aeAfLocked) {
+            Spacer(Modifier.width(6.dp))
+            ResetChip(onClick = actions::onFocusReset)
+        }
     }
 }
 

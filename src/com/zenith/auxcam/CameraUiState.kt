@@ -77,6 +77,11 @@ data class CameraUiState(
     /** AE/AF held: the reticle becomes a lock badge until the user taps again. */
     val aeAfLocked: Boolean = false,
 
+    /** Manual focus mode active. */
+    val manualFocus: Boolean = false,
+    /** 0.0 = infinity, 1.0 = closest / macro. */
+    val focusFraction: Float = 0f,
+
     val proSheetOpen: Boolean = false,
 
     val status: String = "",
@@ -138,4 +143,17 @@ data class CameraUiState(
 
     val quickApertureVisible: Boolean
         get() = mode == CaptureMode.Portrait && !proSheetOpen
+
+    val focusLabel: String
+        get() {
+            if (!manualFocus) return if (aeAfLocked) "LOCKED" else "AUTO"
+            if (focusFraction <= 0.03f) return "∞"
+            if (focusFraction >= 0.97f) return "MACRO"
+            val distM = 0.1f + (1f - focusFraction) * 4.9f
+            return if (distM >= 1.0f) String.format(java.util.Locale.US, "%.1fM", distM)
+                   else String.format(java.util.Locale.US, "%.0fCM", distM * 100f)
+        }
+
+    val quickFocusVisible: Boolean
+        get() = manualFocus || (mode == CaptureMode.Pro && !proSheetOpen)
 }
