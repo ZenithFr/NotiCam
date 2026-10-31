@@ -84,9 +84,11 @@ private:
     VkDeviceMemory mUploadStagingMem{VK_NULL_HANDLE}, mReadbackMem{VK_NULL_HANDLE};
     VkQueryPool mStillQueryPool{VK_NULL_HANDLE};
     VkFence mStillFence{VK_NULL_HANDLE};
+    VkFence mStillSliceFence{VK_NULL_HANDLE};
     VkSampler mStillSampler{VK_NULL_HANDLE};
     VkCommandPool mStillCmdPool{VK_NULL_HANDLE};
     VkCommandBuffer mStillCmd{VK_NULL_HANDLE};
+    VkCommandBuffer mStillCmdSlices[16]{VK_NULL_HANDLE};
     VkDescriptorPool mStillDescPool{VK_NULL_HANDLE};
     VkDescriptorSetLayout mDslCoc{VK_NULL_HANDLE}, mDslGather{VK_NULL_HANDLE}, mDslComp{VK_NULL_HANDLE};
     VkPipelineLayout mPlCoc{VK_NULL_HANDLE}, mPlGather{VK_NULL_HANDLE}, mPlComp{VK_NULL_HANDLE};

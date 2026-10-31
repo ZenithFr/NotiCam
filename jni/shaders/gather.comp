@@ -18,6 +18,7 @@ layout(push_constant) uniform GatherPushConstants {
     uint numTaps;        // 16 for preview, 32 for still
     float specularBoost; // e.g. 1.2
     float maxRadiusPx;   // 20.0 for preview (720w), 80.0 for still (2040w)
+    uint yOffset;        // Vertical tile offset in px
 } pc;
 
 const float GOLDEN_ANGLE = 2.39996323;
@@ -39,8 +40,8 @@ vec3 linearToSrgb(vec3 c) {
 }
 
 void main() {
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= pc.width || coord.y >= pc.height) {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y + pc.yOffset);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) {
         return;
     }
 
@@ -58,14 +59,22 @@ void main() {
         return;
     }
 
+    // Radius-adaptive taps (H.1c):
+    // r <= 8 px: keep 32 taps (fine detail)
+    // r > 8 px: 16 taps with wider bilinear footprint (cuts bandwidth & latency in half)
+    uint actualTaps = pc.numTaps;
+    if (centerRadius > 8.0) {
+        actualTaps = min(pc.numTaps, 16u);
+    }
+
     vec3 accumColor = vec3(0.0);
     float accumWeight = 0.0;
-    float nTaps = float(pc.numTaps);
+    float nTaps = float(actualTaps);
 
     // Per-pixel spiral phase offset (jitter eliminates discrete concentric discs)
     float phase = hash21(vec2(coord)) * 6.2831853;
 
-    for (uint i = 0; i < pc.numTaps; ++i) {
+    for (uint i = 0; i < actualTaps; ++i) {
         float fi = float(i);
         float theta = fi * GOLDEN_ANGLE + phase;
         float r = sqrt((fi + 0.5) / nTaps);

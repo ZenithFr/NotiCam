@@ -16,10 +16,11 @@ layout(push_constant) uniform CompositePushConstants {
     uint outWidth;       // present surface width in px
     uint outHeight;      // present surface height in px
     int rotate90;        // 1 = present the landscape sensor upright (portrait)
+    uint yOffset;        // vertical tile offset in px
 } pc;
 
 void main() {
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 coord = ivec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y + pc.yOffset);
     if (coord.x >= int(pc.outWidth) || coord.y >= int(pc.outHeight)) {
         return;
     }

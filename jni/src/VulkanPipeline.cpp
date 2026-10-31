@@ -30,6 +30,7 @@ struct GatherPushConstants {
     uint32_t numTaps;
     float specularBoost;
     float maxRadiusPx;
+    uint32_t yOffset;
 };
 
 // Presentation orientation of the *preview*.
@@ -51,6 +52,7 @@ struct CompositePushConstants {
     uint32_t outWidth;
     uint32_t outHeight;
     int32_t rotate90;
+    uint32_t yOffset;
 };
 
 static std::vector<char> loadSpvFile(const char* filename) {
@@ -368,10 +370,6 @@ bool VulkanPipeline::recreateSwapchain() {
         vkDestroySwapchainKHR(mDevice, mSwapchain, nullptr);
         mSwapchain = VK_NULL_HANDLE;
     }
-    if (mSurface != VK_NULL_HANDLE) {
-        vkDestroySurfaceKHR(mInstance, mSurface, nullptr);
-        mSurface = VK_NULL_HANDLE;
-    }
     mSwapchainInitialized = false;
     mCurrentFrame = 0;
 
@@ -437,17 +435,19 @@ void VulkanPipeline::updateSurface(ANativeWindow* newWindow, uint32_t width, uin
         vkDestroySwapchainKHR(mDevice, mSwapchain, nullptr);
         mSwapchain = VK_NULL_HANDLE;
     }
-    if (mSurface != VK_NULL_HANDLE) {
-        vkDestroySurfaceKHR(mInstance, mSurface, nullptr);
-        mSurface = VK_NULL_HANDLE;
-    }
-    if (mWindow) {
-        ANativeWindow_release(mWindow);
-        mWindow = nullptr;
-    }
-    mWindow = newWindow;
-    if (mWindow) {
-        ANativeWindow_acquire(mWindow);
+    if (newWindow != mWindow) {
+        if (mSurface != VK_NULL_HANDLE) {
+            vkDestroySurfaceKHR(mInstance, mSurface, nullptr);
+            mSurface = VK_NULL_HANDLE;
+        }
+        if (mWindow) {
+            ANativeWindow_release(mWindow);
+            mWindow = nullptr;
+        }
+        mWindow = newWindow;
+        if (mWindow) {
+            ANativeWindow_acquire(mWindow);
+        }
     }
     mWidth = width;
     mHeight = height;
@@ -643,29 +643,86 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     const float cy = mStillH * 0.5f;
     const float radiusFg = mStillW * 0.24f;
 
+    const float s1 = (mOpticalParams.s1FocusM > 0.05f) ? mOpticalParams.s1FocusM : 0.6f;
+    static constexpr uint8_t kMatteThresholdByte = 166; // 0.65f * 255 = 165.75 -> 166
+
     if (hasDepthSignal) {
+        // H.1a: Spatial Coherence Depth Preprocessing (448x288 depth grid)
+        // 1. Build metric depth grid & initial validity mask
+        std::vector<float> gridDepth(depthW * depthH, 10.0f);
+        std::vector<uint8_t> gridValid(depthW * depthH, 0);
+        for (uint32_t i = 0; i < depthW * depthH; ++i) {
+            uint8_t y8 = depthY8Buffer[i];
+            if (y8 > 0) {
+                float disp = static_cast<float>(y8);
+                float zm = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
+                gridDepth[i] = std::clamp(zm, 0.25f, 10.0f);
+                gridValid[i] = 1;
+            }
+        }
+
+        // 2. Dilate invalid mask by 2 px to protect dropout edge boundaries
+        std::vector<uint8_t> dilatedValid = gridValid;
+        for (uint32_t dy = 0; dy < depthH; ++dy) {
+            for (uint32_t dx = 0; dx < depthW; ++dx) {
+                if (gridValid[dy * depthW + dx] == 0) {
+                    for (int r = -2; r <= 2; ++r) {
+                        int ny = (int)dy + r;
+                        if (ny < 0 || ny >= (int)depthH) continue;
+                        for (int c = -2; c <= 2; ++c) {
+                            int nx = (int)dx + c;
+                            if (nx >= 0 && nx < (int)depthW) {
+                                dilatedValid[ny * depthW + nx] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Inpaint invalid CoC / depth:
+        // Inside subject matte -> inpaint from nearest valid foreground depth (or s1)
+        // Outside subject matte -> full far-field (10.0m, zero under-blur)
+        for (uint32_t dy = 0; dy < depthH; ++dy) {
+            for (uint32_t dx = 0; dx < depthW; ++dx) {
+                uint32_t idx = dy * depthW + dx;
+                if (dilatedValid[idx] == 0) {
+                    bool isForeground = false;
+                    if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
+                        uint32_t aY = (dy * alphaH) / depthH;
+                        uint32_t aX = (dx * alphaW) / depthW;
+                        if (alphaMatte[aY * alphaW + aX] >= kMatteThresholdByte) {
+                            isForeground = true;
+                        }
+                    }
+                    if (isForeground) {
+                        float nearestVal = s1;
+                        bool found = false;
+                        for (int rad = 3; rad <= 12 && !found; rad += 2) {
+                            for (int ny = std::max(0, (int)dy - rad); ny <= std::min((int)depthH - 1, (int)dy + rad) && !found; ++ny) {
+                                for (int nx = std::max(0, (int)dx - rad); nx <= std::min((int)depthW - 1, (int)dx + rad); ++nx) {
+                                    if (gridValid[ny * depthW + nx]) {
+                                        nearestVal = gridDepth[ny * depthW + nx];
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        gridDepth[idx] = nearestVal;
+                    } else {
+                        gridDepth[idx] = 10.0f; // Asymptotic far-field
+                    }
+                }
+            }
+        }
+
+        // 4. Map inpainted metric depth to staging buffer
         for (uint32_t y = 0; y < mStillH; ++y) {
             uint32_t srcY = (y * depthH) / mStillH;
             for (uint32_t x = 0; x < mStillW; ++x) {
                 uint32_t srcX = (x * depthW) / mStillW;
-                uint8_t y8 = depthY8Buffer[srcY * depthW + srcX];
-                float z_m;
-                if (y8 == 0) {
-                    bool isForeground = false;
-                    if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
-                        uint32_t aY = (y * alphaH) / mStillH;
-                        uint32_t aX = (x * alphaW) / mStillW;
-                        if (alphaMatte[aY * alphaW + aX] > 100) {
-                            isForeground = true;
-                        }
-                    }
-                    z_m = isForeground ? 0.6f : 2.5f;
-                } else {
-                    float disp = static_cast<float>(y8);
-                    z_m = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
-                    if (z_m < 0.25f) z_m = 0.25f;
-                    if (z_m > 10.0f) z_m = 10.0f;
-                }
+                float z_m = gridDepth[srcY * depthW + srcX];
                 depthDst[y * mStillW + x] = z_m;
                 float a = (z_m <= 0.9f) ? 1.0f : (z_m >= 1.6f ? 0.0f : (1.6f - z_m) / 0.7f);
                 alphaDst[y * mStillW + x] = static_cast<uint8_t>(a * 255.0f);
@@ -839,10 +896,10 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
-    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, (float)mStillW };
-    AlphaPushConstants pcAlpha{ mStillW, mStillH, 0.6f, (hasRealAlpha ? 0u : 1u) };
-    GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
-    CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90 };
+    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, (float)mStillW };
+    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u) };
+    GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f, 0 };
+    CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90, 0 };
 
     VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
 
@@ -1158,9 +1215,10 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
         vkBindBufferMemory(mDevice, mReadbackBuffer, mReadbackMem, 0);
     }
 
-    // Still completion fence
+    // Still completion fence & slice fence for non-blocking tiled interleaving
     VkFenceCreateInfo fInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0 };
     vkCreateFence(mDevice, &fInfo, nullptr, &mStillFence);
+    vkCreateFence(mDevice, &fInfo, nullptr, &mStillSliceFence);
 
     // Timestamp query pool
     VkQueryPoolCreateInfo qpInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, nullptr, 0, VK_QUERY_TYPE_TIMESTAMP, 8, 0 };
@@ -1175,7 +1233,7 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     sampInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     vkCreateSampler(mDevice, &sampInfo, nullptr, &mStillSampler);
 
-    // Command pool & buffer
+    // Command pool & buffers (16 command buffers for sliced gather and composite)
     VkCommandPoolCreateInfo cpInfo{};
     cpInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     cpInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -1186,8 +1244,9 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     cbAlloc.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cbAlloc.commandPool = mStillCmdPool;
     cbAlloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbAlloc.commandBufferCount = 1;
-    vkAllocateCommandBuffers(mDevice, &cbAlloc, &mStillCmd);
+    cbAlloc.commandBufferCount = 16;
+    vkAllocateCommandBuffers(mDevice, &cbAlloc, mStillCmdSlices);
+    mStillCmd = mStillCmdSlices[0];
 
     // Descriptor Pool
     VkDescriptorPoolSize poolSizes[2]{};
@@ -1490,21 +1549,68 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     const float cy = mStillGatherH * 0.5f;
     const float radiusFg = mStillGatherW * 0.24f;
 
+    const float s1Still = (mOpticalParams.s1FocusM > 0.05f) ? mOpticalParams.s1FocusM : 0.6f;
+
     if (hasDepthSignal) {
+        std::vector<float> gridDepth(depthW * depthH, 10.0f);
+        std::vector<uint8_t> gridValid(depthW * depthH, 0);
+        for (uint32_t i = 0; i < depthW * depthH; ++i) {
+            uint8_t y8 = depthY8Buffer[i];
+            if (y8 > 0) {
+                float disp = static_cast<float>(y8);
+                float zm = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
+                gridDepth[i] = std::clamp(zm, 0.25f, 10.0f);
+                gridValid[i] = 1;
+            }
+        }
+
+        // Dilate invalid mask 2 px
+        std::vector<uint8_t> dilatedValid = gridValid;
+        for (uint32_t dy = 0; dy < depthH; ++dy) {
+            for (uint32_t dx = 0; dx < depthW; ++dx) {
+                if (gridValid[dy * depthW + dx] == 0) {
+                    for (int r = -2; r <= 2; ++r) {
+                        int ny = (int)dy + r;
+                        if (ny < 0 || ny >= (int)depthH) continue;
+                        for (int c = -2; c <= 2; ++c) {
+                            int nx = (int)dx + c;
+                            if (nx >= 0 && nx < (int)depthW) {
+                                dilatedValid[ny * depthW + nx] = 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Inpaint invalid pixels
+        for (uint32_t dy = 0; dy < depthH; ++dy) {
+            for (uint32_t dx = 0; dx < depthW; ++dx) {
+                uint32_t idx = dy * depthW + dx;
+                if (dilatedValid[idx] == 0) {
+                    float nearestVal = 10.0f; // Default far field
+                    bool found = false;
+                    for (int rad = 3; rad <= 12 && !found; rad += 2) {
+                        for (int ny = std::max(0, (int)dy - rad); ny <= std::min((int)depthH - 1, (int)dy + rad) && !found; ++ny) {
+                            for (int nx = std::max(0, (int)dx - rad); nx <= std::min((int)depthW - 1, (int)dx + rad); ++nx) {
+                                if (gridValid[ny * depthW + nx]) {
+                                    nearestVal = gridDepth[ny * depthW + nx];
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    gridDepth[idx] = found ? nearestVal : 10.0f;
+                }
+            }
+        }
+
         for (uint32_t y = 0; y < mStillGatherH; ++y) {
             uint32_t srcY = (y * depthH) / mStillGatherH;
             for (uint32_t x = 0; x < mStillGatherW; ++x) {
                 uint32_t srcX = (x * depthW) / mStillGatherW;
-                uint8_t y8 = depthY8Buffer[srcY * depthW + srcX];
-                float z_m;
-                if (y8 == 0) {
-                    z_m = 0.6f; // Missing depth on still defaults to subject focus plane (no black holes)
-                } else {
-                    float disp = static_cast<float>(y8);
-                    z_m = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
-                    if (z_m < 0.25f) z_m = 0.25f;
-                    if (z_m > 10.0f) z_m = 10.0f;
-                }
+                float z_m = gridDepth[srcY * depthW + srcX];
                 depthDst[y * mStillGatherW + x] = z_m;
                 float a = (z_m <= 0.9f) ? 1.0f : (z_m >= 1.6f ? 0.0f : (1.6f - z_m) / 0.7f);
                 alphaDst[y * mStillGatherW + x] = static_cast<uint8_t>(a * 255.0f);
@@ -1593,21 +1699,16 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
 
     vkUpdateDescriptorSets(mDevice, 8, writes, 0, nullptr);
 
-    // 4. Record command buffer
-    VkResult resReset = vkResetCommandBuffer(mStillCmd, 0);
-    if (resReset != VK_SUCCESS) {
-        LOGE("mStillCmd vkResetCommandBuffer failed: %d", resReset);
-    }
-    VkCommandBufferBeginInfo bInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
-    VkResult resBegin = vkBeginCommandBuffer(mStillCmd, &bInfo);
-    if (resBegin != VK_SUCCESS) {
-        LOGE("mStillCmd vkBeginCommandBuffer failed: %d", resBegin);
-    }
+    uint32_t gxWork = (mStillGatherW + 15) / 16;
+    uint32_t gyWork = (mStillGatherH + 15) / 16;
 
-    vkCmdResetQueryPool(mStillCmd, mStillQueryPool, 0, 8);
-    vkCmdWriteTimestamp(mStillCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mStillQueryPool, 0);
+    CocPushConstants pcCoc{ mStillGatherW, mStillGatherH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1Still, targetFarFieldPx, (float)mStillGatherW };
+    GatherPushConstants pcGather{ mStillGatherW, mStillGatherH, 32, 1.2f, 40.0f, 0 };
+    CompositePushConstants pcComp{ mFullW, mFullH, 0, 0 };
 
-    auto transition = [&](VkImage img, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAcc, VkAccessFlags dstAcc, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+    VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
+
+    auto transitionCmd = [&](VkCommandBuffer cmd, VkImage img, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAcc, VkAccessFlags dstAcc, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
         VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b.oldLayout = oldLayout;
@@ -1620,90 +1721,152 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         b.subresourceRange.layerCount = 1;
         b.srcAccessMask = srcAcc;
         b.dstAccessMask = dstAcc;
-        vkCmdPipelineBarrier(mStillCmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+        vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
     };
 
-    transition(importedImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgDepthStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    transition(mImgAlphaStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    transition(mImgCocStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgBlurredStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgOutFull, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    VkCommandBufferBeginInfo bInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 1: Setup & CoC Pass (cmd 0)
+    // ─────────────────────────────────────────────────────────────────────────
+    VkCommandBuffer cmd0 = mStillCmdSlices[0];
+    vkResetCommandBuffer(cmd0, 0);
+    vkBeginCommandBuffer(cmd0, &bInfo);
+    vkCmdResetQueryPool(cmd0, mStillQueryPool, 0, 8);
+    vkCmdWriteTimestamp(cmd0, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mStillQueryPool, 0);
+
+    transitionCmd(cmd0, importedImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transitionCmd(cmd0, mImgDepthStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    transitionCmd(cmd0, mImgAlphaStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    transitionCmd(cmd0, mImgCocStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transitionCmd(cmd0, mImgBlurredStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transitionCmd(cmd0, mImgOutFull, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     VkBufferImageCopy copyDepthRegion{};
     copyDepthRegion.bufferOffset = 0;
     copyDepthRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     copyDepthRegion.imageExtent = { mStillGatherW, mStillGatherH, 1 };
-    vkCmdCopyBufferToImage(mStillCmd, mUploadStagingBufferStill, mImgDepthStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyDepthRegion);
+    vkCmdCopyBufferToImage(cmd0, mUploadStagingBufferStill, mImgDepthStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyDepthRegion);
 
     VkBufferImageCopy copyAlphaRegion{};
     copyAlphaRegion.bufferOffset = mStillGatherW * mStillGatherH * sizeof(float);
     copyAlphaRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     copyAlphaRegion.imageExtent = { mStillGatherW, mStillGatherH, 1 };
-    vkCmdCopyBufferToImage(mStillCmd, mUploadStagingBufferStill, mImgAlphaStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaRegion);
+    vkCmdCopyBufferToImage(cmd0, mUploadStagingBufferStill, mImgAlphaStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaRegion);
 
-    transition(mImgDepthStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgAlphaStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-
-    uint32_t gxWork = (mStillGatherW + 15) / 16;
-    uint32_t gyWork = (mStillGatherH + 15) / 16;
-
-    CocPushConstants pcCoc{ mStillGatherW, mStillGatherH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, (float)mStillGatherW };
-    GatherPushConstants pcGather{ mStillGatherW, mStillGatherH, 32, 1.2f, 40.0f };
-    CompositePushConstants pcComp{ mFullW, mFullH, 0 };
-
-    VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
+    transitionCmd(cmd0, mImgDepthStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transitionCmd(cmd0, mImgAlphaStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     // CoC Pass (1020x768)
-    vkCmdBindPipeline(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeCoc);
-    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlCoc, 0, 1, &mSetCocStill, 0, nullptr);
-    vkCmdPushConstants(mStillCmd, mPlCoc, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CocPushConstants), &pcCoc);
-    vkCmdDispatch(mStillCmd, gxWork, gyWork, 1);
+    vkCmdBindPipeline(cmd0, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeCoc);
+    vkCmdBindDescriptorSets(cmd0, VK_PIPELINE_BIND_POINT_COMPUTE, mPlCoc, 0, 1, &mSetCocStill, 0, nullptr);
+    vkCmdPushConstants(cmd0, mPlCoc, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CocPushConstants), &pcCoc);
+    vkCmdDispatch(cmd0, gxWork, gyWork, 1);
+    vkCmdWriteTimestamp(cmd0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mStillQueryPool, 1);
+    vkCmdPipelineBarrier(cmd0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+    vkEndCommandBuffer(cmd0);
 
-    vkCmdWriteTimestamp(mStillCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mStillQueryPool, 1);
-    vkCmdPipelineBarrier(mStillCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+    auto tSubmit = std::chrono::high_resolution_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(mQueueMutex);
+        vkResetFences(mDevice, 1, &mStillSliceFence);
+        VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cmd0, 0, nullptr };
+        vkQueueSubmit(mComputeQueue, 1, &si, mStillSliceFence);
+    }
+    vkWaitForFences(mDevice, 1, &mStillSliceFence, VK_TRUE, UINT64_MAX);
 
-    // 32-tap Gather Pass (1020x768)
-    vkCmdBindPipeline(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
-    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGatherStill, 0, nullptr);
-    vkCmdPushConstants(mStillCmd, mPlGather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GatherPushConstants), &pcGather);
-    vkCmdDispatch(mStillCmd, gxWork, gyWork, 1);
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 2: Sliced Gather Pass (8 slices of 1020x96, cmd 1..8)
+    // ─────────────────────────────────────────────────────────────────────────
+    const uint32_t kGatherSlices = 8;
+    const uint32_t gatherSliceH = mStillGatherH / kGatherSlices; // 768 / 8 = 96
+    const uint32_t gyGatherSlice = (gatherSliceH + 15) / 16;     // 6 workgroups
 
-    vkCmdWriteTimestamp(mStillCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mStillQueryPool, 2);
-    vkCmdPipelineBarrier(mStillCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+    for (uint32_t s = 0; s < kGatherSlices; ++s) {
+        VkCommandBuffer gCmd = mStillCmdSlices[1 + s];
+        vkResetCommandBuffer(gCmd, 0);
+        vkBeginCommandBuffer(gCmd, &bInfo);
 
-    // Full-Res Composite Pass (4080x3072)
-    uint32_t gxFull = (mFullW + 15) / 16;
-    uint32_t gyFull = (mFullH + 15) / 16;
-    vkCmdBindPipeline(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
-    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetCompStill, 0, nullptr);
-    vkCmdPushConstants(mStillCmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CompositePushConstants), &pcComp);
-    vkCmdDispatch(mStillCmd, gxFull, gyFull, 1);
+        GatherPushConstants pcGatherSlice = pcGather;
+        pcGatherSlice.yOffset = s * gatherSliceH;
 
-    vkCmdWriteTimestamp(mStillCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mStillQueryPool, 3);
+        vkCmdBindPipeline(gCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
+        vkCmdBindDescriptorSets(gCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGatherStill, 0, nullptr);
+        vkCmdPushConstants(gCmd, mPlGather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GatherPushConstants), &pcGatherSlice);
+        vkCmdDispatch(gCmd, gxWork, gyGatherSlice, 1);
 
-    // Transition mImgOutFull to TRANSFER_SRC and copy to mReadbackBuffer
-    transition(mImgOutFull, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        if (s == kGatherSlices - 1) {
+            vkCmdWriteTimestamp(gCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mStillQueryPool, 2);
+            vkCmdPipelineBarrier(gCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+        }
+        vkEndCommandBuffer(gCmd);
+
+        {
+            std::lock_guard<std::mutex> lock(mQueueMutex);
+            vkResetFences(mDevice, 1, &mStillSliceFence);
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &gCmd, 0, nullptr };
+            vkQueueSubmit(mComputeQueue, 1, &si, mStillSliceFence);
+        }
+        vkWaitForFences(mDevice, 1, &mStillSliceFence, VK_TRUE, UINT64_MAX);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 3: Sliced Full-Res Composite Pass (4 slices of 4080x768, cmd 9..12)
+    // ─────────────────────────────────────────────────────────────────────────
+    const uint32_t kCompSlices = 4;
+    const uint32_t compSliceH = mFullH / kCompSlices;        // 3072 / 4 = 768
+    const uint32_t gxFull = (mFullW + 15) / 16;              // 255 workgroups
+    const uint32_t gyCompSlice = (compSliceH + 15) / 16;     // 48 workgroups
+
+    for (uint32_t s = 0; s < kCompSlices; ++s) {
+        VkCommandBuffer cCmd = mStillCmdSlices[9 + s];
+        vkResetCommandBuffer(cCmd, 0);
+        vkBeginCommandBuffer(cCmd, &bInfo);
+
+        CompositePushConstants pcCompSlice = pcComp;
+        pcCompSlice.yOffset = s * compSliceH;
+
+        vkCmdBindPipeline(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
+        vkCmdBindDescriptorSets(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetCompStill, 0, nullptr);
+        vkCmdPushConstants(cCmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CompositePushConstants), &pcCompSlice);
+        vkCmdDispatch(cCmd, gxFull, gyCompSlice, 1);
+
+        if (s == kCompSlices - 1) {
+            vkCmdWriteTimestamp(cCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mStillQueryPool, 3);
+        }
+        vkEndCommandBuffer(cCmd);
+
+        {
+            std::lock_guard<std::mutex> lock(mQueueMutex);
+            vkResetFences(mDevice, 1, &mStillSliceFence);
+            VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cCmd, 0, nullptr };
+            vkQueueSubmit(mComputeQueue, 1, &si, mStillSliceFence);
+        }
+        vkWaitForFences(mDevice, 1, &mStillSliceFence, VK_TRUE, UINT64_MAX);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 4: Readback Copy to Host Buffer (cmd 13)
+    // ─────────────────────────────────────────────────────────────────────────
+    VkCommandBuffer cmdCopy = mStillCmdSlices[13];
+    vkResetCommandBuffer(cmdCopy, 0);
+    vkBeginCommandBuffer(cmdCopy, &bInfo);
+
+    transitionCmd(cmdCopy, mImgOutFull, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
     VkBufferImageCopy copyOutRegion{};
     copyOutRegion.bufferOffset = 0;
     copyOutRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     copyOutRegion.imageExtent = { mFullW, mFullH, 1 };
-    vkCmdCopyImageToBuffer(mStillCmd, mImgOutFull, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyOutRegion);
+    vkCmdCopyImageToBuffer(cmdCopy, mImgOutFull, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyOutRegion);
+    vkCmdWriteTimestamp(cmdCopy, VK_PIPELINE_STAGE_TRANSFER_BIT, mStillQueryPool, 4);
+    vkEndCommandBuffer(cmdCopy);
 
-    vkCmdWriteTimestamp(mStillCmd, VK_PIPELINE_STAGE_TRANSFER_BIT, mStillQueryPool, 4);
-
-    VkResult resEnd = vkEndCommandBuffer(mStillCmd);
-    if (resEnd != VK_SUCCESS) {
-        LOGE("mStillCmd vkEndCommandBuffer failed: %d", resEnd);
-    }
-
-    // 5. Submit with mStillFence
-    vkResetFences(mDevice, 1, &mStillFence);
-    auto tSubmit = std::chrono::high_resolution_clock::now();
-    VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &mStillCmd, 0, nullptr };
+    // Final submission using mStillFence: Signals "COMPOSITE BUFFER COMPLETE"
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
+        vkResetFences(mDevice, 1, &mStillFence);
+        VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO, nullptr, 0, nullptr, nullptr, 1, &cmdCopy, 0, nullptr };
         VkResult resSubmit = vkQueueSubmit(mComputeQueue, 1, &si, mStillFence);
         if (resSubmit != VK_SUCCESS) {
             LOGE("mStillCmd vkQueueSubmit failed: %d", resSubmit);
@@ -1760,9 +1923,12 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     mYuvConverter->releaseImportedImage(importedImg, importedMem, importedView);
 
     if (outTimestamps != nullptr) {
+        struct timespec tsBoot{};
+        clock_gettime(CLOCK_BOOTTIME, &tsBoot);
+        int64_t bootNs = (int64_t)tsBoot.tv_sec * 1000000000LL + tsBoot.tv_nsec;
         outTimestamps[0] = std::chrono::duration_cast<std::chrono::nanoseconds>(tBufferComplete - tSubmit).count();
-        outTimestamps[1] = std::chrono::duration_cast<std::chrono::nanoseconds>(tBufferComplete.time_since_epoch()).count();
-        outTimestamps[2] = std::chrono::duration_cast<std::chrono::nanoseconds>(tFileClosed.time_since_epoch()).count();
+        outTimestamps[1] = bootNs;
+        outTimestamps[2] = bootNs;
     }
 
     return true;
@@ -1832,6 +1998,7 @@ void VulkanPipeline::destroy() {
         if (mReadbackBuffer != VK_NULL_HANDLE) vkDestroyBuffer(mDevice, mReadbackBuffer, nullptr);
         if (mReadbackMem != VK_NULL_HANDLE) vkFreeMemory(mDevice, mReadbackMem, nullptr);
         if (mStillFence != VK_NULL_HANDLE) vkDestroyFence(mDevice, mStillFence, nullptr);
+        if (mStillSliceFence != VK_NULL_HANDLE) vkDestroyFence(mDevice, mStillSliceFence, nullptr);
         if (mStillQueryPool != VK_NULL_HANDLE) vkDestroyQueryPool(mDevice, mStillQueryPool, nullptr);
         mStillBokehInitialized = false;
     }

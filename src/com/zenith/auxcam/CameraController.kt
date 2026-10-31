@@ -683,7 +683,8 @@ class CameraController(
                     outPath,
                     timestamps,
                 )
-                t4 = SystemClock.elapsedRealtimeNanos()
+                val fenceCompleteNs = timestamps[1]
+                t4 = if (fenceCompleteNs > 0L) fenceCompleteNs else SystemClock.elapsedRealtimeNanos()
                 Log.i("TIMING_FREEZE", "composite_complete: $t4 ns")
                 gpuElapsedNs = timestamps[0]
                 buffer.close()

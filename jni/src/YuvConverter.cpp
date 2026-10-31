@@ -62,7 +62,7 @@ bool YuvConverter::initConversionSampler() {
     convInfo.pNext = &extFormat;
     convInfo.format = VK_FORMAT_UNDEFINED;
     convInfo.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
-    convInfo.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+    convInfo.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
     convInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
     convInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
     convInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
@@ -206,7 +206,7 @@ bool YuvConverter::importHardwareBuffer(AHardwareBuffer* buffer, VkImage* outIma
         convInfo.pNext = &extFormat;
         convInfo.format = VK_FORMAT_UNDEFINED;
         convInfo.ycbcrModel = VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_709;
-        convInfo.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_NARROW;
+        convInfo.ycbcrRange = VK_SAMPLER_YCBCR_RANGE_ITU_FULL;
         convInfo.components.r = VK_COMPONENT_SWIZZLE_IDENTITY;
         convInfo.components.g = VK_COMPONENT_SWIZZLE_IDENTITY;
         convInfo.components.b = VK_COMPONENT_SWIZZLE_IDENTITY;
