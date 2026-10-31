@@ -614,6 +614,12 @@ class CameraController(
                 Log.w(TAG, "segmenter processFrame caught: ${t.message}")
             }
 
+            val triggerL8 = File(activity.getExternalFilesDir("diag"), "trigger_l8")
+            if (triggerL8.exists()) {
+                triggerL8.delete()
+                dumpPreviewDiagnostics(image)
+            }
+
             val buffer = image.hardwareBuffer
             if (buffer != null) {
                 try {
@@ -1520,9 +1526,12 @@ class CameraController(
             FileOutputStream(File(outDir, "fg_sanity_luma.png")).use {
                 lumaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
+            FileOutputStream(File(outDir, "luma_current.png")).use {
+                lumaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
             lumaBmp.recycle()
 
-            // 2. Save alpha_preview.png and fg_sanity_alpha.png
+            // 2. Save alpha_preview.png, fg_sanity_alpha.png, and alpha_stretched_binding2.png
             val alphaBmp = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
             val alphaPixels = IntArray(256 * 256)
             var fg045RawCount = 0
@@ -1540,6 +1549,9 @@ class CameraController(
                 alphaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
             FileOutputStream(File(outDir, "alpha_preview.png")).use {
+                alphaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            FileOutputStream(File(outDir, "alpha_stretched_binding2.png")).use {
                 alphaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
             alphaBmp.recycle()

@@ -292,6 +292,18 @@ class DualMatteSegmenter(private val context: Context) {
     fun processFrame(image: Image): Boolean {
         if (!isInitialized.get()) return false
 
+        // L.7 (a): Both interpreters must be non-null
+        if (interpLandscape == null || interpGeneral == null) {
+            if (!loggedFirstInferenceFailure) {
+                loggedFirstInferenceFailure = true
+                Log.e(
+                    TAG,
+                    "INFERENCE FAILURE (session first): (a) interpreter is null (landscape=${interpLandscape != null}, general=${interpGeneral != null}), returning false without updating matte"
+                )
+            }
+            return false
+        }
+
         val nowMs = SystemClock.elapsedRealtime()
         val yPlane = image.planes[0]
         val yBuffer = yPlane.buffer
@@ -326,11 +338,13 @@ class DualMatteSegmenter(private val context: Context) {
         // 3. Inference on Landscape
         val t0L = SystemClock.elapsedRealtimeNanos()
         var runOkL = false
+        var invokeFailedL = false
         try {
             inBufL.rewind(); outBufL.rewind()
             interpLandscape?.run(inBufL, outBufL)
             runOkL = true
         } catch (t: Throwable) {
+            invokeFailedL = true
             Log.w(TAG, "Landscape inference failed: ${t.message}")
         }
         val dtLMs = (SystemClock.elapsedRealtimeNanos() - t0L) / 1_000_000.0
@@ -338,6 +352,7 @@ class DualMatteSegmenter(private val context: Context) {
         val doStretch = STRETCH_MATTE || java.io.File("/sdcard/NotiCam/stretch_matte").exists()
 
         var readOkL = false
+        var readFailedL = false
         if (runOkL) {
             try {
                 // Dequantize landscape output to float probability
@@ -353,17 +368,19 @@ class DualMatteSegmenter(private val context: Context) {
                 upsampleLandscapeBilinear(probL, probUpsampledL)
                 readOkL = true
             } catch (t: Throwable) {
+                readFailedL = true
                 Log.w(TAG, "Landscape output read failed: ${t.message}")
             }
         }
 
-        // Return false on failure without upgrading or modifying matte
+        // L.7 (b)/(c): Return false on failure without upgrading or modifying matte
         if (!runOkL || !readOkL) {
             if (!loggedFirstInferenceFailure) {
                 loggedFirstInferenceFailure = true
+                val cause = if (invokeFailedL) "(b) invoke() threw exception" else "(c) output tensor read failed"
                 Log.e(
                     TAG,
-                    "INFERENCE FAILURE (session first): Landscape model failed (invoked=$runOkL, read=$readOkL), returning false without updating matte"
+                    "INFERENCE FAILURE (session first): Landscape model failed due to $cause, returning false without updating matte"
                 )
             }
             return false
@@ -378,17 +395,19 @@ class DualMatteSegmenter(private val context: Context) {
 
             val t0G = SystemClock.elapsedRealtimeNanos()
             var runOkG = false
+            var invokeFailedG = false
             try {
                 inBufG.rewind(); outBufG.rewind()
                 interpGeneral?.run(inBufG, outBufG)
                 runOkG = true
             } catch (t: Throwable) {
-                Log.w(TAG, "General inference failed: ${t.message}, falling back to FAST mode")
-                currentMode = TierMode.FAST
+                invokeFailedG = true
+                Log.w(TAG, "General inference failed: ${t.message}")
             }
             dtGMs = (SystemClock.elapsedRealtimeNanos() - t0G) / 1_000_000.0
 
             var readOkG = false
+            var readFailedG = false
             if (runOkG) {
                 try {
                     outBufG.rewind()
@@ -402,18 +421,27 @@ class DualMatteSegmenter(private val context: Context) {
                     }
                     readOkG = true
                 } catch (t: Throwable) {
+                    readFailedG = true
                     Log.w(TAG, "General output read failed: ${t.message}")
                 }
             }
 
-            if (runOkG && readOkG) {
-                // Pixel-max combine at common 256x256 resolution
-                for (i in 0 until 256 * 256) {
-                    probCombined[i] = Math.max(probUpsampledL[i], probG[i])
+            // L.7 (b)/(c): Check General model in DUAL mode
+            if (!runOkG || !readOkG) {
+                if (!loggedFirstInferenceFailure) {
+                    loggedFirstInferenceFailure = true
+                    val cause = if (invokeFailedG) "(b) invoke() threw exception" else "(c) output tensor read failed"
+                    Log.e(
+                        TAG,
+                        "INFERENCE FAILURE (session first): General model failed due to $cause, returning false without updating matte"
+                    )
                 }
-            } else {
-                // Fallback to landscape alone which was verified runOkL && readOkL
-                System.arraycopy(probUpsampledL, 0, probCombined, 0, 256 * 256)
+                return false
+            }
+
+            // Pixel-max combine at common 256x256 resolution
+            for (i in 0 until 256 * 256) {
+                probCombined[i] = Math.max(probUpsampledL[i], probG[i])
             }
         } else {
             // Fast mode: landscape alone

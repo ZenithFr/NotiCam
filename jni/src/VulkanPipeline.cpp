@@ -640,6 +640,33 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         }
     }
 
+    // L.12: Depth Signal Statistics (60 frames)
+    static uint32_t sL12FrameCount = 0;
+    if (sL12FrameCount < 60) {
+        uint32_t sampledGt5 = 0;
+        uint32_t validBytes = 0;
+        uint32_t totalDepthPx = depthW * depthH;
+        if (depthY8Buffer != nullptr && totalDepthPx > 0) {
+            for (uint32_t i = 0; i < totalDepthPx; i += 16) {
+                if (depthY8Buffer[i] > 5) sampledGt5++;
+            }
+            for (uint32_t i = 0; i < totalDepthPx; ++i) {
+                if (depthY8Buffer[i] > 0) validBytes++;
+            }
+        }
+        float validFrac = (totalDepthPx > 0) ? (static_cast<float>(validBytes) / totalDepthPx) : 0.0f;
+        const char* branch = hasDepthSignal ? "real-depth" : "ellipse";
+
+        uint32_t keyerAlphaLt005 = 0;
+        for (uint32_t i = 0; i < alphaLowSize; ++i) {
+            if (alphaLowDst[i] < 13) keyerAlphaLt005++;
+        }
+
+        LOGI("L12_STATS: frame=%u sampledGt5=%u validBytes=%u validFrac=%.4f branch=%s keyerAlphaLt005=%u",
+             sL12FrameCount + 1, sampledGt5, validBytes, validFrac, branch, keyerAlphaLt005);
+        sL12FrameCount++;
+    }
+
     const float cx = mStillW * 0.5f;
     const float cy = mStillH * 0.5f;
     const float radiusFg = mStillW * 0.24f;
