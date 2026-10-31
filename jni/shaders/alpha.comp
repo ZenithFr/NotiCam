@@ -2,13 +2,13 @@
 layout(local_size_x = 16, local_size_y = 16) in;
 
 // Bindings:
-// 0: Sampled Luma texture (full res R8)
-// 1: Sampled Bilateral Slice Coefficients (RG16F, 96x128, bilinear sampler)
-// 2: Output Full-Res Alpha matte (R8)
+// 0: Sampled Sharp Color / Luma texture
+// 1: Sampled Low-Res Alpha Matte (256x256 soft probability from NPU)
+// 2: Output Refined Alpha Matte (R8)
 // 3: Metric Depth texture (R32F in meters)
 
 layout(binding = 0) uniform sampler2D uLuma;
-layout(binding = 1) uniform sampler2D uCoeffs;
+layout(binding = 1) uniform sampler2D uAlphaIn;
 layout(binding = 2, r8) writeonly uniform image2D uOutAlpha;
 layout(binding = 3) uniform sampler2D uDepth;
 
@@ -16,7 +16,7 @@ layout(push_constant) uniform AlphaPushConstants {
     uint width;
     uint height;
     float s1_focus_m;
-    uint stubAlphaMode; // 1 = depth-derived alpha (no NPU), 0 = NPU bilateral slice
+    uint stubAlphaMode; // 1 = depth-derived alpha (stub), 0 = guided filter real alpha
 } pc;
 
 void main() {
@@ -30,26 +30,34 @@ void main() {
     float alpha = 0.0;
     if (pc.stubAlphaMode != 0) {
         // Stub-Alpha Debug Mode: derive alpha directly from depth map (no NPU)
-        // Foreground (depth near focus plane S1) gets alpha=1.0 (sharp)
-        // Background (depth further than S1 + 0.15m) gets alpha=0.0 (blurred)
-        // Note: depth map has 77px vertical letterbox offset (crop_scale_y = 1.1667)
         vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
         float depth_m = texture(uDepth, depthUv).r;
         float s1 = max(pc.s1_focus_m, 0.1);
         alpha = 1.0 - smoothstep(s1 - 0.15, s1 + 0.15, depth_m);
     } else {
-        // Sample full-res luma
-        float luma = texture(uLuma, uv).r;
+        // ── Real Alpha Guided Filter Edge Refinement ───────────────────────
+        // 1. Bilinear sample of the 256x256 soft semantic probability matte
+        float baseAlpha = texture(uAlphaIn, uv).r;
 
-        // Sample bilateral slice coefficients via hardware bilinear filtering
-        // Note: Coefficients were inferred on 384x512 upright; map sensor UV to upright UV:
-        vec2 uprightUv = vec2(uv.y, 1.0 - uv.x);
-        vec2 coeffs = texture(uCoeffs, uprightUv).rg;
-        float a = coeffs.r;
-        float b = coeffs.g;
+        // 2. High-resolution luma guidance
+        vec4 sharpColor = texture(uLuma, uv);
+        float centerLuma = dot(sharpColor.rgb, vec3(0.299, 0.587, 0.114));
 
-        // Full-resolution guided filter reconstruction:
-        alpha = clamp(a * luma + b, 0.0, 1.0);
+        // 3. Fast 5-tap cross window for local luma mean & variance
+        vec2 texel = 1.0 / vec2(pc.width, pc.height);
+        float lumaT = dot(texture(uLuma, uv + vec2(0.0, -texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+        float lumaB = dot(texture(uLuma, uv + vec2(0.0,  texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+        float lumaL = dot(texture(uLuma, uv + vec2(-texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+        float lumaR = dot(texture(uLuma, uv + vec2( texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+
+        float meanLuma = (centerLuma + lumaT + lumaB + lumaL + lumaR) * 0.2;
+        float diff = centerLuma - meanLuma;
+
+        // Near soft segmentation boundaries (baseAlpha in [0.08, 0.92]), refine edges with luma contrast
+        float edgeGate = smoothstep(0.0, 0.35, baseAlpha) * (1.0 - smoothstep(0.65, 1.0, baseAlpha));
+        float refined = baseAlpha + diff * 1.2 * edgeGate;
+
+        alpha = clamp(refined, 0.0, 1.0);
     }
 
     imageStore(uOutAlpha, coord, vec4(alpha, 0.0, 0.0, 1.0));

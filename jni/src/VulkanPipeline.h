@@ -21,13 +21,14 @@ public:
         if (mNpuWorker) mNpuWorker->setThermalThrottled(throttled);
     }
 
-    // Renders one full frame: Camera YUV AHB + DPE Disparity Y8 -> Native Window
-    bool renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop, float targetFarFieldPx = 15.0f);
+    // Renders one full frame: Camera YUV AHB + DPE Disparity Y8 + Real Alpha Matte -> Native Window
+    bool renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, const uint8_t* alphaMatte = nullptr, uint32_t alphaW = 0, uint32_t alphaH = 0, float fStop = 1.88f, float targetFarFieldPx = 15.0f);
 
     struct OpticalParams {
         float focalLengthMm = 5.56f;
         float sensorWidthMm = 8.16f;
         float baseFStop = 1.88f;
+        float s1FocusM = 2.0f;
     } mOpticalParams;
 
     void setCameraOpticalParams(float focalMm, float sensorWidthMm, float baseFStop) {
@@ -91,6 +92,25 @@ private:
     VkPipelineLayout mPlCoc{VK_NULL_HANDLE}, mPlGather{VK_NULL_HANDLE}, mPlComp{VK_NULL_HANDLE};
     VkPipeline mPipeCoc{VK_NULL_HANDLE}, mPipeGather{VK_NULL_HANDLE}, mPipeComp{VK_NULL_HANDLE};
     VkDescriptorSet mSetCoc{VK_NULL_HANDLE}, mSetGather{VK_NULL_HANDLE}, mSetComp{VK_NULL_HANDLE};
+
+    // Guided Filter Pipeline (alpha.comp)
+    VkImage mImgAlphaLow{VK_NULL_HANDLE};
+    VkDeviceMemory mMemAlphaLow{VK_NULL_HANDLE};
+    VkImageView mViewAlphaLow{VK_NULL_HANDLE};
+    VkDescriptorSetLayout mDslAlpha{VK_NULL_HANDLE};
+    VkPipelineLayout mPlAlpha{VK_NULL_HANDLE};
+    VkPipeline mPipeAlpha{VK_NULL_HANDLE};
+    VkDescriptorSet mSetAlphaPreview{VK_NULL_HANDLE};
+
+    // Still Bokeh Dedicated Resources (prevents preview contention & eliminates viewfinder freeze)
+    uint32_t mStillGatherW{1020};
+    uint32_t mStillGatherH{768};
+    VkImage mImgDepthStill{VK_NULL_HANDLE}, mImgCocStill{VK_NULL_HANDLE}, mImgAlphaStill{VK_NULL_HANDLE}, mImgBlurredStill{VK_NULL_HANDLE};
+    VkDeviceMemory mMemDepthStill{VK_NULL_HANDLE}, mMemCocStill{VK_NULL_HANDLE}, mMemAlphaStill{VK_NULL_HANDLE}, mMemBlurredStill{VK_NULL_HANDLE};
+    VkImageView mViewDepthStill{VK_NULL_HANDLE}, mViewCocStill{VK_NULL_HANDLE}, mViewAlphaStill{VK_NULL_HANDLE}, mViewBlurredStill{VK_NULL_HANDLE};
+    VkBuffer mUploadStagingBufferStill{VK_NULL_HANDLE};
+    VkDeviceMemory mUploadStagingMemStill{VK_NULL_HANDLE};
+    VkDescriptorSet mSetCocStill{VK_NULL_HANDLE}, mSetGatherStill{VK_NULL_HANDLE}, mSetCompStill{VK_NULL_HANDLE};
 
     // Live Viewfinder Swapchain & Presentation Resources:
     bool mSwapchainInitialized{false};

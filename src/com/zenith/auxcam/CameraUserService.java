@@ -715,6 +715,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         }
 
         mShutterCommandNs = (shutterCommandNs > 0) ? shutterCommandNs : SystemClock.elapsedRealtimeNanos();
+        Log.i("TIMING_FREEZE", "capture_request_submitted: " + SystemClock.elapsedRealtimeNanos() + " ns");
         Log.i(TAG, "TIMING t0 (shutter_command): " + mShutterCommandNs + " ns. Dispatching STILL_CAPTURE request (highQualityNr=" + highQualityNr + ", enableZsl=" + enableZsl + ")...");
         try {
             CaptureRequest.Builder stillBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
@@ -752,6 +753,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     void onStillCompleted() {
+        Log.i("TIMING_FREEZE", "capture_session_completed: " + SystemClock.elapsedRealtimeNanos() + " ns");
         Log.i(TAG, "Still capture completed successfully without interrupting viewfinder stream!");
         if (mCallback != null) {
             try {

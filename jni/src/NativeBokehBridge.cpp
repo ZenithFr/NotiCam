@@ -41,7 +41,10 @@ Java_com_zenith_auxcam_MainActivity_nativeInitEngine(
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeRenderFrame(
-        JNIEnv* env, jobject thiz, jobject hardwareBufferObj, jbyteArray depthY8Array, jint depthW, jint depthH, jfloat fStop, jfloat targetFarFieldPx) {
+        JNIEnv* env, jobject thiz, jobject hardwareBufferObj,
+        jbyteArray depthY8Array, jint depthW, jint depthH,
+        jbyteArray alphaMatteArray, jint alphaW, jint alphaH,
+        jfloat fStop, jfloat targetFarFieldPx) {
     if (!gPipeline) return JNI_FALSE;
 
     AHardwareBuffer* hardwareBuffer = AHardwareBuffer_fromHardwareBuffer(env, hardwareBufferObj);
@@ -55,17 +58,28 @@ Java_com_zenith_auxcam_MainActivity_nativeRenderFrame(
         depthBytes = env->GetByteArrayElements(depthY8Array, nullptr);
     }
 
+    jbyte* alphaBytes = nullptr;
+    if (alphaMatteArray != nullptr) {
+        alphaBytes = env->GetByteArrayElements(alphaMatteArray, nullptr);
+    }
+
     bool ok = gPipeline->renderFrame(
             hardwareBuffer,
             reinterpret_cast<const uint8_t*>(depthBytes),
             static_cast<uint32_t>(depthW),
             static_cast<uint32_t>(depthH),
+            reinterpret_cast<const uint8_t*>(alphaBytes),
+            static_cast<uint32_t>(alphaW),
+            static_cast<uint32_t>(alphaH),
             fStop,
             targetFarFieldPx
     );
 
     if (depthBytes != nullptr) {
         env->ReleaseByteArrayElements(depthY8Array, depthBytes, JNI_ABORT);
+    }
+    if (alphaBytes != nullptr) {
+        env->ReleaseByteArrayElements(alphaMatteArray, alphaBytes, JNI_ABORT);
     }
 
     return ok ? JNI_TRUE : JNI_FALSE;

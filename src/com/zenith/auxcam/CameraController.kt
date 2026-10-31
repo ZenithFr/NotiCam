@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
+import android.content.ContentUris
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -14,7 +16,9 @@ import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.hardware.HardwareBuffer
 import android.hardware.camera2.CameraManager
+import android.media.ExifInterface
 import android.media.ImageReader
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
@@ -36,6 +40,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import rikka.shizuku.Shizuku
 import java.io.File
 import java.io.RandomAccessFile
+import java.nio.channels.FileChannel
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -52,6 +57,9 @@ interface NativeBridge {
         depth: ByteArray?,
         depthW: Int,
         depthH: Int,
+        alphaMatte: ByteArray?,
+        alphaW: Int,
+        alphaH: Int,
         fStop: Float,
         targetFarFieldPx: Float,
     ): Boolean
@@ -152,6 +160,7 @@ class CameraController(
         private const val Y8_FORMAT = 0x20203859
         private const val THUMB_W = 168
         private const val THUMB_H = 126
+        const val DEBUG_DUMP_RGBA = false
 
         /** Above this zoom the telephoto assist hands over to the physical tele. */
         private const val TELE_THRESHOLD = 2.0f
@@ -192,12 +201,18 @@ class CameraController(
     private var service: IAuxCamService? = null
     private var surfaceHolder: SurfaceHolder? = null
     private val stillCaptureInProgress = AtomicBoolean(false)
+    private var matteSegmenter: DualMatteSegmenter? = null
+    private val latestMatte = ByteArray(256 * 256)
+    private var hasRealMatte = false
+    private var stillThread: HandlerThread? = null
+    private var stillHandler: Handler? = null
     private var lastShutterTriggerNs = 0L
 
     @Volatile
     private var latestDepth: ByteArray? = null
 
     private var shutterClickNs = 0L
+    private var latestPhotoUri: Uri? = null
     private var lensSwitching = false
 
     private var powerManager: PowerManager? = null
@@ -432,12 +447,24 @@ class CameraController(
     private fun setupImageReaders() {
         val handler = readerHandler ?: return
 
+        if (matteSegmenter == null) {
+            matteSegmenter = DualMatteSegmenter(activity).also {
+                it.initialize()
+            }
+        }
+
+        if (stillThread == null) {
+            val sThread = HandlerThread("StillReaderThread").also { it.start() }
+            stillThread = sThread
+            stillHandler = Handler(sThread.looper)
+        }
+
         colorReader = ImageReader.newInstance(
             DeviceProfile.COLOR_WIDTH,
             DeviceProfile.COLOR_HEIGHT,
             ImageFormat.YUV_420_888,
             3,
-            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
+            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or HardwareBuffer.USAGE_CPU_READ_OFTEN,
         ).also { reader ->
             reader.setOnImageAvailableListener({ r -> onColorImage(r) }, handler)
         }
@@ -460,7 +487,7 @@ class CameraController(
             2,
             HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
         ).also { reader ->
-            reader.setOnImageAvailableListener({ r -> onStillImage(r) }, handler)
+            reader.setOnImageAvailableListener({ r -> onStillImage(r) }, stillHandler ?: handler)
         }
     }
 
@@ -540,6 +567,7 @@ class CameraController(
     }
 
     private fun onStats(colorFps: Float, depthFps: Float, dt: Float) {
+        matteSegmenter?.onFpsMeasured(colorFps)
         val text = String.format(
             Locale.US,
             "VIEWFINDER · %.0f FPS · DEPTH · %.0f FPS · Δt %.1f ms",
@@ -564,14 +592,20 @@ class CameraController(
     }
 
     private fun onColorImage(reader: ImageReader) {
-        if (stillCaptureInProgress.get()) {
-            val dropped = reader.acquireLatestImage()
-            dropped?.close()
-            return
-        }
         val t0 = SystemClock.elapsedRealtimeNanos()
         val image = reader.acquireLatestImage() ?: return
         try {
+            try {
+                matteSegmenter?.let { seg ->
+                    if (seg.processFrame(image)) {
+                        seg.getLatestAlphaMatte(latestMatte)
+                        hasRealMatte = true
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "segmenter processFrame caught: ${t.message}")
+            }
+
             val buffer = image.hardwareBuffer
             if (buffer != null) {
                 try {
@@ -581,6 +615,9 @@ class CameraController(
                         latestDepth,
                         DeviceProfile.DEPTH_WIDTH,
                         DeviceProfile.DEPTH_HEIGHT,
+                        if (hasRealMatte) latestMatte else null,
+                        256,
+                        256,
                         state.fStop,
                         targetFarFieldPx,
                     )
@@ -613,16 +650,18 @@ class CameraController(
 
     private fun onStillImage(reader: ImageReader) {
         val t2 = SystemClock.elapsedRealtimeNanos()
+        Log.i("TIMING_FREEZE", "capture_buffer_received: $t2 ns")
         val image = reader.acquireLatestImage() ?: return
         var outPath: String? = null
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        var t4 = 0L
+        val shutterNs = shutterClickNs
         try {
             val t3 = SystemClock.elapsedRealtimeNanos()
             val buffer = image.hardwareBuffer
             var gpuElapsedNs = 0L
-            var t5 = t3
 
             if (buffer != null) {
-                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
                 val dir = activity.getExternalFilesDir("bokeh_raw") ?: activity.filesDir
                 if (!dir.exists()) dir.mkdirs()
                 outPath = File(dir, "AUXCAM_$stamp.rgba").absolutePath
@@ -644,9 +683,9 @@ class CameraController(
                     outPath,
                     timestamps,
                 )
-                val t4 = SystemClock.elapsedRealtimeNanos()
+                t4 = SystemClock.elapsedRealtimeNanos()
+                Log.i("TIMING_FREEZE", "composite_complete: $t4 ns")
                 gpuElapsedNs = timestamps[0]
-                t5 = t4
                 buffer.close()
 
                 Log.i(
@@ -654,7 +693,7 @@ class CameraController(
                     String.format(
                         Locale.US,
                         "STILL shutter→yuv=%dms gpu=%dms (fence %dms) aperture=f/%.1f zoom=%.2f path=%s",
-                        (t2 - shutterClickNs) / 1_000_000,
+                        (t2 - shutterNs) / 1_000_000,
                         (t4 - t3) / 1_000_000,
                         gpuElapsedNs / 1_000_000,
                         state.fStop,
@@ -662,7 +701,6 @@ class CameraController(
                         outPath,
                     ),
                 )
-                Log.i(TAG, "STILL total shutter→file=${(t5 - shutterClickNs) / 1_000_000}ms")
             }
         } catch (t: Throwable) {
             Log.e(TAG, "still processing failed", t)
@@ -672,7 +710,109 @@ class CameraController(
         }
 
         outPath?.let { path ->
-            io.execute { buildThumbnail(path)?.let { bitmap -> post { onThumbnailReady(bitmap) } } }
+            io.execute {
+                saveStillToMediaStore(path, stamp, shutterNs, t4)
+            }
+        }
+    }
+
+    private fun saveStillToMediaStore(
+        rgbaPath: String,
+        stamp: String,
+        shutterNs: Long,
+        compositeCompleteNs: Long,
+    ) {
+        val rgbaFile = File(rgbaPath)
+        if (!rgbaFile.exists()) {
+            Log.e(TAG, "saveStillToMediaStore: RGBA file missing at $rgbaPath")
+            return
+        }
+
+        // 1. Build thumbnail for the viewfinder UI
+        buildThumbnail(rgbaPath)?.let { bitmap ->
+            post { onThumbnailReady(bitmap) }
+        }
+
+        // 2. MediaStore insertion
+        val (srcW, srcH) = DeviceProfile.stillSize(state.resolution)
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "AUXCAM_$stamp.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NotiCam")
+            put(MediaStore.Images.Media.IS_PENDING, 1)
+        }
+
+        var destUri: Uri? = null
+        try {
+            destUri = activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            if (destUri == null) {
+                Log.e(TAG, "MediaStore insert returned null URI")
+                return
+            }
+
+            // 3. Compress RGBA buffer to JPEG quality 98
+            val bitmap = Bitmap.createBitmap(srcW, srcH, Bitmap.Config.ARGB_8888)
+            RandomAccessFile(rgbaFile, "r").use { raf ->
+                val channel = raf.channel
+                val map = channel.map(FileChannel.MapMode.READ_ONLY, 0, rgbaFile.length())
+                bitmap.copyPixelsFromBuffer(map)
+            }
+
+            activity.contentResolver.openOutputStream(destUri)?.use { outStream ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, 98, outStream)
+                outStream.flush()
+            }
+            bitmap.recycle()
+
+            // 4. Set EXIF orientation (sensor orientation is 90 deg)
+            try {
+                activity.contentResolver.openFileDescriptor(destUri, "rw")?.use { pfd ->
+                    val exif = ExifInterface(pfd.fileDescriptor)
+                    exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_ROTATE_90.toString())
+                    exif.saveAttributes()
+                }
+            } catch (te: Throwable) {
+                Log.w(TAG, "Failed to write EXIF attributes: ${te.message}")
+            }
+
+            latestPhotoUri = destUri
+            val t5 = SystemClock.elapsedRealtimeNanos()
+            val fileSize = try {
+                activity.contentResolver.openFileDescriptor(destUri, "r")?.use { it.statSize } ?: -1L
+            } catch (e: Throwable) { -1L }
+
+            val t0ToT4Ms = (compositeCompleteNs - shutterNs) / 1_000_000
+            val t0ToT5Ms = (t5 - shutterNs) / 1_000_000
+            Log.i(
+                TAG,
+                String.format(
+                    Locale.US,
+                    "STILL saved to MediaStore: uri=%s size=%d KB | t0->t4=%dms t0->t5=%dms",
+                    destUri.toString(),
+                    fileSize / 1024,
+                    t0ToT4Ms,
+                    t0ToT5Ms,
+                ),
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to encode/persist JPEG to MediaStore", t)
+        } finally {
+            destUri?.let { uri ->
+                try {
+                    val clearPending = ContentValues().apply {
+                        put(MediaStore.Images.Media.IS_PENDING, 0)
+                    }
+                    activity.contentResolver.update(uri, clearPending, null, null)
+                    Log.i(TAG, "MediaStore row IS_PENDING set to 0 for $uri")
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Failed to clear IS_PENDING on $uri", t)
+                }
+            }
+            if (!DEBUG_DUMP_RGBA) {
+                try {
+                    rgbaFile.delete()
+                } catch (ignored: Throwable) {}
+            }
         }
     }
 
@@ -766,6 +906,7 @@ class CameraController(
         Log.i(TAG, "triggerCapture: highQuality=$highQuality, enableZsl=$enableZsl")
         main.postDelayed({ stillCaptureInProgress.set(false) }, 4000L) // Safety watchdog
         shutterClickNs = SystemClock.elapsedRealtimeNanos()
+        Log.i("TIMING_FREEZE", "shutter_press: $shutterClickNs ns")
         update {
             it.copy(
                 capturePulse = it.capturePulse + 1,
@@ -998,7 +1139,7 @@ class CameraController(
                 2,
                 HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
             ).also { reader ->
-                reader.setOnImageAvailableListener({ r -> onStillImage(r) }, readerHandler)
+                reader.setOnImageAvailableListener({ r -> onStillImage(r) }, stillHandler ?: readerHandler)
             }
             startStereoSession()
         } catch (t: Throwable) {
@@ -1098,17 +1239,69 @@ class CameraController(
     }
 
     override fun onGalleryOpen() {
-        // The engine writes raw RGBA dumps into app storage (they are 50 MB and not
-        // viewable), so this opens the system gallery on the user's real photos.
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*")
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val uri = latestPhotoUri ?: queryLatestNotiCamUri()
+        if (uri != null) {
+            Log.i(TAG, "Opening gallery with uri=$uri")
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, "image/jpeg")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                setPackage("com.nothing.gallery")
+            }
+            try {
+                activity.startActivity(intent)
+            } catch (t: ActivityNotFoundException) {
+                Log.w(TAG, "com.nothing.gallery not found, falling back to chooser: ${t.message}")
+                val fallbackIntent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "image/jpeg")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    activity.startActivity(Intent.createChooser(fallbackIntent, "Open photo with"))
+                } catch (t2: Throwable) {
+                    Toast.makeText(activity, "No gallery app found", Toast.LENGTH_SHORT).show()
+                }
+            }
+        } else {
+            val launchIntent = activity.packageManager.getLaunchIntentForPackage("com.nothing.gallery")
+            if (launchIntent != null) {
+                activity.startActivity(launchIntent)
+            } else {
+                val intent = Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                try {
+                    activity.startActivity(intent)
+                } catch (t: Throwable) {
+                    Toast.makeText(activity, "No gallery app found", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
-        try {
-            activity.startActivity(intent)
-        } catch (t: ActivityNotFoundException) {
-            Log.w(TAG, "no gallery app installed: ${t.message}")
-            Toast.makeText(activity, "No gallery app found", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun queryLatestNotiCamUri(): Uri? {
+        val projection = arrayOf(MediaStore.Images.Media._ID)
+        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
+        val selectionArgs = arrayOf("%Pictures/NotiCam%")
+        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
+        return try {
+            activity.contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                sortOrder,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
+                    ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
+                } else null
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to query latest NotiCam photo: ${t.message}")
+            null
         }
     }
 
@@ -1215,6 +1408,7 @@ class CameraController(
 
     private fun onThermalChanged(status: Int) {
         Log.i(TAG, "thermal status $status")
+        matteSegmenter?.onThermalStatusChanged(status)
         val severe = status >= PowerManager.THERMAL_STATUS_SEVERE
         native.setThermalThrottled(severe)
         update { it.copy(telemetry = "THERMAL · " + thermalName(status) + if (severe) " · throttled" else "") }

@@ -40,6 +40,13 @@ struct GatherPushConstants {
 // DeviceProfile.PREVIEW_ROTATION_90.
 static constexpr int kPreviewRotate90 = 1;
 
+struct AlphaPushConstants {
+    uint32_t width;
+    uint32_t height;
+    float s1_focus_m;
+    uint32_t stubAlphaMode;
+};
+
 struct CompositePushConstants {
     uint32_t outWidth;
     uint32_t outHeight;
@@ -313,6 +320,7 @@ bool VulkanPipeline::createSwapchain(ANativeWindow* window) {
 // them for the surface's current size. Called from renderFrame() when the
 // window changes; safe to call at any time because it waits for the device.
 bool VulkanPipeline::recreateSwapchain() {
+    __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "recreateSwapchain called");
     if (mDevice == VK_NULL_HANDLE || mSurface == VK_NULL_HANDLE) return false;
 
     vkDeviceWaitIdle(mDevice);
@@ -320,6 +328,10 @@ bool VulkanPipeline::recreateSwapchain() {
     if (mSetCompPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
         vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetCompPreview);
         mSetCompPreview = VK_NULL_HANDLE;
+    }
+    if (mSetAlphaPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetAlphaPreview);
+        mSetAlphaPreview = VK_NULL_HANDLE;
     }
     if (mViewPreviewOut != VK_NULL_HANDLE) {
         vkDestroyImageView(mDevice, mViewPreviewOut, nullptr);
@@ -377,6 +389,7 @@ bool VulkanPipeline::recreateSwapchain() {
 }
 
 void VulkanPipeline::updateSurface(ANativeWindow* newWindow, uint32_t width, uint32_t height) {
+    __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "updateSurface called (%ux%u)", width, height);
     if (mDevice == VK_NULL_HANDLE) return;
     std::lock_guard<std::mutex> lock(mQueueMutex);
     vkDeviceWaitIdle(mDevice);
@@ -384,6 +397,10 @@ void VulkanPipeline::updateSurface(ANativeWindow* newWindow, uint32_t width, uin
     if (mSetCompPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
         vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetCompPreview);
         mSetCompPreview = VK_NULL_HANDLE;
+    }
+    if (mSetAlphaPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetAlphaPreview);
+        mSetAlphaPreview = VK_NULL_HANDLE;
     }
     if (mViewPreviewOut != VK_NULL_HANDLE) {
         vkDestroyImageView(mDevice, mViewPreviewOut, nullptr);
@@ -505,9 +522,9 @@ bool VulkanPipeline::initPreviewResources() {
     if (mPreviewQueryPool == VK_NULL_HANDLE) {
         VkQueryPoolCreateInfo qpInfo{ VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO };
         qpInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
-        qpInfo.queryCount = 4 * MAX_FRAMES_IN_FLIGHT;
+        qpInfo.queryCount = 6 * MAX_FRAMES_IN_FLIGHT;
         vkCreateQueryPool(mDevice, &qpInfo, nullptr, &mPreviewQueryPool);
-        LOGI("Created mPreviewQueryPool with %d query slots", 4 * MAX_FRAMES_IN_FLIGHT);
+        LOGI("Created mPreviewQueryPool with %d query slots", 6 * MAX_FRAMES_IN_FLIGHT);
     }
 
     // Allocate preview composite descriptor set
@@ -517,11 +534,20 @@ bool VulkanPipeline::initPreviewResources() {
     dsAllocInfo.pSetLayouts = &mDslComp;
     vkAllocateDescriptorSets(mDevice, &dsAllocInfo, &mSetCompPreview);
 
+    // Allocate preview alpha descriptor set
+    if (mSetAlphaPreview == VK_NULL_HANDLE && mDslAlpha != VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo dsAllocAlpha{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsAllocAlpha.descriptorPool = mStillDescPool;
+        dsAllocAlpha.descriptorSetCount = 1;
+        dsAllocAlpha.pSetLayouts = &mDslAlpha;
+        vkAllocateDescriptorSets(mDevice, &dsAllocAlpha, &mSetAlphaPreview);
+    }
+
     LOGI("Preview Vulkan resources initialized successfully (%ux%u)", mSwapchainExtent.width, mSwapchainExtent.height);
     return true;
 }
 
-bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop, float targetFarFieldPx) {
+bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, const uint8_t* alphaMatte, uint32_t alphaW, uint32_t alphaH, float fStop, float targetFarFieldPx) {
     if (!mInitialized || !colorBuffer) return false;
 
     // The SurfaceView can be re-measured at any time (Compose layout pass, inset
@@ -588,10 +614,20 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     // 3. Populate staging buffer with depth and alpha
+    const size_t alphaLowSize = 256 * 256;
+    const size_t stagingSize = mStillW * mStillH * sizeof(float) + mStillW * mStillH + alphaLowSize;
     void* mappedStaging = nullptr;
-    vkMapMemory(mDevice, mUploadStagingMem, 0, mStillW * mStillH * sizeof(float) + mStillW * mStillH, 0, &mappedStaging);
+    vkMapMemory(mDevice, mUploadStagingMem, 0, stagingSize, 0, &mappedStaging);
     float* depthDst = reinterpret_cast<float*>(mappedStaging);
     uint8_t* alphaDst = reinterpret_cast<uint8_t*>(depthDst + (mStillW * mStillH));
+    uint8_t* alphaLowDst = alphaDst + (mStillW * mStillH);
+
+    bool hasRealAlpha = (alphaMatte != nullptr && alphaW == 256 && alphaH == 256);
+    if (hasRealAlpha) {
+        memcpy(alphaLowDst, alphaMatte, alphaLowSize);
+    } else {
+        memset(alphaLowDst, 0, alphaLowSize);
+    }
 
     bool hasDepthSignal = false;
     if (depthY8Buffer != nullptr && depthW > 0 && depthH > 0) {
@@ -615,7 +651,15 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                 uint8_t y8 = depthY8Buffer[srcY * depthW + srcX];
                 float z_m;
                 if (y8 == 0) {
-                    z_m = 10.0f;
+                    bool isForeground = false;
+                    if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
+                        uint32_t aY = (y * alphaH) / mStillH;
+                        uint32_t aX = (x * alphaW) / mStillW;
+                        if (alphaMatte[aY * alphaW + aX] > 100) {
+                            isForeground = true;
+                        }
+                    }
+                    z_m = isForeground ? 0.6f : 2.5f;
                 } else {
                     float disp = static_cast<float>(y8);
                     z_m = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
@@ -647,11 +691,14 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     VkDescriptorImageInfo descYuv{ VK_NULL_HANDLE, importedView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo descCoc{ VK_NULL_HANDLE, mViewCoc, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descAlphaSample{ VK_NULL_HANDLE, mViewAlpha, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descAlphaStorage{ VK_NULL_HANDLE, mViewAlpha, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descAlphaLowSample{ VK_NULL_HANDLE, mViewAlphaLow, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo descDepthSample{ VK_NULL_HANDLE, mViewDepth, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descBlurredStore{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descBlurredSample{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descPreviewStore{ VK_NULL_HANDLE, mViewPreviewOut, VK_IMAGE_LAYOUT_GENERAL };
 
-    VkWriteDescriptorSet writes[8]{};
+    VkWriteDescriptorSet writes[12]{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = mSetGather;
     writes[0].dstBinding = 0;
@@ -708,7 +755,35 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     writes[7].descriptorCount = 1;
     writes[7].pImageInfo = &descPreviewStore;
 
-    vkUpdateDescriptorSets(mDevice, 8, writes, 0, nullptr);
+    writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[8].dstSet = mSetAlphaPreview;
+    writes[8].dstBinding = 0;
+    writes[8].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[8].descriptorCount = 1;
+    writes[8].pImageInfo = &descYuv;
+
+    writes[9].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[9].dstSet = mSetAlphaPreview;
+    writes[9].dstBinding = 1;
+    writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[9].descriptorCount = 1;
+    writes[9].pImageInfo = &descAlphaLowSample;
+
+    writes[10].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[10].dstSet = mSetAlphaPreview;
+    writes[10].dstBinding = 2;
+    writes[10].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[10].descriptorCount = 1;
+    writes[10].pImageInfo = &descAlphaStorage;
+
+    writes[11].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[11].dstSet = mSetAlphaPreview;
+    writes[11].dstBinding = 3;
+    writes[11].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[11].descriptorCount = 1;
+    writes[11].pImageInfo = &descDepthSample;
+
+    vkUpdateDescriptorSets(mDevice, 12, writes, 0, nullptr);
 
     // 5. Record command buffer
     VkCommandBuffer curCmd = mPreviewCmds[mCurrentFrame];
@@ -716,9 +791,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     VkCommandBufferBeginInfo bInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
     vkBeginCommandBuffer(curCmd, &bInfo);
 
-    uint32_t qBase = mCurrentFrame * 4;
+    uint32_t qBase = mCurrentFrame * 6;
     if (mPreviewQueryPool != VK_NULL_HANDLE) {
-        vkCmdResetQueryPool(curCmd, mPreviewQueryPool, qBase, 4);
+        vkCmdResetQueryPool(curCmd, mPreviewQueryPool, qBase, 6);
         vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mPreviewQueryPool, qBase + 0);
     }
 
@@ -740,7 +815,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     transition(importedImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     transition(mImgDepth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    transition(mImgAlpha, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    transition(mImgAlpha, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transition(mImgAlphaLow, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     transition(mImgCoc, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     transition(mImgBlurred, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     transition(mImgPreviewOut, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -751,25 +827,26 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     copyDepthRegion.imageExtent = { mStillW, mStillH, 1 };
     vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgDepth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyDepthRegion);
 
-    VkBufferImageCopy copyAlphaRegion{};
-    copyAlphaRegion.bufferOffset = mStillW * mStillH * sizeof(float);
-    copyAlphaRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    copyAlphaRegion.imageExtent = { mStillW, mStillH, 1 };
-    vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaRegion);
+    VkBufferImageCopy copyAlphaLowRegion{};
+    copyAlphaLowRegion.bufferOffset = mStillW * mStillH * sizeof(float) + mStillW * mStillH;
+    copyAlphaLowRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copyAlphaLowRegion.imageExtent = { 256, 256, 1 };
+    vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgAlphaLow, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaLowRegion);
 
     transition(mImgDepth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transition(mImgAlphaLow, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
     CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, (float)mStillW };
+    AlphaPushConstants pcAlpha{ mStillW, mStillH, 0.6f, (hasRealAlpha ? 0u : 1u) };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
     CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90 };
 
     VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
 
-    // CoC Pass
+    // 1. CoC Pass
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeCoc);
     vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlCoc, 0, 1, &mSetCoc, 0, nullptr);
     vkCmdPushConstants(curCmd, mPlCoc, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CocPushConstants), &pcCoc);
@@ -780,10 +857,10 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 1);
     }
 
-    // 32-tap Gather Pass
-    vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
-    vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGather, 0, nullptr);
-    vkCmdPushConstants(curCmd, mPlGather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GatherPushConstants), &pcGather);
+    // 2. Guided Filter Alpha Pass
+    vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
+    vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
+    vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlpha);
     vkCmdDispatch(curCmd, gxWork, gyWork, 1);
 
     vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
@@ -791,13 +868,28 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 2);
     }
 
-    // Composite Pass (Preview Viewport)
+    // 3. 32-tap Gather Pass
+    vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
+    vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGather, 0, nullptr);
+    vkCmdPushConstants(curCmd, mPlGather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GatherPushConstants), &pcGather);
+    vkCmdDispatch(curCmd, gxWork, gyWork, 1);
+
+    vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 3);
+    }
+
+    // 4. Composite Pass (Preview Viewport)
     uint32_t gxComp = (mSwapchainExtent.width + 15) / 16;
     uint32_t gyComp = (mSwapchainExtent.height + 15) / 16;
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
     vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetCompPreview, 0, nullptr);
     vkCmdPushConstants(curCmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CompositePushConstants), &pcComp);
     vkCmdDispatch(curCmd, gxComp, gyComp, 1);
+
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 4);
+    }
 
     // Copy composite to swapchain image
     transition(mImgPreviewOut, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
@@ -812,7 +904,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     transition(mSwapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
     if (mPreviewQueryPool != VK_NULL_HANDLE) {
-        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_TRANSFER_BIT, mPreviewQueryPool, qBase + 3);
+        vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_TRANSFER_BIT, mPreviewQueryPool, qBase + 5);
     }
 
     vkEndCommandBuffer(curCmd);
@@ -829,6 +921,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     submitInfo.pSignalSemaphores = &mRenderFinishedSemaphores[mCurrentFrame];
 
     auto tSubmit = std::chrono::high_resolution_clock::now();
+    uint64_t tSubNs = std::chrono::duration_cast<std::chrono::nanoseconds>(tSubmit.time_since_epoch()).count();
+    __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "preview_submitted: %llu ns", (unsigned long long)tSubNs);
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
         vkQueueSubmit(mComputeQueue, 1, &submitInfo, mRenderFences[mCurrentFrame]);
@@ -847,6 +941,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkQueuePresentKHR(mComputeQueue, &presentInfo);
     }
     auto tPresent = std::chrono::high_resolution_clock::now();
+    uint64_t tPresNs = std::chrono::duration_cast<std::chrono::nanoseconds>(tPresent.time_since_epoch()).count();
+    __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "preview_presented: %llu ns", (unsigned long long)tPresNs);
     double submitToPresentMs = std::chrono::duration<double, std::milli>(tPresent - tSubmit).count();
 
     // Read hardware timestamps
@@ -855,14 +951,16 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     vkGetPhysicalDeviceProperties(mPhysicalDevice, &props);
     timestampPeriod = props.limits.timestampPeriod;
 
-    uint64_t ts[4]{};
-    double dCoc = 0.0, dGather = 0.0, dComp = 0.0, dTotalGpu = 0.0;
+    uint64_t ts[6]{};
+    double dCoc = 0.0, dAlpha = 0.0, dGather = 0.0, dComp = 0.0, dCopy = 0.0, dTotalGpu = 0.0;
     if (mPreviewQueryPool != VK_NULL_HANDLE) {
-        vkGetQueryPoolResults(mDevice, mPreviewQueryPool, qBase, 4, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+        vkGetQueryPoolResults(mDevice, mPreviewQueryPool, qBase, 6, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
         dCoc = (ts[1] - ts[0]) * timestampPeriod / 1e6;
-        dGather = (ts[2] - ts[1]) * timestampPeriod / 1e6;
-        dComp = (ts[3] - ts[2]) * timestampPeriod / 1e6;
-        dTotalGpu = (ts[3] - ts[0]) * timestampPeriod / 1e6;
+        dAlpha = (ts[2] - ts[1]) * timestampPeriod / 1e6;
+        dGather = (ts[3] - ts[2]) * timestampPeriod / 1e6;
+        dComp = (ts[4] - ts[3]) * timestampPeriod / 1e6;
+        dCopy = (ts[5] - ts[4]) * timestampPeriod / 1e6;
+        dTotalGpu = (ts[5] - ts[0]) * timestampPeriod / 1e6;
     }
 
     static std::vector<double> sSubmitWindow;
@@ -885,8 +983,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         double p50_gpu = sortedGpu[n * 50 / 100];
         double effFps = 1000.0 / (p50_submit > 0.1 ? p50_submit : 33.3);
 
-        LOGI("PREVIEW TELEMETRY (N=%zu): Submit->Present p50=%.2f ms, p90=%.2f ms, p95=%.2f ms [min=%.2f, max=%.2f] | Effective FPS=%.1f | GPU: CoC=%.2f ms, 32-tap Gather=%.2f ms, Comp=%.2f ms | Total GPU p50=%.2f ms",
-             n, p50_submit, p90_submit, p95_submit, min_submit, max_submit, effFps, dCoc, dGather, dComp, p50_gpu);
+        LOGI("PREVIEW TELEMETRY (N=%zu): Submit->Present p50=%.2f ms, p90=%.2f ms, p95=%.2f ms [min=%.2f, max=%.2f] | Effective FPS=%.1f | GPU: CoC=%.2f ms, GuidedFilter=%.2f ms, 32-tap Gather=%.2f ms, Comp=%.2f ms, Copy=%.2f ms | Total GPU p50=%.2f ms",
+             n, p50_submit, p90_submit, p95_submit, min_submit, max_submit, effFps, dCoc, dAlpha, dGather, dComp, dCopy, p50_gpu);
         sSubmitWindow.clear();
         sGpuWindow.clear();
     }
@@ -930,15 +1028,17 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     auto cocSpv = loadSpvFile("coc.spv");
     auto gatherSpv = loadSpvFile("gather.spv");
     auto compSpv = loadSpvFile("composite.spv");
+    auto alphaSpv = loadSpvFile("alpha.spv");
 
-    if (cocSpv.empty() || gatherSpv.empty() || compSpv.empty()) {
-        LOGE("Failed to load SPIR-V compute shaders (coc, gather, composite)");
+    if (cocSpv.empty() || gatherSpv.empty() || compSpv.empty() || alphaSpv.empty()) {
+        LOGE("Failed to load SPIR-V compute shaders (coc, gather, composite, alpha)");
         return false;
     }
 
     VkShaderModule smCoc = createShaderModule(cocSpv);
     VkShaderModule smGather = createShaderModule(gatherSpv);
     VkShaderModule smComp = createShaderModule(compSpv);
+    VkShaderModule smAlpha = createShaderModule(alphaSpv);
 
     auto createImage = [&](uint32_t w, uint32_t h, VkFormat fmt, VkImageUsageFlags usage, VkImage* outImg, VkDeviceMemory* outMem) {
         VkImageCreateInfo imgInfo{};
@@ -980,18 +1080,35 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
 
     createImage(mStillW, mStillH, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgDepth, &mMemDepth);
     createImage(mStillW, mStillH, VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgCoc, &mMemCoc);
-    createImage(mStillW, mStillH, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgAlpha, &mMemAlpha);
+    createImage(mStillW, mStillH, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgAlpha, &mMemAlpha);
     createImage(mStillW, mStillH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgBlurred, &mMemBlurred);
     createImage(mFullW, mFullH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgOutFull, &mMemOutFull);
+
+    // Alpha low-res input image (256x256 from NPU)
+    createImage(256, 256, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgAlphaLow, &mMemAlphaLow);
 
     mViewDepth = createView(mImgDepth, VK_FORMAT_R32_SFLOAT);
     mViewCoc = createView(mImgCoc, VK_FORMAT_R16_SFLOAT);
     mViewAlpha = createView(mImgAlpha, VK_FORMAT_R8_UNORM);
     mViewBlurred = createView(mImgBlurred, VK_FORMAT_R8G8B8A8_UNORM);
     mViewOutFull = createView(mImgOutFull, VK_FORMAT_R8G8B8A8_UNORM);
+    mViewAlphaLow = createView(mImgAlphaLow, VK_FORMAT_R8_UNORM);
 
-    // Staging buffer for depth & alpha upload (1020x768 float depth + 1020x768 uint8 alpha)
-    const size_t uploadStagingSize = mStillW * mStillH * sizeof(float) + mStillW * mStillH;
+    // Still Bokeh dedicated resources (eliminates preview contention & freeze)
+    mStillGatherW = 1020;
+    mStillGatherH = 768;
+    createImage(mStillGatherW, mStillGatherH, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgDepthStill, &mMemDepthStill);
+    createImage(mStillGatherW, mStillGatherH, VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgCocStill, &mMemCocStill);
+    createImage(mStillGatherW, mStillGatherH, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgAlphaStill, &mMemAlphaStill);
+    createImage(mStillGatherW, mStillGatherH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgBlurredStill, &mMemBlurredStill);
+
+    mViewDepthStill = createView(mImgDepthStill, VK_FORMAT_R32_SFLOAT);
+    mViewCocStill = createView(mImgCocStill, VK_FORMAT_R16_SFLOAT);
+    mViewAlphaStill = createView(mImgAlphaStill, VK_FORMAT_R8_UNORM);
+    mViewBlurredStill = createView(mImgBlurredStill, VK_FORMAT_R8G8B8A8_UNORM);
+
+    // Staging buffer for depth, alpha upload and low-res alpha upload
+    const size_t uploadStagingSize = mStillW * mStillH * sizeof(float) + mStillW * mStillH + 256 * 256;
     {
         VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bi.size = uploadStagingSize;
@@ -1005,6 +1122,23 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
         ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         vkAllocateMemory(mDevice, &ai, nullptr, &mUploadStagingMem);
         vkBindBufferMemory(mDevice, mUploadStagingBuffer, mUploadStagingMem, 0);
+    }
+
+    // Dedicated staging buffer for still capture
+    const size_t uploadStagingSizeStill = mStillGatherW * mStillGatherH * sizeof(float) + mStillGatherW * mStillGatherH;
+    {
+        VkBufferCreateInfo biStill{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        biStill.size = uploadStagingSizeStill;
+        biStill.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        vkCreateBuffer(mDevice, &biStill, nullptr, &mUploadStagingBufferStill);
+
+        VkMemoryRequirements mrStill;
+        vkGetBufferMemoryRequirements(mDevice, mUploadStagingBufferStill, &mrStill);
+        VkMemoryAllocateInfo aiStill{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        aiStill.allocationSize = mrStill.size;
+        aiStill.memoryTypeIndex = findMemoryType(mrStill.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkAllocateMemory(mDevice, &aiStill, nullptr, &mUploadStagingMemStill);
+        vkBindBufferMemory(mDevice, mUploadStagingBufferStill, mUploadStagingMemStill, 0);
     }
 
     // Readback buffer for 4080x3072 RGBA8 (50,135,040 bytes)
@@ -1058,13 +1192,13 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     // Descriptor Pool
     VkDescriptorPoolSize poolSizes[2]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSizes[0].descriptorCount = 30;
+    poolSizes[0].descriptorCount = 50;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[1].descriptorCount = 20;
+    poolSizes[1].descriptorCount = 30;
 
     VkDescriptorPoolCreateInfo dpInfo{};
     dpInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpInfo.maxSets = 20;
+    dpInfo.maxSets = 30;
     dpInfo.poolSizeCount = 2;
     dpInfo.pPoolSizes = poolSizes;
     vkCreateDescriptorPool(mDevice, &dpInfo, nullptr, &mStillDescPool);
@@ -1191,6 +1325,57 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     pipeInfoComp.layout = mPlComp;
     vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &pipeInfoComp, nullptr, &mPipeComp);
 
+    // 4. Guided Filter Pipeline (alpha.comp)
+    VkDescriptorSetLayoutBinding alphaBindings[4]{};
+    alphaBindings[0].binding = 0;
+    alphaBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    alphaBindings[0].descriptorCount = 1;
+    alphaBindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    alphaBindings[0].pImmutableSamplers = &yuvSampler;
+
+    alphaBindings[1].binding = 1;
+    alphaBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    alphaBindings[1].descriptorCount = 1;
+    alphaBindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    alphaBindings[1].pImmutableSamplers = &mStillSampler;
+
+    alphaBindings[2].binding = 2;
+    alphaBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    alphaBindings[2].descriptorCount = 1;
+    alphaBindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    alphaBindings[3].binding = 3;
+    alphaBindings[3].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    alphaBindings[3].descriptorCount = 1;
+    alphaBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    alphaBindings[3].pImmutableSamplers = &mStillSampler;
+
+    dslInfo.bindingCount = 4;
+    dslInfo.pBindings = alphaBindings;
+    vkCreateDescriptorSetLayout(mDevice, &dslInfo, nullptr, &mDslAlpha);
+
+    VkPushConstantRange pcRangeAlpha{};
+    pcRangeAlpha.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcRangeAlpha.offset = 0;
+    pcRangeAlpha.size = sizeof(AlphaPushConstants);
+
+    VkPipelineLayoutCreateInfo plInfoAlpha{};
+    plInfoAlpha.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plInfoAlpha.setLayoutCount = 1;
+    plInfoAlpha.pSetLayouts = &mDslAlpha;
+    plInfoAlpha.pushConstantRangeCount = 1;
+    plInfoAlpha.pPushConstantRanges = &pcRangeAlpha;
+    vkCreatePipelineLayout(mDevice, &plInfoAlpha, nullptr, &mPlAlpha);
+
+    VkComputePipelineCreateInfo pipeInfoAlpha{};
+    pipeInfoAlpha.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipeInfoAlpha.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    pipeInfoAlpha.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    pipeInfoAlpha.stage.module = smAlpha;
+    pipeInfoAlpha.stage.pName = "main";
+    pipeInfoAlpha.layout = mPlAlpha;
+    vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &pipeInfoAlpha, nullptr, &mPipeAlpha);
+
     // Allocate Descriptor Sets
     VkDescriptorSetAllocateInfo dsAllocInfo{};
     dsAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1206,7 +1391,17 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     dsAllocInfo.pSetLayouts = &mDslComp;
     vkAllocateDescriptorSets(mDevice, &dsAllocInfo, &mSetComp);
 
-    // CoC static writes
+    // Dedicated descriptor sets for still capture
+    dsAllocInfo.pSetLayouts = &mDslCoc;
+    vkAllocateDescriptorSets(mDevice, &dsAllocInfo, &mSetCocStill);
+
+    dsAllocInfo.pSetLayouts = &mDslGather;
+    vkAllocateDescriptorSets(mDevice, &dsAllocInfo, &mSetGatherStill);
+
+    dsAllocInfo.pSetLayouts = &mDslComp;
+    vkAllocateDescriptorSets(mDevice, &dsAllocInfo, &mSetCompStill);
+
+    // CoC static writes (preview)
     VkDescriptorImageInfo descImgDepth{ VK_NULL_HANDLE, mViewDepth, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descImgCoc{ VK_NULL_HANDLE, mViewCoc, VK_IMAGE_LAYOUT_GENERAL };
     VkWriteDescriptorSet writesCoc[2]{};
@@ -1224,10 +1419,29 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     writesCoc[1].pImageInfo = &descImgCoc;
     vkUpdateDescriptorSets(mDevice, 2, writesCoc, 0, nullptr);
 
+    // CoC static writes (still)
+    VkDescriptorImageInfo descImgDepthStill{ VK_NULL_HANDLE, mViewDepthStill, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descImgCocStill{ VK_NULL_HANDLE, mViewCocStill, VK_IMAGE_LAYOUT_GENERAL };
+    VkWriteDescriptorSet writesCocStill[2]{};
+    writesCocStill[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writesCocStill[0].dstSet = mSetCocStill;
+    writesCocStill[0].dstBinding = 0;
+    writesCocStill[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writesCocStill[0].descriptorCount = 1;
+    writesCocStill[0].pImageInfo = &descImgDepthStill;
+    writesCocStill[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writesCocStill[1].dstSet = mSetCocStill;
+    writesCocStill[1].dstBinding = 1;
+    writesCocStill[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writesCocStill[1].descriptorCount = 1;
+    writesCocStill[1].pImageInfo = &descImgCocStill;
+    vkUpdateDescriptorSets(mDevice, 2, writesCocStill, 0, nullptr);
+
     // Destroy temp shader modules
     vkDestroyShaderModule(mDevice, smCoc, nullptr);
     vkDestroyShaderModule(mDevice, smGather, nullptr);
     vkDestroyShaderModule(mDevice, smComp, nullptr);
+    if (smAlpha != VK_NULL_HANDLE) vkDestroyShaderModule(mDevice, smAlpha, nullptr);
 
     mStillBokehInitialized = true;
     LOGI("Still Bokeh Vulkan resources initialized successfully!");
@@ -1258,9 +1472,9 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
 
     // 2. Populate staging buffer with depth and alpha
     void* mappedStaging = nullptr;
-    vkMapMemory(mDevice, mUploadStagingMem, 0, mStillW * mStillH * sizeof(float) + mStillW * mStillH, 0, &mappedStaging);
+    vkMapMemory(mDevice, mUploadStagingMemStill, 0, mStillGatherW * mStillGatherH * sizeof(float) + mStillGatherW * mStillGatherH, 0, &mappedStaging);
     float* depthDst = reinterpret_cast<float*>(mappedStaging);
-    uint8_t* alphaDst = reinterpret_cast<uint8_t*>(depthDst + (mStillW * mStillH));
+    uint8_t* alphaDst = reinterpret_cast<uint8_t*>(depthDst + (mStillGatherW * mStillGatherH));
 
     bool hasDepthSignal = false;
     if (depthY8Buffer != nullptr && depthW > 0 && depthH > 0) {
@@ -1272,106 +1486,106 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         }
     }
 
-    const float cx = mStillW * 0.5f;
-    const float cy = mStillH * 0.5f;
-    const float radiusFg = mStillW * 0.24f;
+    const float cx = mStillGatherW * 0.5f;
+    const float cy = mStillGatherH * 0.5f;
+    const float radiusFg = mStillGatherW * 0.24f;
 
     if (hasDepthSignal) {
-        for (uint32_t y = 0; y < mStillH; ++y) {
-            uint32_t srcY = (y * depthH) / mStillH;
-            for (uint32_t x = 0; x < mStillW; ++x) {
-                uint32_t srcX = (x * depthW) / mStillW;
+        for (uint32_t y = 0; y < mStillGatherH; ++y) {
+            uint32_t srcY = (y * depthH) / mStillGatherH;
+            for (uint32_t x = 0; x < mStillGatherW; ++x) {
+                uint32_t srcX = (x * depthW) / mStillGatherW;
                 uint8_t y8 = depthY8Buffer[srcY * depthW + srcX];
                 float z_m;
                 if (y8 == 0) {
-                    z_m = 10.0f;
+                    z_m = 0.6f; // Missing depth on still defaults to subject focus plane (no black holes)
                 } else {
                     float disp = static_cast<float>(y8);
                     z_m = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
                     if (z_m < 0.25f) z_m = 0.25f;
                     if (z_m > 10.0f) z_m = 10.0f;
                 }
-                depthDst[y * mStillW + x] = z_m;
+                depthDst[y * mStillGatherW + x] = z_m;
                 float a = (z_m <= 0.9f) ? 1.0f : (z_m >= 1.6f ? 0.0f : (1.6f - z_m) / 0.7f);
-                alphaDst[y * mStillW + x] = static_cast<uint8_t>(a * 255.0f);
+                alphaDst[y * mStillGatherW + x] = static_cast<uint8_t>(a * 255.0f);
             }
         }
     } else {
-        for (uint32_t y = 0; y < mStillH; ++y) {
-            for (uint32_t x = 0; x < mStillW; ++x) {
+        for (uint32_t y = 0; y < mStillGatherH; ++y) {
+            for (uint32_t x = 0; x < mStillGatherW; ++x) {
                 float dx = (x - cx);
                 float dy = (y - cy) * 1.3f;
                 float dist = std::sqrt(dx * dx + dy * dy);
                 float normDist = dist / radiusFg;
                 float alpha = 1.0f - std::min(1.0f, std::max(0.0f, (normDist - 0.75f) / 0.25f));
                 float z_m = (alpha > 0.5f) ? 0.6f : (0.6f + (1.0f - alpha) * 2.9f);
-                depthDst[y * mStillW + x] = z_m;
-                alphaDst[y * mStillW + x] = static_cast<uint8_t>(alpha * 255.0f);
+                depthDst[y * mStillGatherW + x] = z_m;
+                alphaDst[y * mStillGatherW + x] = static_cast<uint8_t>(alpha * 255.0f);
             }
         }
     }
-    vkUnmapMemory(mDevice, mUploadStagingMem);
+    vkUnmapMemory(mDevice, mUploadStagingMemStill);
 
     // 3. Update descriptor sets
     VkDescriptorImageInfo descYuv{ VK_NULL_HANDLE, importedView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-    VkDescriptorImageInfo descCoc{ VK_NULL_HANDLE, mViewCoc, VK_IMAGE_LAYOUT_GENERAL };
-    VkDescriptorImageInfo descAlphaSample{ VK_NULL_HANDLE, mViewAlpha, VK_IMAGE_LAYOUT_GENERAL };
-    VkDescriptorImageInfo descBlurredStore{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
-    VkDescriptorImageInfo descBlurredSample{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descCoc{ VK_NULL_HANDLE, mViewCocStill, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descAlphaSample{ VK_NULL_HANDLE, mViewAlphaStill, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descBlurredStore{ VK_NULL_HANDLE, mViewBlurredStill, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descBlurredSample{ VK_NULL_HANDLE, mViewBlurredStill, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descOutStoreFull{ VK_NULL_HANDLE, mViewOutFull, VK_IMAGE_LAYOUT_GENERAL };
 
     VkWriteDescriptorSet writes[8]{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = mSetGather;
+    writes[0].dstSet = mSetGatherStill;
     writes[0].dstBinding = 0;
     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[0].descriptorCount = 1;
     writes[0].pImageInfo = &descYuv;
 
     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = mSetGather;
+    writes[1].dstSet = mSetGatherStill;
     writes[1].dstBinding = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[1].descriptorCount = 1;
     writes[1].pImageInfo = &descCoc;
 
     writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = mSetGather;
+    writes[2].dstSet = mSetGatherStill;
     writes[2].dstBinding = 2;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[2].descriptorCount = 1;
     writes[2].pImageInfo = &descAlphaSample;
 
     writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = mSetGather;
+    writes[3].dstSet = mSetGatherStill;
     writes[3].dstBinding = 3;
     writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[3].descriptorCount = 1;
     writes[3].pImageInfo = &descBlurredStore;
 
     writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[4].dstSet = mSetComp;
+    writes[4].dstSet = mSetCompStill;
     writes[4].dstBinding = 0;
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[4].descriptorCount = 1;
     writes[4].pImageInfo = &descYuv;
 
     writes[5].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[5].dstSet = mSetComp;
+    writes[5].dstSet = mSetCompStill;
     writes[5].dstBinding = 1;
     writes[5].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[5].descriptorCount = 1;
     writes[5].pImageInfo = &descBlurredSample;
 
     writes[6].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[6].dstSet = mSetComp;
+    writes[6].dstSet = mSetCompStill;
     writes[6].dstBinding = 2;
     writes[6].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[6].descriptorCount = 1;
     writes[6].pImageInfo = &descAlphaSample;
 
     writes[7].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[7].dstSet = mSetComp;
+    writes[7].dstSet = mSetCompStill;
     writes[7].dstBinding = 3;
     writes[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[7].descriptorCount = 1;
@@ -1410,39 +1624,39 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     };
 
     transition(importedImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgDepth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    transition(mImgAlpha, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-    transition(mImgCoc, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgBlurred, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transition(mImgDepthStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    transition(mImgAlphaStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    transition(mImgCocStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transition(mImgBlurredStill, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     transition(mImgOutFull, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     VkBufferImageCopy copyDepthRegion{};
     copyDepthRegion.bufferOffset = 0;
     copyDepthRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    copyDepthRegion.imageExtent = { mStillW, mStillH, 1 };
-    vkCmdCopyBufferToImage(mStillCmd, mUploadStagingBuffer, mImgDepth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyDepthRegion);
+    copyDepthRegion.imageExtent = { mStillGatherW, mStillGatherH, 1 };
+    vkCmdCopyBufferToImage(mStillCmd, mUploadStagingBufferStill, mImgDepthStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyDepthRegion);
 
     VkBufferImageCopy copyAlphaRegion{};
-    copyAlphaRegion.bufferOffset = mStillW * mStillH * sizeof(float);
+    copyAlphaRegion.bufferOffset = mStillGatherW * mStillGatherH * sizeof(float);
     copyAlphaRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-    copyAlphaRegion.imageExtent = { mStillW, mStillH, 1 };
-    vkCmdCopyBufferToImage(mStillCmd, mUploadStagingBuffer, mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaRegion);
+    copyAlphaRegion.imageExtent = { mStillGatherW, mStillGatherH, 1 };
+    vkCmdCopyBufferToImage(mStillCmd, mUploadStagingBufferStill, mImgAlphaStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaRegion);
 
-    transition(mImgDepth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transition(mImgDepthStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    transition(mImgAlphaStill, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-    uint32_t gxWork = (mStillW + 15) / 16;
-    uint32_t gyWork = (mStillH + 15) / 16;
+    uint32_t gxWork = (mStillGatherW + 15) / 16;
+    uint32_t gyWork = (mStillGatherH + 15) / 16;
 
-    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, (float)mStillW };
-    GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f };
+    CocPushConstants pcCoc{ mStillGatherW, mStillGatherH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, 0.6f, targetFarFieldPx, (float)mStillGatherW };
+    GatherPushConstants pcGather{ mStillGatherW, mStillGatherH, 32, 1.2f, 40.0f };
     CompositePushConstants pcComp{ mFullW, mFullH, 0 };
 
     VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
 
     // CoC Pass (1020x768)
     vkCmdBindPipeline(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeCoc);
-    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlCoc, 0, 1, &mSetCoc, 0, nullptr);
+    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlCoc, 0, 1, &mSetCocStill, 0, nullptr);
     vkCmdPushConstants(mStillCmd, mPlCoc, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CocPushConstants), &pcCoc);
     vkCmdDispatch(mStillCmd, gxWork, gyWork, 1);
 
@@ -1451,7 +1665,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
 
     // 32-tap Gather Pass (1020x768)
     vkCmdBindPipeline(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
-    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGather, 0, nullptr);
+    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGatherStill, 0, nullptr);
     vkCmdPushConstants(mStillCmd, mPlGather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GatherPushConstants), &pcGather);
     vkCmdDispatch(mStillCmd, gxWork, gyWork, 1);
 
@@ -1462,7 +1676,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     uint32_t gxFull = (mFullW + 15) / 16;
     uint32_t gyFull = (mFullH + 15) / 16;
     vkCmdBindPipeline(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
-    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetComp, 0, nullptr);
+    vkCmdBindDescriptorSets(mStillCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetCompStill, 0, nullptr);
     vkCmdPushConstants(mStillCmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CompositePushConstants), &pcComp);
     vkCmdDispatch(mStillCmd, gxFull, gyFull, 1);
 
@@ -1563,18 +1777,41 @@ void VulkanPipeline::destroy() {
     mYuvConverter.reset();
 
     if (mStillBokehInitialized && mDevice != VK_NULL_HANDLE) {
+        if (mPipeAlpha != VK_NULL_HANDLE) vkDestroyPipeline(mDevice, mPipeAlpha, nullptr);
         vkDestroyPipeline(mDevice, mPipeCoc, nullptr);
         vkDestroyPipeline(mDevice, mPipeGather, nullptr);
         vkDestroyPipeline(mDevice, mPipeComp, nullptr);
+        if (mPlAlpha != VK_NULL_HANDLE) vkDestroyPipelineLayout(mDevice, mPlAlpha, nullptr);
         vkDestroyPipelineLayout(mDevice, mPlCoc, nullptr);
         vkDestroyPipelineLayout(mDevice, mPlGather, nullptr);
         vkDestroyPipelineLayout(mDevice, mPlComp, nullptr);
+        if (mDslAlpha != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(mDevice, mDslAlpha, nullptr);
         vkDestroyDescriptorSetLayout(mDevice, mDslCoc, nullptr);
         vkDestroyDescriptorSetLayout(mDevice, mDslGather, nullptr);
         vkDestroyDescriptorSetLayout(mDevice, mDslComp, nullptr);
         vkDestroyDescriptorPool(mDevice, mStillDescPool, nullptr);
         vkDestroyCommandPool(mDevice, mStillCmdPool, nullptr);
         vkDestroySampler(mDevice, mStillSampler, nullptr);
+
+        if (mViewAlphaLow != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewAlphaLow, nullptr);
+        if (mImgAlphaLow != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgAlphaLow, nullptr);
+        if (mMemAlphaLow != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemAlphaLow, nullptr);
+
+        if (mViewDepthStill != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewDepthStill, nullptr);
+        if (mViewCocStill != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewCocStill, nullptr);
+        if (mViewAlphaStill != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewAlphaStill, nullptr);
+        if (mViewBlurredStill != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewBlurredStill, nullptr);
+        if (mImgDepthStill != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgDepthStill, nullptr);
+        if (mImgCocStill != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgCocStill, nullptr);
+        if (mImgAlphaStill != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgAlphaStill, nullptr);
+        if (mImgBlurredStill != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgBlurredStill, nullptr);
+        if (mMemDepthStill != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemDepthStill, nullptr);
+        if (mMemCocStill != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemCocStill, nullptr);
+        if (mMemAlphaStill != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemAlphaStill, nullptr);
+        if (mMemBlurredStill != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemBlurredStill, nullptr);
+        if (mUploadStagingBufferStill != VK_NULL_HANDLE) vkDestroyBuffer(mDevice, mUploadStagingBufferStill, nullptr);
+        if (mUploadStagingMemStill != VK_NULL_HANDLE) vkFreeMemory(mDevice, mUploadStagingMemStill, nullptr);
+
         vkDestroyImageView(mDevice, mViewDepth, nullptr);
         vkDestroyImageView(mDevice, mViewCoc, nullptr);
         vkDestroyImageView(mDevice, mViewAlpha, nullptr);

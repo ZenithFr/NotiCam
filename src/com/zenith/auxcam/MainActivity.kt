@@ -81,9 +81,22 @@ class MainActivity : ComponentActivity(), NativeBridge {
         depth: ByteArray?,
         depthW: Int,
         depthH: Int,
+        alphaMatte: ByteArray?,
+        alphaW: Int,
+        alphaH: Int,
         fStop: Float,
         targetFarFieldPx: Float,
-    ): Boolean = nativeRenderFrame(buffer, depth, depthW, depthH, fStop, targetFarFieldPx)
+    ): Boolean = nativeRenderFrame(
+        buffer,
+        depth,
+        depthW,
+        depthH,
+        alphaMatte,
+        alphaW,
+        alphaH,
+        fStop,
+        targetFarFieldPx,
+    )
 
     override fun setCameraOpticalParams(focalMm: Float, sensorWidthMm: Float, baseFStop: Float) {
         try {
@@ -136,6 +149,9 @@ class MainActivity : ComponentActivity(), NativeBridge {
         depth: ByteArray?,
         depthW: Int,
         depthH: Int,
+        alphaMatte: ByteArray?,
+        alphaW: Int,
+        alphaH: Int,
         fStop: Float,
         targetFarFieldPx: Float,
     ): Boolean
@@ -173,8 +189,23 @@ class MainActivity : ComponentActivity(), NativeBridge {
                     Log.i(TAG, "Extracted asset shader: $name (${outFile.length()} bytes)")
                 }
             }
+
+            val modelDir = java.io.File(filesDir, "models")
+            if (!modelDir.exists()) modelDir.mkdirs()
+            val modelList = assets.list("models") ?: return
+            for (name in modelList) {
+                val outFile = java.io.File(modelDir, name)
+                if (!outFile.exists() || outFile.length() == 0L) {
+                    assets.open("models/$name").use { input ->
+                        outFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    Log.i(TAG, "Extracted asset model: $name (${outFile.length()} bytes)")
+                }
+            }
         } catch (t: Throwable) {
-            Log.w(TAG, "Failed to extract shader assets: ${t.message}")
+            Log.w(TAG, "Failed to extract assets: ${t.message}")
         }
     }
 
