@@ -17,11 +17,12 @@ layout(push_constant) uniform AlphaPushConstants {
     uint height;
     float s1_focus_m;
     uint stubAlphaMode; // 1 = depth-derived alpha (stub), 0 = guided filter real alpha
+    uint yOffset;
 } pc;
 
 void main() {
-    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
-    if (coord.x >= pc.width || coord.y >= pc.height) {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y + pc.yOffset);
+    if (coord.x >= int(pc.width) || coord.y >= int(pc.height)) {
         return;
     }
 

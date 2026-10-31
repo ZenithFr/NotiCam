@@ -71,6 +71,9 @@ interface NativeBridge {
         depth: ByteArray?,
         depthW: Int,
         depthH: Int,
+        alphaMatte: ByteArray?,
+        alphaW: Int,
+        alphaH: Int,
         fStop: Float,
         targetFarFieldPx: Float,
         outPath: String,
@@ -160,6 +163,8 @@ class CameraController(
         private const val Y8_FORMAT = 0x20203859
         private const val THUMB_W = 168
         private const val THUMB_H = 126
+        const val CAPTURE_JPEG_QUALITY = 100
+        @Volatile var forceJpeg98 = false
         const val DEBUG_DUMP_RGBA = false
 
         /** Above this zoom the telephoto assist hands over to the physical tele. */
@@ -272,6 +277,7 @@ class CameraController(
                 intent ?: return
                 val hq = intent.getBooleanExtra("high_quality", false)
                 val zsl = intent.getBooleanExtra("enable_zsl", true)
+                forceJpeg98 = intent.getBooleanExtra("quality_98", false)
                 update { it.copy(mode = if (hq) CaptureMode.Pro else it.mode) }
                 triggerCapture(hq, zsl)
             }
@@ -678,6 +684,9 @@ class CameraController(
                     latestDepth,
                     DeviceProfile.DEPTH_WIDTH,
                     DeviceProfile.DEPTH_HEIGHT,
+                    latestMatte,
+                    256,
+                    256,
                     state.fStop,
                     targetFarFieldPx,
                     outPath,
@@ -759,8 +768,9 @@ class CameraController(
                 bitmap.copyPixelsFromBuffer(map)
             }
 
+            val quality = if (forceJpeg98) 98 else CAPTURE_JPEG_QUALITY
             activity.contentResolver.openOutputStream(destUri)?.use { outStream ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, 98, outStream)
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, outStream)
                 outStream.flush()
             }
             bitmap.recycle()

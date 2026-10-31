@@ -95,7 +95,7 @@ Java_com_zenith_auxcam_MainActivity_nativeSetCameraOpticalParams(
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
-        JNIEnv* env, jobject thiz, jobject hardwareBufferObj, jbyteArray depthY8Array, jint depthW, jint depthH, jfloat fStop, jfloat targetFarFieldPx, jstring outPathStr, jlongArray timestampsOut) {
+        JNIEnv* env, jobject thiz, jobject hardwareBufferObj, jbyteArray depthY8Array, jint depthW, jint depthH, jbyteArray alphaMatteArray, jint alphaW, jint alphaH, jfloat fStop, jfloat targetFarFieldPx, jstring outPathStr, jlongArray timestampsOut) {
     if (!gPipeline) {
         gPipeline = std::make_unique<VulkanPipeline>();
         if (!gPipeline->init(nullptr, 1440, 1080)) {
@@ -116,18 +116,26 @@ Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
         depthBytes = env->GetByteArrayElements(depthY8Array, nullptr);
     }
 
+    jbyte* alphaBytes = nullptr;
+    if (alphaMatteArray != nullptr) {
+        alphaBytes = env->GetByteArrayElements(alphaMatteArray, nullptr);
+    }
+
     const char* outPath = nullptr;
     if (outPathStr != nullptr) {
         outPath = env->GetStringUTFChars(outPathStr, nullptr);
     }
 
     int64_t ts[3] = {0, 0, 0};
-    LOGI("nativeProcessStillBokeh: calling processStillBokeh with outPath=%s", outPath ? outPath : "null");
+    LOGI("nativeProcessStillBokeh: calling processStillBokeh with outPath=%s, alphaMatte=%p (%dx%d)", outPath ? outPath : "null", alphaBytes, alphaW, alphaH);
     bool ok = gPipeline->processStillBokeh(
             hb,
             reinterpret_cast<const uint8_t*>(depthBytes),
             static_cast<uint32_t>(depthW),
             static_cast<uint32_t>(depthH),
+            reinterpret_cast<const uint8_t*>(alphaBytes),
+            static_cast<uint32_t>(alphaW),
+            static_cast<uint32_t>(alphaH),
             fStop,
             targetFarFieldPx,
             outPath,
@@ -137,6 +145,9 @@ Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
 
     if (depthBytes != nullptr) {
         env->ReleaseByteArrayElements(depthY8Array, depthBytes, JNI_ABORT);
+    }
+    if (alphaBytes != nullptr) {
+        env->ReleaseByteArrayElements(alphaMatteArray, alphaBytes, JNI_ABORT);
     }
     if (outPath != nullptr) {
         env->ReleaseStringUTFChars(outPathStr, outPath);

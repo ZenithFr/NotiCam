@@ -37,8 +37,8 @@ public:
         mOpticalParams.baseFStop = baseFStop;
     }
 
-    // Process still bokeh on 4080x3072 AHardwareBuffer using 1020x768 gather & 4080x3072 composite
-    bool processStillBokeh(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, float fStop, float targetFarFieldPx, const char* outFilePath = nullptr, int64_t* outTimestamps = nullptr);
+    // Process still bokeh on 4080x3072 AHardwareBuffer using 1020x768 gather, 4K guided filter & 4080x3072 composite
+    bool processStillBokeh(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, const uint8_t* alphaMatte = nullptr, uint32_t alphaW = 0, uint32_t alphaH = 0, float fStop = 1.8f, float targetFarFieldPx = 23.3f, const char* outFilePath = nullptr, int64_t* outTimestamps = nullptr);
 
     void updateSurface(ANativeWindow* newWindow, uint32_t width, uint32_t height);
 
@@ -110,9 +110,12 @@ private:
     VkImage mImgDepthStill{VK_NULL_HANDLE}, mImgCocStill{VK_NULL_HANDLE}, mImgAlphaStill{VK_NULL_HANDLE}, mImgBlurredStill{VK_NULL_HANDLE};
     VkDeviceMemory mMemDepthStill{VK_NULL_HANDLE}, mMemCocStill{VK_NULL_HANDLE}, mMemAlphaStill{VK_NULL_HANDLE}, mMemBlurredStill{VK_NULL_HANDLE};
     VkImageView mViewDepthStill{VK_NULL_HANDLE}, mViewCocStill{VK_NULL_HANDLE}, mViewAlphaStill{VK_NULL_HANDLE}, mViewBlurredStill{VK_NULL_HANDLE};
+    VkImage mImgAlphaGuidedStill{VK_NULL_HANDLE};
+    VkDeviceMemory mMemAlphaGuidedStill{VK_NULL_HANDLE};
+    VkImageView mViewAlphaGuidedStill{VK_NULL_HANDLE};
     VkBuffer mUploadStagingBufferStill{VK_NULL_HANDLE};
     VkDeviceMemory mUploadStagingMemStill{VK_NULL_HANDLE};
-    VkDescriptorSet mSetCocStill{VK_NULL_HANDLE}, mSetGatherStill{VK_NULL_HANDLE}, mSetCompStill{VK_NULL_HANDLE};
+    VkDescriptorSet mSetCocStill{VK_NULL_HANDLE}, mSetGatherStill{VK_NULL_HANDLE}, mSetCompStill{VK_NULL_HANDLE}, mSetAlphaStill{VK_NULL_HANDLE};
 
     // Live Viewfinder Swapchain & Presentation Resources:
     bool mSwapchainInitialized{false};
