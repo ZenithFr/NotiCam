@@ -53,6 +53,14 @@ class DualMatteSegmenter(private val context: Context) {
         // Runtime toggle for A/B comparison (default false = soft alpha)
         @Volatile
         var MATTE_HARD_THRESHOLD: Boolean = false
+
+        // L.0 Diagnostic contrast-stretch toggle
+        @Volatile
+        var STRETCH_MATTE: Boolean = false
+
+        // L.1 Float stopgap CPU XNNPACK toggle
+        @Volatile
+        var FORCE_CPU_FLOAT: Boolean = false
     }
 
     private var interpLandscape: Interpreter? = null
@@ -88,6 +96,7 @@ class DualMatteSegmenter(private val context: Context) {
     // Output alpha byte buffer (256x256 R8 in [0..255])
     private val outputAlphaBytes = ByteArray(256 * 256)
     private val alphaLock = Any()
+    private var loggedFirstInferenceFailure = false
 
     @Volatile
     var currentMode: TierMode = TierMode.DUAL
@@ -326,20 +335,44 @@ class DualMatteSegmenter(private val context: Context) {
         }
         val dtLMs = (SystemClock.elapsedRealtimeNanos() - t0L) / 1_000_000.0
 
+        val doStretch = STRETCH_MATTE || java.io.File("/sdcard/NotiCam/stretch_matte").exists()
+
+        var readOkL = false
         if (runOkL) {
-            // Dequantize landscape output to float probability
-            outBufL.rewind()
-            for (i in 0 until 144 * 256) {
-                val q = outBufL.get().toInt()
-                probL[i] = ((q - outZeroL) * outScaleL).coerceIn(0.0f, 1.0f)
+            try {
+                // Dequantize landscape output to float probability
+                outBufL.rewind()
+                for (i in 0 until 144 * 256) {
+                    val q = outBufL.get().toInt()
+                    var p = ((q - outZeroL) * outScaleL).coerceIn(0.0f, 1.0f)
+                    if (doStretch) {
+                        p = Math.min(1.0f, p * 2.0f)
+                    }
+                    probL[i] = p
+                }
+                upsampleLandscapeBilinear(probL, probUpsampledL)
+                readOkL = true
+            } catch (t: Throwable) {
+                Log.w(TAG, "Landscape output read failed: ${t.message}")
             }
-            upsampleLandscapeBilinear(probL, probUpsampledL)
+        }
+
+        // Return false on failure without upgrading or modifying matte
+        if (!runOkL || !readOkL) {
+            if (!loggedFirstInferenceFailure) {
+                loggedFirstInferenceFailure = true
+                Log.e(
+                    TAG,
+                    "INFERENCE FAILURE (session first): Landscape model failed (invoked=$runOkL, read=$readOkL), returning false without updating matte"
+                )
+            }
+            return false
         }
 
         var dtGMs = 0.0
         val isDual = (currentMode == TierMode.DUAL)
 
-        if (isDual && runOkL) {
+        if (isDual) {
             // YUV 1440x1080 -> stretch to [1,256,256,3] for general
             preprocessStretchYuv(image, 256, 256, inScaleG, inZeroG, inBufG)
 
@@ -355,18 +388,31 @@ class DualMatteSegmenter(private val context: Context) {
             }
             dtGMs = (SystemClock.elapsedRealtimeNanos() - t0G) / 1_000_000.0
 
+            var readOkG = false
             if (runOkG) {
-                outBufG.rewind()
-                for (i in 0 until 256 * 256) {
-                    val q = outBufG.get().toInt()
-                    probG[i] = ((q - outZeroG) * outScaleG).coerceIn(0.0f, 1.0f)
+                try {
+                    outBufG.rewind()
+                    for (i in 0 until 256 * 256) {
+                        val q = outBufG.get().toInt()
+                        var p = ((q - outZeroG) * outScaleG).coerceIn(0.0f, 1.0f)
+                        if (doStretch) {
+                            p = Math.min(1.0f, p * 2.0f)
+                        }
+                        probG[i] = p
+                    }
+                    readOkG = true
+                } catch (t: Throwable) {
+                    Log.w(TAG, "General output read failed: ${t.message}")
                 }
+            }
 
+            if (runOkG && readOkG) {
                 // Pixel-max combine at common 256x256 resolution
                 for (i in 0 until 256 * 256) {
                     probCombined[i] = Math.max(probUpsampledL[i], probG[i])
                 }
             } else {
+                // Fallback to landscape alone which was verified runOkL && readOkL
                 System.arraycopy(probUpsampledL, 0, probCombined, 0, 256 * 256)
             }
         } else {
@@ -379,14 +425,29 @@ class DualMatteSegmenter(private val context: Context) {
         var fgCount = 0
         val hardThreshold = MATTE_HARD_THRESHOLD
 
+        var fg045Count = 0
+        var fg065Count = 0
+        var minA = 1.0f
+        var maxA = 0.0f
+        var sumA = 0.0
+
         for (i in 0 until 256 * 256) {
             val p = probCombined[i]
             if (p >= thr) fgCount++
+            if (p >= 0.45f) fg045Count++
+            if (p >= 0.65f) fg065Count++
+            if (p < minA) minA = p
+            if (p > maxA) maxA = p
+            sumA += p
+
             if (hardThreshold) {
                 probCombined[i] = if (p >= thr) 1.0f else 0.0f
             }
         }
         val fgFraction = fgCount.toFloat() / (256f * 256f)
+        val fg045 = fg045Count.toFloat() / (256f * 256f)
+        val fg065 = fg065Count.toFloat() / (256f * 256f)
+        val meanA = (sumA / (256.0 * 256.0)).toFloat()
 
         // 5. EMA Temporal Smoothing (alpha = 0.25)
         if (!emaInitialized || fastPathTriggered) {
@@ -406,6 +467,15 @@ class DualMatteSegmenter(private val context: Context) {
                 outputAlphaBytes[i] = (emaMatte[i] * 255.0f).toInt().coerceIn(0, 255).toByte()
             }
         }
+
+        Log.i(
+            TAG,
+            String.format(
+                Locale.US,
+                "L0_STATS: mode=%s fg045=%.4f fg065=%.4f min=%.4f max=%.4f mean=%.4f stretch=%b",
+                currentMode.name, fg045, fg065, minA, maxA, meanA, doStretch
+            )
+        )
 
         Log.i(
             TAG,
@@ -564,6 +634,92 @@ class DualMatteSegmenter(private val context: Context) {
         }
         System.arraycopy(currHist, 0, prevHistogram, 0, 16)
         return diffSum * 0.5f // Total variation in [0, 1]
+    }
+
+    fun runFloatStopgapBenchmark(): String {
+        Log.i(TAG, "Starting L.1 FLOAT16 STOPGAP CPU XNNPACK BENCHMARK (50 runs each)...")
+        val (bufL, hashL) = loadAndHashModel("models/mp_landscape_fixed.tflite")
+        val (bufG, hashG) = loadAndHashModel("models/mp_general_fixed.tflite")
+        Log.i(TAG, "Loaded float landscape sha256: $hashL")
+        Log.i(TAG, "Loaded float general sha256:   $hashG")
+
+        val optsCpuL = Interpreter.Options().apply {
+            setNumThreads(4)
+            setUseXNNPACK(true)
+        }
+        val optsCpuG = Interpreter.Options().apply {
+            setNumThreads(4)
+            setUseXNNPACK(true)
+        }
+
+        val interpFloatL = Interpreter(bufL, optsCpuL)
+        val interpFloatG = Interpreter(bufG, optsCpuG)
+
+        val inFloatL = ByteBuffer.allocateDirect(1 * 144 * 256 * 3 * 4).order(ByteOrder.nativeOrder())
+        val outFloatL = ByteBuffer.allocateDirect(1 * 144 * 256 * 1 * 4).order(ByteOrder.nativeOrder())
+        val inFloatG = ByteBuffer.allocateDirect(1 * 256 * 256 * 3 * 4).order(ByteOrder.nativeOrder())
+        val outFloatG = ByteBuffer.allocateDirect(1 * 256 * 256 * 1 * 4).order(ByteOrder.nativeOrder())
+
+        // Warmup (5 runs)
+        for (w in 0 until 5) {
+            inFloatL.rewind(); outFloatL.rewind(); interpFloatL.run(inFloatL, outFloatL)
+            inFloatG.rewind(); outFloatG.rewind(); interpFloatG.run(inFloatG, outFloatG)
+        }
+
+        // 1. 50 runs Landscape alone
+        val timesL = DoubleArray(50)
+        for (i in 0 until 50) {
+            inFloatL.rewind(); outFloatL.rewind()
+            val t0 = SystemClock.elapsedRealtimeNanos()
+            interpFloatL.run(inFloatL, outFloatL)
+            val dt = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000.0
+            timesL[i] = dt
+        }
+
+        // 2. 50 runs General alone
+        val timesG = DoubleArray(50)
+        for (i in 0 until 50) {
+            inFloatG.rewind(); outFloatG.rewind()
+            val t0 = SystemClock.elapsedRealtimeNanos()
+            interpFloatG.run(inFloatG, outFloatG)
+            val dt = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000.0
+            timesG[i] = dt
+        }
+
+        // 3. 50 runs Dual back-to-back
+        val timesDual = DoubleArray(50)
+        for (i in 0 until 50) {
+            inFloatL.rewind(); outFloatL.rewind()
+            inFloatG.rewind(); outFloatG.rewind()
+            val t0 = SystemClock.elapsedRealtimeNanos()
+            interpFloatL.run(inFloatL, outFloatL)
+            interpFloatG.run(inFloatG, outFloatG)
+            val dt = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000.0
+            timesDual[i] = dt
+        }
+
+        val minL = timesL.minOrNull() ?: 0.0
+        val maxL = timesL.maxOrNull() ?: 0.0
+        val meanL = timesL.average()
+
+        val minG = timesG.minOrNull() ?: 0.0
+        val maxG = timesG.maxOrNull() ?: 0.0
+        val meanG = timesG.average()
+
+        val minDual = timesDual.minOrNull() ?: 0.0
+        val maxDual = timesDual.maxOrNull() ?: 0.0
+        val meanDual = timesDual.average()
+
+        val report = String.format(
+            Locale.US,
+            "FLOAT_BENCHMARK: Landscape min=%.2fms mean=%.2fms max=%.2fms | General min=%.2fms mean=%.2fms max=%.2fms | Dual min=%.2fms mean=%.2fms max=%.2fms",
+            minL, meanL, maxL, minG, meanG, maxG, minDual, meanDual, maxDual
+        )
+        Log.i(TAG, report)
+
+        interpFloatL.close()
+        interpFloatG.close()
+        return report
     }
 
     fun close() {

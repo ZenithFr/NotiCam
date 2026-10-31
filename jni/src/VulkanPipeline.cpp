@@ -647,6 +647,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     const float s1 = (mOpticalParams.s1FocusM > 0.05f) ? mOpticalParams.s1FocusM : 0.6f;
     static constexpr uint8_t kMatteThresholdByte = 166; // 0.65f * 255 = 165.75 -> 166
 
+    struct timespec tsInpaint0, tsInpaint1;
+    clock_gettime(CLOCK_MONOTONIC, &tsInpaint0);
+
     if (hasDepthSignal) {
         // H.1a: Spatial Coherence Depth Preprocessing (448x288 depth grid)
         // 1. Build metric depth grid & initial validity mask
@@ -727,6 +730,31 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                 depthDst[y * mStillW + x] = z_m;
                 float a = (z_m <= 0.9f) ? 1.0f : (z_m >= 1.6f ? 0.0f : (1.6f - z_m) / 0.7f);
                 alphaDst[y * mStillW + x] = static_cast<uint8_t>(a * 255.0f);
+            }
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &tsInpaint1);
+        double inpaintMs = (tsInpaint1.tv_sec - tsInpaint0.tv_sec) * 1000.0 + (tsInpaint1.tv_nsec - tsInpaint0.tv_nsec) / 1000000.0;
+        static std::vector<float> sInpaintSamples;
+        static uint32_t sInpaintFrameCount = 0;
+        sInpaintSamples.push_back(static_cast<float>(inpaintMs));
+        sInpaintFrameCount++;
+        if (sInpaintSamples.size() == 300) {
+            std::vector<float> sorted = sInpaintSamples;
+            std::sort(sorted.begin(), sorted.end());
+            float p50 = sorted[sorted.size() / 2];
+            float p95 = sorted[static_cast<size_t>(sorted.size() * 0.95f)];
+            LOGI("INPAINT_PERF: 300 frames collected | p50=%.3f ms | p95=%.3f ms | min=%.3f ms | max=%.3f ms",
+                 p50, p95, sorted.front(), sorted.back());
+        } else if (sInpaintSamples.size() > 300) {
+            sInpaintSamples.erase(sInpaintSamples.begin());
+            if (sInpaintFrameCount % 50 == 0) {
+                std::vector<float> sorted = sInpaintSamples;
+                std::sort(sorted.begin(), sorted.end());
+                float p50 = sorted[sorted.size() / 2];
+                float p95 = sorted[static_cast<size_t>(sorted.size() * 0.95f)];
+                LOGI("INPAINT_PERF: rolling 300 frames | p50=%.3f ms | p95=%.3f ms | min=%.3f ms | max=%.3f ms",
+                     p50, p95, sorted.front(), sorted.back());
             }
         }
     } else {

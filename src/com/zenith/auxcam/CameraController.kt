@@ -39,6 +39,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import rikka.shizuku.Shizuku
 import java.io.File
+import java.io.FileOutputStream
+import android.media.MediaScannerConnection
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
 import java.text.SimpleDateFormat
@@ -719,9 +721,13 @@ class CameraController(
             image.close()
         }
 
+        // L.4: Freeze requested dimensions and expected byte length at capture request time
+        val (frozenW, frozenH) = DeviceProfile.stillSize(state.resolution)
+        val expectedBytes = frozenW.toLong() * frozenH.toLong() * 4L
+
         outPath?.let { path ->
             io.execute {
-                saveStillToMediaStore(path, stamp, shutterNs, t4)
+                saveStillToMediaStore(path, stamp, shutterNs, t4, frozenW, frozenH, expectedBytes)
             }
         }
     }
@@ -731,10 +737,31 @@ class CameraController(
         stamp: String,
         shutterNs: Long,
         compositeCompleteNs: Long,
+        frozenW: Int,
+        frozenH: Int,
+        expectedBytes: Long,
     ) {
         val rgbaFile = File(rgbaPath)
         if (!rgbaFile.exists()) {
             Log.e(TAG, "saveStillToMediaStore: RGBA file missing at $rgbaPath")
+            return
+        }
+
+        // L.4 Guard: Compare actual readback length against expectedBytes before MediaStore insert
+        val actualBytes = rgbaFile.length()
+        if (actualBytes != expectedBytes) {
+            Log.e(
+                TAG,
+                String.format(
+                    Locale.US,
+                    "50MP/STILL GATE ABORT: expected %dx%dx4=%d bytes, got %d bytes (diff=%d). Aborting before MediaStore insert.",
+                    frozenW,
+                    frozenH,
+                    expectedBytes,
+                    actualBytes,
+                    actualBytes - expectedBytes
+                )
+            )
             return
         }
 
@@ -744,7 +771,8 @@ class CameraController(
         }
 
         // 2. MediaStore insertion
-        val (srcW, srcH) = DeviceProfile.stillSize(state.resolution)
+        val srcW = frozenW
+        val srcH = frozenH
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, "AUXCAM_$stamp.jpg")
             put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
@@ -1465,5 +1493,105 @@ class CameraController(
             )
         }
         Log.i(TAG, "physical lenses: $physicalLenses (current=$currentLens)")
+    }
+
+    private fun dumpPreviewDiagnostics(image: android.media.Image) {
+        try {
+            val yPlane = image.planes[0]
+            val yBuf = yPlane.buffer
+            val w = image.width
+            val h = image.height
+            val rowStride = yPlane.rowStride
+
+            val outDir = activity.getExternalFilesDir("diag") ?: activity.filesDir
+            if (!outDir.exists()) outDir.mkdirs()
+
+            // 1. Save fg_sanity_luma.png
+            val lumaBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            val lumaPixels = IntArray(w * h)
+            for (y in 0 until h) {
+                val rowOff = y * rowStride
+                for (x in 0 until w) {
+                    val yVal = yBuf.get(rowOff + x).toInt() and 0xFF
+                    lumaPixels[y * w + x] = (0xFF shl 24) or (yVal shl 16) or (yVal shl 8) or yVal
+                }
+            }
+            lumaBmp.setPixels(lumaPixels, 0, w, 0, 0, w, h)
+            FileOutputStream(File(outDir, "fg_sanity_luma.png")).use {
+                lumaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            lumaBmp.recycle()
+
+            // 2. Save alpha_preview.png and fg_sanity_alpha.png
+            val alphaBmp = Bitmap.createBitmap(256, 256, Bitmap.Config.ARGB_8888)
+            val alphaPixels = IntArray(256 * 256)
+            var fg045RawCount = 0
+            var fg065StretchedCount = 0
+            for (i in 0 until 256 * 256) {
+                val aVal = latestMatte[i].toInt() and 0xFF
+                val pStretched = aVal / 255.0f
+                val pRaw = pStretched * 0.5f
+                if (pRaw >= 0.45f) fg045RawCount++
+                if (pStretched >= 0.65f) fg065StretchedCount++
+                alphaPixels[i] = (0xFF shl 24) or (aVal shl 16) or (aVal shl 8) or aVal
+            }
+            alphaBmp.setPixels(alphaPixels, 0, 256, 0, 0, 256, 256)
+            FileOutputStream(File(outDir, "fg_sanity_alpha.png")).use {
+                alphaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            FileOutputStream(File(outDir, "alpha_preview.png")).use {
+                alphaBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            alphaBmp.recycle()
+
+            val fg045Raw = fg045RawCount.toFloat() / (256f * 256f)
+            val fg065Stretched = fg065StretchedCount.toFloat() / (256f * 256f)
+            Log.i(TAG, String.format(Locale.US, "L8_SANITY: fg045_raw=%.4f fg065_stretched=%.4f", fg045Raw, fg065Stretched))
+
+            // 3. Save depth_invalid_mask.png and coc_map_preview.png
+            val depthBytes = latestDepth
+            if (depthBytes != null && depthBytes.isNotEmpty()) {
+                val dW = DeviceProfile.DEPTH_WIDTH
+                val dH = DeviceProfile.DEPTH_HEIGHT
+                val invBmp = Bitmap.createBitmap(dW, dH, Bitmap.Config.ARGB_8888)
+                val cocBmp = Bitmap.createBitmap(dW, dH, Bitmap.Config.ARGB_8888)
+                val invPixels = IntArray(dW * dH)
+                val cocPixels = IntArray(dW * dH)
+                var y8ZeroCount = 0
+                val s1 = 0.6f
+
+                for (i in 0 until dW * dH) {
+                    val y8 = depthBytes[i].toInt() and 0xFF
+                    if (y8 == 0) {
+                        y8ZeroCount++
+                        invPixels[i] = (0xFF shl 24) or (0xFF shl 16) or (0xFF shl 8) or 0xFF // white
+                        cocPixels[i] = (0xFF shl 24) or (0xFF shl 16) or (0xFF shl 8) or 0xFF
+                    } else {
+                        invPixels[i] = (0xFF shl 24) // black
+                        val disp = y8.toFloat()
+                        val zm = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f)
+                        val ratio = if (zm < s1) 0f else Math.abs(zm - s1) / zm
+                        val cocPx = (ratio * 255f).toInt().coerceIn(0, 255)
+                        cocPixels[i] = (0xFF shl 24) or (cocPx shl 16) or (cocPx shl 8) or cocPx
+                    }
+                }
+                invBmp.setPixels(invPixels, 0, dW, 0, 0, dW, dH)
+                cocBmp.setPixels(cocPixels, 0, dW, 0, 0, dW, dH)
+
+                FileOutputStream(File(outDir, "depth_invalid_mask.png")).use {
+                    invBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+                FileOutputStream(File(outDir, "coc_map_preview.png")).use {
+                    cocBmp.compress(Bitmap.CompressFormat.PNG, 100, it)
+                }
+                invBmp.recycle()
+                cocBmp.recycle()
+
+                val y8ZeroPct = (y8ZeroCount.toFloat() / (dW * dH)) * 100f
+                Log.i(TAG, String.format(Locale.US, "L3_PREVIEW_DUMP: y8_zero_pct=%.2f%% path=%s", y8ZeroPct, outDir.absolutePath))
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "dumpPreviewDiagnostics failed", t)
+        }
     }
 }
