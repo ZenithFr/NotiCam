@@ -682,6 +682,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         // 1. Build metric depth grid & initial validity mask
         std::vector<float> gridDepth(depthW * depthH, 10.0f);
         std::vector<uint8_t> gridValid(depthW * depthH, 0);
+        uint32_t invalidCount = 0;
         for (uint32_t i = 0; i < depthW * depthH; ++i) {
             uint8_t y8 = depthY8Buffer[i];
             if (y8 > 0) {
@@ -689,60 +690,70 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                 float zm = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
                 gridDepth[i] = std::clamp(zm, 0.25f, 10.0f);
                 gridValid[i] = 1;
+            } else {
+                invalidCount++;
             }
         }
 
-        // 2. Dilate invalid mask by 2 px to protect dropout edge boundaries
-        std::vector<uint8_t> dilatedValid = gridValid;
-        for (uint32_t dy = 0; dy < depthH; ++dy) {
-            for (uint32_t dx = 0; dx < depthW; ++dx) {
-                if (gridValid[dy * depthW + dx] == 0) {
-                    for (int r = -2; r <= 2; ++r) {
-                        int ny = (int)dy + r;
-                        if (ny < 0 || ny >= (int)depthH) continue;
-                        for (int c = -2; c <= 2; ++c) {
-                            int nx = (int)dx + c;
-                            if (nx >= 0 && nx < (int)depthW) {
-                                dilatedValid[ny * depthW + nx] = 0;
+        static bool sLoggedSkipInpaintPreview = false;
+        if (invalidCount == 0) {
+            if (!sLoggedSkipInpaintPreview) {
+                sLoggedSkipInpaintPreview = true;
+                LOGI("SKIP INPAINT (preview session first): invalidCount=0, skipping spatial-coherence pass");
+            }
+        } else {
+            // 2. Dilate invalid mask by 2 px to protect dropout edge boundaries
+            std::vector<uint8_t> dilatedValid = gridValid;
+            for (uint32_t dy = 0; dy < depthH; ++dy) {
+                for (uint32_t dx = 0; dx < depthW; ++dx) {
+                    if (gridValid[dy * depthW + dx] == 0) {
+                        for (int r = -2; r <= 2; ++r) {
+                            int ny = (int)dy + r;
+                            if (ny < 0 || ny >= (int)depthH) continue;
+                            for (int c = -2; c <= 2; ++c) {
+                                int nx = (int)dx + c;
+                                if (nx >= 0 && nx < (int)depthW) {
+                                    dilatedValid[ny * depthW + nx] = 0;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // 3. Inpaint invalid CoC / depth:
-        // Inside subject matte -> inpaint from nearest valid foreground depth (or s1)
-        // Outside subject matte -> full far-field (10.0m, zero under-blur)
-        for (uint32_t dy = 0; dy < depthH; ++dy) {
-            for (uint32_t dx = 0; dx < depthW; ++dx) {
-                uint32_t idx = dy * depthW + dx;
-                if (dilatedValid[idx] == 0) {
-                    bool isForeground = false;
-                    if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
-                        uint32_t aY = (dy * alphaH) / depthH;
-                        uint32_t aX = (dx * alphaW) / depthW;
-                        if (alphaMatte[aY * alphaW + aX] >= kMatteThresholdByte) {
-                            isForeground = true;
+            // 3. Inpaint invalid CoC / depth:
+            // Inside subject matte -> inpaint from nearest valid foreground depth (or s1)
+            // Outside subject matte -> full far-field (10.0m, zero under-blur)
+            for (uint32_t dy = 0; dy < depthH; ++dy) {
+                for (uint32_t dx = 0; dx < depthW; ++dx) {
+                    uint32_t idx = dy * depthW + dx;
+                    if (dilatedValid[idx] == 0) {
+                        bool isForeground = false;
+                        if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
+                            uint32_t aY = (dy * alphaH) / depthH;
+                            uint32_t aX = (dx * alphaW) / depthW;
+                            if (alphaMatte[aY * alphaW + aX] >= kMatteThresholdByte) {
+                                isForeground = true;
+                            }
                         }
-                    }
-                    if (isForeground) {
-                        float nearestVal = s1;
-                        bool found = false;
-                        for (int rad = 3; rad <= 12 && !found; rad += 2) {
-                            for (int ny = std::max(0, (int)dy - rad); ny <= std::min((int)depthH - 1, (int)dy + rad) && !found; ++ny) {
-                                for (int nx = std::max(0, (int)dx - rad); nx <= std::min((int)depthW - 1, (int)dx + rad); ++nx) {
-                                    if (gridValid[ny * depthW + nx]) {
-                                        nearestVal = gridDepth[ny * depthW + nx];
-                                        found = true;
-                                        break;
+                        if (isForeground) {
+                            float nearestVal = s1;
+                            bool found = false;
+                            for (int rad = 3; rad <= 12 && !found; rad += 2) {
+                                for (int ny = std::max(0, (int)dy - rad); ny <= std::min((int)depthH - 1, (int)dy + rad) && !found; ++ny) {
+                                    for (int nx = std::max(0, (int)dx - rad); nx <= std::min((int)depthW - 1, (int)dx + rad); ++nx) {
+                                        if (gridValid[ny * depthW + nx]) {
+                                            nearestVal = gridDepth[ny * depthW + nx];
+                                            found = true;
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                            gridDepth[idx] = nearestVal;
+                        } else {
+                            gridDepth[idx] = 10.0f; // Asymptotic far-field
                         }
-                        gridDepth[idx] = nearestVal;
-                    } else {
-                        gridDepth[idx] = 10.0f; // Asymptotic far-field
                     }
                 }
             }
@@ -1645,6 +1656,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     if (hasDepthSignal) {
         std::vector<float> gridDepth(depthW * depthH, 10.0f);
         std::vector<uint8_t> gridValid(depthW * depthH, 0);
+        uint32_t invalidCount = 0;
         for (uint32_t i = 0; i < depthW * depthH; ++i) {
             uint8_t y8 = depthY8Buffer[i];
             if (y8 > 0) {
@@ -1652,60 +1664,70 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
                 float zm = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
                 gridDepth[i] = std::clamp(zm, 0.25f, 10.0f);
                 gridValid[i] = 1;
+            } else {
+                invalidCount++;
             }
         }
 
-        // Dilate invalid mask 2 px
-        std::vector<uint8_t> dilatedValid = gridValid;
-        for (uint32_t dy = 0; dy < depthH; ++dy) {
-            for (uint32_t dx = 0; dx < depthW; ++dx) {
-                if (gridValid[dy * depthW + dx] == 0) {
-                    for (int r = -2; r <= 2; ++r) {
-                        int ny = (int)dy + r;
-                        if (ny < 0 || ny >= (int)depthH) continue;
-                        for (int c = -2; c <= 2; ++c) {
-                            int nx = (int)dx + c;
-                            if (nx >= 0 && nx < (int)depthW) {
-                                dilatedValid[ny * depthW + nx] = 0;
+        static bool sLoggedSkipInpaintStill = false;
+        if (invalidCount == 0) {
+            if (!sLoggedSkipInpaintStill) {
+                sLoggedSkipInpaintStill = true;
+                LOGI("SKIP INPAINT (still session first): invalidCount=0, skipping spatial-coherence pass");
+            }
+        } else {
+            // Dilate invalid mask 2 px
+            std::vector<uint8_t> dilatedValid = gridValid;
+            for (uint32_t dy = 0; dy < depthH; ++dy) {
+                for (uint32_t dx = 0; dx < depthW; ++dx) {
+                    if (gridValid[dy * depthW + dx] == 0) {
+                        for (int r = -2; r <= 2; ++r) {
+                            int ny = (int)dy + r;
+                            if (ny < 0 || ny >= (int)depthH) continue;
+                            for (int c = -2; c <= 2; ++c) {
+                                int nx = (int)dx + c;
+                                if (nx >= 0 && nx < (int)depthW) {
+                                    dilatedValid[ny * depthW + nx] = 0;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Inpaint invalid depth pixels:
-        // Inside subject matte -> inpaint from nearest valid foreground depth (or s1Still)
-        // Outside subject matte -> full far-field (10.0m)
-        for (uint32_t dy = 0; dy < depthH; ++dy) {
-            for (uint32_t dx = 0; dx < depthW; ++dx) {
-                uint32_t idx = dy * depthW + dx;
-                if (dilatedValid[idx] == 0) {
-                    bool isForeground = false;
-                    if (hasRealAlpha) {
-                        uint32_t aY = (dy * alphaH) / depthH;
-                        uint32_t aX = (dx * alphaW) / depthW;
-                        if (alphaMatte[aY * alphaW + aX] >= kMatteThresholdByte) {
-                            isForeground = true;
+            // Inpaint invalid depth pixels:
+            // Inside subject matte -> inpaint from nearest valid foreground depth (or s1Still)
+            // Outside subject matte -> full far-field (10.0m)
+            for (uint32_t dy = 0; dy < depthH; ++dy) {
+                for (uint32_t dx = 0; dx < depthW; ++dx) {
+                    uint32_t idx = dy * depthW + dx;
+                    if (dilatedValid[idx] == 0) {
+                        bool isForeground = false;
+                        if (hasRealAlpha) {
+                            uint32_t aY = (dy * alphaH) / depthH;
+                            uint32_t aX = (dx * alphaW) / depthW;
+                            if (alphaMatte[aY * alphaW + aX] >= kMatteThresholdByte) {
+                                isForeground = true;
+                            }
                         }
-                    }
-                    if (isForeground) {
-                        float nearestVal = s1Still;
-                        bool found = false;
-                        for (int rad = 3; rad <= 12 && !found; rad += 2) {
-                            for (int ny = std::max(0, (int)dy - rad); ny <= std::min((int)depthH - 1, (int)dy + rad) && !found; ++ny) {
-                                for (int nx = std::max(0, (int)dx - rad); nx <= std::min((int)depthW - 1, (int)dx + rad); ++nx) {
-                                    if (gridValid[ny * depthW + nx]) {
-                                        nearestVal = gridDepth[ny * depthW + nx];
-                                        found = true;
-                                        break;
+                        if (isForeground) {
+                            float nearestVal = s1Still;
+                            bool found = false;
+                            for (int rad = 3; rad <= 12 && !found; rad += 2) {
+                                for (int ny = std::max(0, (int)dy - rad); ny <= std::min((int)depthH - 1, (int)dy + rad) && !found; ++ny) {
+                                    for (int nx = std::max(0, (int)dx - rad); nx <= std::min((int)depthW - 1, (int)dx + rad); ++nx) {
+                                        if (gridValid[ny * depthW + nx]) {
+                                            nearestVal = gridDepth[ny * depthW + nx];
+                                            found = true;
+                                            break;
+                                        }
                                     }
                                 }
                             }
+                            gridDepth[idx] = nearestVal;
+                        } else {
+                            gridDepth[idx] = 10.0f; // Asymptotic far-field
                         }
-                        gridDepth[idx] = nearestVal;
-                    } else {
-                        gridDepth[idx] = 10.0f; // Asymptotic far-field
                     }
                 }
             }

@@ -4,7 +4,9 @@ import android.content.Context
 import android.media.Image
 import android.os.SystemClock
 import android.util.Log
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.Tensor
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.io.File
 import java.io.FileInputStream
@@ -15,6 +17,33 @@ import java.nio.channels.FileChannel
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+
+data class TensorDetails(
+    val dtype: DataType,
+    val shape: IntArray,
+    val quantizationParams: Tensor.QuantizationParams
+)
+
+operator fun Tensor.QuantizationParams.component1(): Float = scale
+operator fun Tensor.QuantizationParams.component2(): Int = zeroPoint
+
+private fun Interpreter.getInputDetails(): List<TensorDetails> {
+    val list = mutableListOf<TensorDetails>()
+    for (i in 0 until inputTensorCount) {
+        val t = getInputTensor(i)
+        list.add(TensorDetails(t.dataType(), t.shape(), t.quantizationParams()))
+    }
+    return list
+}
+
+private fun Interpreter.getOutputDetails(): List<TensorDetails> {
+    val list = mutableListOf<TensorDetails>()
+    for (i in 0 until outputTensorCount) {
+        val t = getOutputTensor(i)
+        list.add(TensorDetails(t.dataType(), t.shape(), t.quantizationParams()))
+    }
+    return list
+}
 
 /**
  * Production dual-tier MediaPipe portrait segmentation engine on mt6878 APU (mtk-mdla_shim).
@@ -39,9 +68,14 @@ class DualMatteSegmenter(private val context: Context) {
     companion object {
         private const val TAG = "DualMatteSegmenter"
 
-        const val EXPECTED_HASH_LANDSCAPE =
+        const val EXPECTED_FLOAT_HASH_LANDSCAPE =
+            "1c2c4742c36c0e9fefeff2ab36110409eb7fb0c83dcaf3e1ec095f045fed0a53"
+        const val EXPECTED_FLOAT_HASH_GENERAL =
+            "62fb4bda888231741ae9be98bff2dc1bced55a6e474db5b3ba5cb37e83c1ec07"
+
+        const val EXPECTED_INT8_HASH_LANDSCAPE =
             "d1333fbfd66e880466bec06d3ffa0a57dfb8e247cb69191ca64d8e4471cd46ba"
-        const val EXPECTED_HASH_GENERAL =
+        const val EXPECTED_INT8_HASH_GENERAL =
             "45a82a06efc98a875e5092723b57ec144c62617bc368f76dfc1fc67e3ea4bb53"
 
         const val THR_DUAL = 0.65f
@@ -54,7 +88,7 @@ class DualMatteSegmenter(private val context: Context) {
         @Volatile
         var MATTE_HARD_THRESHOLD: Boolean = false
 
-        // L.0 Diagnostic contrast-stretch toggle
+        // L.0 Diagnostic contrast-stretch toggle (default false for production)
         @Volatile
         var STRETCH_MATTE: Boolean = false
 
@@ -68,7 +102,13 @@ class DualMatteSegmenter(private val context: Context) {
     private var nnapiDelegateL: NnApiDelegate? = null
     private var nnapiDelegateG: NnApiDelegate? = null
 
-    // Quantization parameters read dynamically at init
+    // Dtypes read dynamically at init
+    private var inDtypeL: DataType = DataType.FLOAT32
+    private var outDtypeL: DataType = DataType.FLOAT32
+    private var inDtypeG: DataType = DataType.FLOAT32
+    private var outDtypeG: DataType = DataType.FLOAT32
+
+    // Quantization parameters read dynamically at init (used only for INT8 fallback)
     private var inScaleL = 1.0f
     private var inZeroL = 0
     private var outScaleL = 1.0f
@@ -79,13 +119,13 @@ class DualMatteSegmenter(private val context: Context) {
     private var outScaleG = 1.0f
     private var outZeroG = 0
 
-    // Direct ByteBuffers for zero-copy JNI submission
-    private val inBufL = ByteBuffer.allocateDirect(1 * 144 * 256 * 3).order(ByteOrder.nativeOrder())
-    private val outBufL = ByteBuffer.allocateDirect(1 * 144 * 256 * 1).order(ByteOrder.nativeOrder())
-    private val inBufG = ByteBuffer.allocateDirect(1 * 256 * 256 * 3).order(ByteOrder.nativeOrder())
-    private val outBufG = ByteBuffer.allocateDirect(1 * 256 * 256 * 1).order(ByteOrder.nativeOrder())
+    // Direct ByteBuffers sized dynamically at init
+    private var inBufL: ByteBuffer = ByteBuffer.allocateDirect(1 * 144 * 256 * 3 * 4).order(ByteOrder.nativeOrder())
+    private var outBufL: ByteBuffer = ByteBuffer.allocateDirect(1 * 144 * 256 * 1 * 4).order(ByteOrder.nativeOrder())
+    private var inBufG: ByteBuffer = ByteBuffer.allocateDirect(1 * 256 * 256 * 3 * 4).order(ByteOrder.nativeOrder())
+    private var outBufG: ByteBuffer = ByteBuffer.allocateDirect(1 * 256 * 256 * 1 * 4).order(ByteOrder.nativeOrder())
 
-    // Dequantized probability buffers
+    // Probability buffers
     private val probL = FloatArray(144 * 256)
     private val probG = FloatArray(256 * 256)
     private val probUpsampledL = FloatArray(256 * 256)
@@ -110,105 +150,249 @@ class DualMatteSegmenter(private val context: Context) {
 
     fun initialize(): Boolean {
         if (isInitialized.get()) return true
-        Log.i(TAG, "=== Initializing DualMatteSegmenter on mt6878 APU ===")
+        Log.i(TAG, "=== Initializing DualMatteSegmenter ===")
 
         try {
-            // 1. Load model bytes & verify SHA256 hashes
-            val (bufL, hashL) = loadAndHashModel("models/mp_landscape_fixed_int8.tflite")
-            val (bufG, hashG) = loadAndHashModel("models/mp_general_fixed_int8.tflite")
+            // 1. Model Selection & Loading
+            // Landscape candidates (prefer float, fallback to int8)
+            val landscapeFloatCandidates = listOf(
+                "mp_landscape_fixed_float.tflite",
+                "models/mp_landscape_fixed_float.tflite"
+            )
+            val landscapeInt8Candidates = listOf(
+                "models/mp_landscape_fixed_int8.tflite",
+                "mp_landscape_fixed_int8.tflite"
+            )
 
-            Log.i(TAG, "Landscape model SHA256: $hashL")
-            Log.i(TAG, "General model SHA256:   $hashG")
+            var loadedLandscapeBuffer: ByteBuffer? = null
+            var loadedLandscapeSha: String? = null
+            var isFloatLandscape = false
 
-            if (!hashL.equals(EXPECTED_HASH_LANDSCAPE, ignoreCase = true)) {
-                Log.e(TAG, "FATAL: mp_landscape_fixed_int8.tflite SHA256 mismatch! Expected $EXPECTED_HASH_LANDSCAPE, got $hashL")
-                return false
+            for (path in landscapeFloatCandidates) {
+                val res = tryLoadAndHash(path)
+                if (res != null) {
+                    loadedLandscapeBuffer = res.first
+                    loadedLandscapeSha = res.second
+                    isFloatLandscape = true
+                    Log.i(TAG, "Loaded float landscape model candidate: $path")
+                    break
+                }
             }
-            if (!hashG.equals(EXPECTED_HASH_GENERAL, ignoreCase = true)) {
-                Log.e(TAG, "FATAL: mp_general_fixed_int8.tflite SHA256 mismatch! Expected $EXPECTED_HASH_GENERAL, got $hashG")
-                return false
-            }
-            Log.i(TAG, "Model SHA256 verification PASSED.")
-
-            // 2. Initialize NNAPI delegates targeting mtk-mdla_shim
-            val optsL = Interpreter.Options().apply {
-                try {
-                    val nnOpts = NnApiDelegate.Options().apply {
-                        setAcceleratorName("mtk-mdla_shim")
+            if (loadedLandscapeBuffer == null) {
+                for (path in landscapeInt8Candidates) {
+                    val res = tryLoadAndHash(path)
+                    if (res != null) {
+                        loadedLandscapeBuffer = res.first
+                        loadedLandscapeSha = res.second
+                        isFloatLandscape = false
+                        Log.i(TAG, "Fallback to int8 landscape model candidate: $path")
+                        break
                     }
-                    val delegate = NnApiDelegate(nnOpts)
-                    nnapiDelegateL = delegate
-                    addDelegate(delegate)
-                    Log.i(TAG, "Landscape Interpreter configured with mtk-mdla_shim NNAPI delegate")
-                } catch (t: Throwable) {
-                    Log.w(TAG, "Failed to create NNAPI delegate for landscape, falling back to CPU", t)
-                    setNumThreads(2)
                 }
             }
 
-            val optsG = Interpreter.Options().apply {
-                try {
-                    val nnOpts = NnApiDelegate.Options().apply {
-                        setAcceleratorName("mtk-mdla_shim")
-                    }
-                    val delegate = NnApiDelegate(nnOpts)
-                    nnapiDelegateG = delegate
-                    addDelegate(delegate)
-                    Log.i(TAG, "General Interpreter configured with mtk-mdla_shim NNAPI delegate")
-                } catch (t: Throwable) {
-                    Log.w(TAG, "Failed to create NNAPI delegate for general, falling back to CPU", t)
-                    setNumThreads(2)
-                }
+            if (loadedLandscapeBuffer == null || loadedLandscapeSha == null) {
+                Log.e(TAG, "FATAL: Could not load any landscape model!")
+                return false
             }
 
-            interpLandscape = Interpreter(bufL, optsL)
-            interpGeneral = Interpreter(bufG, optsG)
+            Log.i(TAG, "MATTE_LANDSCAPE_ASSET_SHA=$loadedLandscapeSha")
 
-            // 3. Read quantization parameters dynamically
-            interpLandscape?.let { interp ->
-                val inTensor = interp.getInputTensor(0)
-                val outTensor = interp.getOutputTensor(0)
-                val inQuant = inTensor.quantizationParams()
-                val outQuant = outTensor.quantizationParams()
-                inScaleL = inQuant.scale
-                inZeroL = inQuant.zeroPoint
-                outScaleL = outQuant.scale
-                outZeroL = outQuant.zeroPoint
-                Log.i(
-                    TAG,
-                    String.format(
-                        Locale.US,
-                        "Landscape quant: in_scale=%.7f in_zero=%d out_scale=%.7f out_zero=%d",
-                        inScaleL, inZeroL, outScaleL, outZeroL
+            if (isFloatLandscape) {
+                if (!loadedLandscapeSha.equals(EXPECTED_FLOAT_HASH_LANDSCAPE, ignoreCase = true)) {
+                    Log.e(
+                        TAG,
+                        "FATAL: Landscape float model SHA256 mismatch! Expected $EXPECTED_FLOAT_HASH_LANDSCAPE, got $loadedLandscapeSha"
                     )
-                )
+                    return false
+                }
+            } else {
+                if (!loadedLandscapeSha.equals(EXPECTED_INT8_HASH_LANDSCAPE, ignoreCase = true)) {
+                    Log.e(
+                        TAG,
+                        "FATAL: Landscape int8 model SHA256 mismatch! Expected $EXPECTED_INT8_HASH_LANDSCAPE, got $loadedLandscapeSha"
+                    )
+                    return false
+                }
+            }
+
+            // General candidates (prefer float, fallback to int8)
+            val generalFloatCandidates = listOf(
+                "mp_general_fixed_float.tflite",
+                "models/mp_general_fixed_float.tflite"
+            )
+            val generalInt8Candidates = listOf(
+                "models/mp_general_fixed_int8.tflite",
+                "mp_general_fixed_int8.tflite"
+            )
+
+            var loadedGeneralModel: String? = null
+            var loadedGeneralBuffer: ByteBuffer? = null
+            var loadedGeneralSha: String? = null
+            var isFloatGeneral = false
+
+            for (path in generalFloatCandidates) {
+                val res = tryLoadAndHash(path)
+                if (res != null) {
+                    loadedGeneralModel = path
+                    loadedGeneralBuffer = res.first
+                    loadedGeneralSha = res.second
+                    isFloatGeneral = true
+                    Log.i(TAG, "Loaded float general model candidate: $path")
+                    break
+                }
+            }
+            if (loadedGeneralBuffer == null) {
+                for (path in generalInt8Candidates) {
+                    val res = tryLoadAndHash(path)
+                    if (res != null) {
+                        loadedGeneralModel = path
+                        loadedGeneralBuffer = res.first
+                        loadedGeneralSha = res.second
+                        isFloatGeneral = false
+                        Log.i(TAG, "Fallback to int8 general model candidate: $path")
+                        break
+                    }
+                }
+            }
+
+            if (loadedGeneralBuffer != null && loadedGeneralSha != null) {
+                Log.i(TAG, "MATTE_GENERAL_ASSET_SHA=$loadedGeneralSha")
+                if (isFloatGeneral) {
+                    if (!loadedGeneralSha.equals(EXPECTED_FLOAT_HASH_GENERAL, ignoreCase = true)) {
+                        Log.e(
+                            TAG,
+                            "FATAL: General float model SHA256 mismatch! Expected $EXPECTED_FLOAT_HASH_GENERAL, got $loadedGeneralSha"
+                        )
+                        return false
+                    }
+                } else {
+                    if (!loadedGeneralSha.equals(EXPECTED_INT8_HASH_GENERAL, ignoreCase = true)) {
+                        Log.e(
+                            TAG,
+                            "FATAL: General int8 model SHA256 mismatch! Expected $EXPECTED_INT8_HASH_GENERAL, got $loadedGeneralSha"
+                        )
+                        return false
+                    }
+                }
+            } else {
+                Log.w(TAG, "Could not load any general model, degrading to FAST mode")
+                currentMode = TierMode.FAST
+            }
+
+            // 2. Initialize Interpreters
+            val optsL = Interpreter.Options().apply {
+                setNumThreads(4)
+                if (!FORCE_CPU_FLOAT) {
+                    try {
+                        val nnOpts = NnApiDelegate.Options().apply {
+                            setAcceleratorName("mtk-mdla_shim")
+                        }
+                        val delegate = NnApiDelegate(nnOpts)
+                        nnapiDelegateL = delegate
+                        addDelegate(delegate)
+                        Log.i(TAG, "Landscape Interpreter configured with mtk-mdla_shim NNAPI delegate")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Failed to create NNAPI delegate for landscape, falling back to CPU", t)
+                    }
+                } else {
+                    setUseXNNPACK(true)
+                }
+            }
+
+            interpLandscape = Interpreter(loadedLandscapeBuffer, optsL)
+            interpLandscape?.allocateTensors()
+
+            if (loadedGeneralBuffer != null) {
+                val optsG = Interpreter.Options().apply {
+                    setNumThreads(4)
+                    if (!FORCE_CPU_FLOAT) {
+                        try {
+                            val nnOpts = NnApiDelegate.Options().apply {
+                                setAcceleratorName("mtk-mdla_shim")
+                            }
+                            val delegate = NnApiDelegate(nnOpts)
+                            nnapiDelegateG = delegate
+                            addDelegate(delegate)
+                            Log.i(TAG, "General Interpreter configured with mtk-mdla_shim NNAPI delegate")
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "Failed to create NNAPI delegate for general, falling back to CPU", t)
+                        }
+                    } else {
+                        setUseXNNPACK(true)
+                    }
+                }
+                interpGeneral = Interpreter(loadedGeneralBuffer, optsG)
+                interpGeneral?.allocateTensors()
+            }
+
+            // 3. Read Dtype & Quantization Details dynamically
+            interpLandscape?.let { interp ->
+                val inDetails = interp.getInputDetails()
+                val outDetails = interp.getOutputDetails()
+                val inDtype = inDetails[0].dtype
+                val outDtype = outDetails[0].dtype
+                inDtypeL = inDtype
+                outDtypeL = outDtype
+
+                val inShape = inDetails[0].shape
+                val h = inShape[1]
+                val w = inShape[2]
+
+                Log.i(TAG, "MATTE landscape in=$inDtype H=$h W=$w out=$outDtype")
+
+                if (inDtype == DataType.INT8) {
+                    val (s0, z0) = inDetails[0].quantizationParams
+                    inScaleL = s0
+                    inZeroL = z0
+                }
+                if (outDtype == DataType.INT8) {
+                    val (s0, z0) = outDetails[0].quantizationParams
+                    outScaleL = s0
+                    outZeroL = z0
+                }
+
+                inBufL = ByteBuffer.allocateDirect(interp.getInputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
+                outBufL = ByteBuffer.allocateDirect(interp.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
             }
 
             interpGeneral?.let { interp ->
-                val inTensor = interp.getInputTensor(0)
-                val outTensor = interp.getOutputTensor(0)
-                val inQuant = inTensor.quantizationParams()
-                val outQuant = outTensor.quantizationParams()
-                inScaleG = inQuant.scale
-                inZeroG = inQuant.zeroPoint
-                outScaleG = outQuant.scale
-                outZeroG = outQuant.zeroPoint
-                Log.i(
-                    TAG,
-                    String.format(
-                        Locale.US,
-                        "General quant:   in_scale=%.7f in_zero=%d out_scale=%.7f out_zero=%d",
-                        inScaleG, inZeroG, outScaleG, outZeroG
-                    )
-                )
+                val inDetails = interp.getInputDetails()
+                val outDetails = interp.getOutputDetails()
+                val inDtype = inDetails[0].dtype
+                val outDtype = outDetails[0].dtype
+                inDtypeG = inDtype
+                outDtypeG = outDtype
+
+                val inShape = inDetails[0].shape
+                val h = inShape[1]
+                val w = inShape[2]
+
+                Log.i(TAG, "MATTE general in=$inDtype H=$h W=$w out=$outDtype")
+
+                if (inDtype == DataType.INT8) {
+                    val (s0, z0) = inDetails[0].quantizationParams
+                    inScaleG = s0
+                    inZeroG = z0
+                }
+                if (outDtype == DataType.INT8) {
+                    val (s0, z0) = outDetails[0].quantizationParams
+                    outScaleG = s0
+                    outZeroG = z0
+                }
+
+                inBufG = ByteBuffer.allocateDirect(interp.getInputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
+                outBufG = ByteBuffer.allocateDirect(interp.getOutputTensor(0).numBytes()).order(ByteOrder.nativeOrder())
             }
 
             // Warmup inferences
-            Log.i(TAG, "Warming up dual interpreters on mtk-mdla_shim...")
+            Log.i(TAG, "Warming up interpreters...")
             inBufL.rewind(); outBufL.rewind()
             interpLandscape?.run(inBufL, outBufL)
-            inBufG.rewind(); outBufG.rewind()
-            interpGeneral?.run(inBufG, outBufG)
+            if (interpGeneral != null) {
+                inBufG.rewind(); outBufG.rewind()
+                interpGeneral?.run(inBufG, outBufG)
+            }
             Log.i(TAG, "Warmup complete.")
 
             isInitialized.set(true)
@@ -216,6 +400,14 @@ class DualMatteSegmenter(private val context: Context) {
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to initialize DualMatteSegmenter", t)
             return false
+        }
+    }
+
+    private fun tryLoadAndHash(assetPath: String): Pair<ByteBuffer, String>? {
+        return try {
+            loadAndHashModel(assetPath)
+        } catch (t: Throwable) {
+            null
         }
     }
 
@@ -292,13 +484,15 @@ class DualMatteSegmenter(private val context: Context) {
     fun processFrame(image: Image): Boolean {
         if (!isInitialized.get()) return false
 
-        // L.7 (a): Both interpreters must be non-null
-        if (interpLandscape == null || interpGeneral == null) {
+        val isDual = (currentMode == TierMode.DUAL)
+
+        // L.7 (a) / Item 4: Interpreter presence check (require general only when isDual)
+        if (interpLandscape == null || (isDual && interpGeneral == null)) {
             if (!loggedFirstInferenceFailure) {
                 loggedFirstInferenceFailure = true
                 Log.e(
                     TAG,
-                    "INFERENCE FAILURE (session first): (a) interpreter is null (landscape=${interpLandscape != null}, general=${interpGeneral != null}), returning false without updating matte"
+                    "INFERENCE FAILURE (session first): (a) interpreter is null (landscape=${interpLandscape != null}, general=${interpGeneral != null}, isDual=$isDual), returning false without updating matte"
                 )
             }
             return false
@@ -331,9 +525,8 @@ class DualMatteSegmenter(private val context: Context) {
 
         lastDispatchTimeMs = nowMs
 
-        // 2. Preprocessing: Stretch resize (aspect-distorting) camera frame directly to model shapes
-        // YUV 1440x1080 -> stretch to [1,144,256,3] for landscape
-        preprocessStretchYuv(image, 256, 144, inScaleL, inZeroL, inBufL)
+        // 2. Preprocessing: Stretch resize camera frame directly to model shapes
+        preprocessStretchYuv(image, 256, 144, inDtypeL, inScaleL, inZeroL, inBufL)
 
         // 3. Inference on Landscape
         val t0L = SystemClock.elapsedRealtimeNanos()
@@ -349,21 +542,29 @@ class DualMatteSegmenter(private val context: Context) {
         }
         val dtLMs = (SystemClock.elapsedRealtimeNanos() - t0L) / 1_000_000.0
 
-        val doStretch = STRETCH_MATTE || java.io.File("/sdcard/NotiCam/stretch_matte").exists()
+        val doStretch = STRETCH_MATTE
 
         var readOkL = false
         var readFailedL = false
         if (runOkL) {
             try {
-                // Dequantize landscape output to float probability
                 outBufL.rewind()
-                for (i in 0 until 144 * 256) {
-                    val q = outBufL.get().toInt()
-                    var p = ((q - outZeroL) * outScaleL).coerceIn(0.0f, 1.0f)
+                if (outDtypeL == DataType.FLOAT32) {
+                    outBufL.asFloatBuffer().get(probL)
                     if (doStretch) {
-                        p = Math.min(1.0f, p * 2.0f)
+                        for (i in 0 until 144 * 256) {
+                            probL[i] = Math.min(1.0f, probL[i] * 2.0f)
+                        }
                     }
-                    probL[i] = p
+                } else {
+                    for (i in 0 until 144 * 256) {
+                        val q = outBufL.get().toInt()
+                        var p = ((q - outZeroL) * outScaleL).coerceIn(0.0f, 1.0f)
+                        if (doStretch) {
+                            p = Math.min(1.0f, p * 2.0f)
+                        }
+                        probL[i] = p
+                    }
                 }
                 upsampleLandscapeBilinear(probL, probUpsampledL)
                 readOkL = true
@@ -387,11 +588,9 @@ class DualMatteSegmenter(private val context: Context) {
         }
 
         var dtGMs = 0.0
-        val isDual = (currentMode == TierMode.DUAL)
 
         if (isDual) {
-            // YUV 1440x1080 -> stretch to [1,256,256,3] for general
-            preprocessStretchYuv(image, 256, 256, inScaleG, inZeroG, inBufG)
+            preprocessStretchYuv(image, 256, 256, inDtypeG, inScaleG, inZeroG, inBufG)
 
             val t0G = SystemClock.elapsedRealtimeNanos()
             var runOkG = false
@@ -411,13 +610,22 @@ class DualMatteSegmenter(private val context: Context) {
             if (runOkG) {
                 try {
                     outBufG.rewind()
-                    for (i in 0 until 256 * 256) {
-                        val q = outBufG.get().toInt()
-                        var p = ((q - outZeroG) * outScaleG).coerceIn(0.0f, 1.0f)
+                    if (outDtypeG == DataType.FLOAT32) {
+                        outBufG.asFloatBuffer().get(probG)
                         if (doStretch) {
-                            p = Math.min(1.0f, p * 2.0f)
+                            for (i in 0 until 256 * 256) {
+                                probG[i] = Math.min(1.0f, probG[i] * 2.0f)
+                            }
                         }
-                        probG[i] = p
+                    } else {
+                        for (i in 0 until 256 * 256) {
+                            val q = outBufG.get().toInt()
+                            var p = ((q - outZeroG) * outScaleG).coerceIn(0.0f, 1.0f)
+                            if (doStretch) {
+                                p = Math.min(1.0f, p * 2.0f)
+                            }
+                            probG[i] = p
+                        }
                     }
                     readOkG = true
                 } catch (t: Throwable) {
@@ -557,12 +765,13 @@ class DualMatteSegmenter(private val context: Context) {
     }
 
     /**
-     * Stretches YUV_420_888 frame directly to [dstW x dstH x 3] RGB int8 buffer.
+     * Stretches YUV_420_888 frame directly to [dstW x dstH x 3] buffer (FLOAT32 or INT8).
      */
     private fun preprocessStretchYuv(
         image: Image,
         dstW: Int,
         dstH: Int,
+        inDtype: DataType,
         scale: Float,
         zero: Int,
         outBuf: ByteBuffer
@@ -585,7 +794,8 @@ class DualMatteSegmenter(private val context: Context) {
         val uPixelStride = uPlane.pixelStride
         val vPixelStride = vPlane.pixelStride
 
-        val invScale = 1.0f / (scale * 255.0f)
+        val isFloat = (inDtype == DataType.FLOAT32)
+        val invScale = if (!isFloat && scale > 0f) 1.0f / (scale * 255.0f) else 1.0f
 
         for (dy in 0 until dstH) {
             val sy = (dy * srcH) / dstH
@@ -607,14 +817,19 @@ class DualMatteSegmenter(private val context: Context) {
                 val g = (yVal - 0.344136f * uVal - 0.714136f * vVal).coerceIn(0f, 255f)
                 val b = (yVal + 1.772f * uVal).coerceIn(0f, 255f)
 
-                // Quantize to int8: round(px_float / in_scale) + in_zero
-                val qR = Math.round(r * invScale + zero).coerceIn(-128, 127).toByte()
-                val qG = Math.round(g * invScale + zero).coerceIn(-128, 127).toByte()
-                val qB = Math.round(b * invScale + zero).coerceIn(-128, 127).toByte()
+                if (isFloat) {
+                    outBuf.putFloat((r / 127.5f) - 1.0f)
+                    outBuf.putFloat((g / 127.5f) - 1.0f)
+                    outBuf.putFloat((b / 127.5f) - 1.0f)
+                } else {
+                    val qR = Math.round(r * invScale + zero).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
+                    val qG = Math.round(g * invScale + zero).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
+                    val qB = Math.round(b * invScale + zero).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
 
-                outBuf.put(qR)
-                outBuf.put(qG)
-                outBuf.put(qB)
+                    outBuf.put(qR)
+                    outBuf.put(qG)
+                    outBuf.put(qB)
+                }
             }
         }
         outBuf.rewind()
