@@ -822,6 +822,11 @@ public class CameraUserService extends IAuxCamService.Stub {
                 if (android.os.Build.VERSION.SDK_INT >= 31) {
                     stillBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
                 }
+                if (mHighResolutionStill) {
+                    try {
+                        stillBuilder.set(new CaptureRequest.Key<Integer>("com.nothing.camera.remosaic.enable", Integer.class), 1);
+                    } catch (Throwable ignored) {}
+                }
                 stillBuilder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
                 stillBuilder.set(CaptureRequest.JPEG_ORIENTATION, mSensorOrientation);
             }

@@ -78,6 +78,21 @@ final class CameraCapabilities {
                 s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION), true);
                 if (s != null) return new Target(id, s, CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Camera2 maximum-resolution map");
             }
+            try {
+                CameraCharacteristics.Key<int[]> ntKey = new CameraCharacteristics.Key<>("nothing.scaler.availableStreamConfigurations", int[].class);
+                int[] ntSizes = c.get(ntKey);
+                if (ntSizes != null) {
+                    for (int i = 0; i + 3 < ntSizes.length; i += 4) {
+                        int fmt = ntSizes[i];
+                        int w = ntSizes[i + 1];
+                        int h = ntSizes[i + 2];
+                        int io = ntSizes[i + 3];
+                        if (fmt == ImageFormat.JPEG && io == 0 && is50Mp(new Size(w, h))) {
+                            return new Target(id, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
             // Vendor output tables and extension sizes are diagnostic only.
             // Without documented remosaic/session controls, requesting a larger
             // JPEG could merely upscale a binned sensor readout.
