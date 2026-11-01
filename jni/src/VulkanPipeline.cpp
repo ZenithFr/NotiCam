@@ -750,22 +750,51 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         memset(alphaLowDst, 0, alphaLowSize);
     }
 
+    // 1Hz Diagnostic Trigger Poller (app-private diag dir only, never per-frame)
+    static bool sCachedTriggerGuidedAb = false;
+    static bool sCachedTriggerWireAb = false;
+    static bool sCachedTriggerGuidedForce = false;
+    static bool sCachedDisableGuided = false;
+    static bool sCachedTriggerFpsProbe = false;
+    static auto sLastDiagPollTime = std::chrono::steady_clock::time_point{};
+
+    auto nowDiag = std::chrono::steady_clock::now();
+    if (sLastDiagPollTime.time_since_epoch().count() == 0 ||
+        std::chrono::duration_cast<std::chrono::milliseconds>(nowDiag - sLastDiagPollTime).count() >= 1000) {
+        sLastDiagPollTime = nowDiag;
+        sCachedTriggerGuidedAb = (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0);
+        sCachedTriggerWireAb = (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_wire_ab", F_OK) == 0);
+        if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
+            unlink("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
+            sCachedTriggerGuidedForce = true;
+        }
+        sCachedDisableGuided = (access("/data/user/0/com.zenith.auxcam/files/diag/disable_guided", F_OK) == 0);
+        if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_fps_probe", F_OK) == 0) {
+            unlink("/data/user/0/com.zenith.auxcam/files/diag/trigger_fps_probe");
+            sCachedTriggerFpsProbe = true;
+        }
+    }
+
     bool doTriggerAb = false;
     const char* matchedTrigger = nullptr;
-    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
+    if (sCachedTriggerGuidedAb) {
         matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab";
-    } else if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_wire_ab", F_OK) == 0) {
+    } else if (sCachedTriggerWireAb) {
         matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_wire_ab";
     }
 
     bool forceTrigger = false;
-    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
-        unlink("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
+    if (sCachedTriggerGuidedForce) {
+        sCachedTriggerGuidedForce = false;
         forceTrigger = true;
     }
 
     if (forceTrigger) {
-        if (matchedTrigger) unlink(matchedTrigger);
+        if (matchedTrigger) {
+            unlink(matchedTrigger);
+            sCachedTriggerGuidedAb = false;
+            sCachedTriggerWireAb = false;
+        }
         doTriggerAb = true;
     } else if (matchedTrigger != nullptr) {
         bool hasSubjectMatte = false;
@@ -782,6 +811,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         }
         if (hasSubjectMatte) {
             unlink(matchedTrigger);
+            sCachedTriggerGuidedAb = false;
+            sCachedTriggerWireAb = false;
             doTriggerAb = true;
         } else {
             static int sWaitLogCount = 0;
@@ -1289,12 +1320,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
-    bool isDisableGuided = sDisableGuided;
-    if (access("/data/user/0/com.zenith.auxcam/files/diag/disable_guided", F_OK) == 0 ||
-        access("/sdcard/Android/data/com.zenith.auxcam/files/diag/disable_guided", F_OK) == 0 ||
-        access("/sdcard/Pictures/NotiCam/disable_guided", F_OK) == 0) {
-        isDisableGuided = true;
-    }
+    bool isDisableGuided = sDisableGuided || sCachedDisableGuided;
 
     static int sLastGuidedLogged = -1;
     if (isDisableGuided) {
@@ -1640,8 +1666,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     static uint32_t s1HzFrameCount = 0;
     static auto sLastPresentSteady = std::chrono::steady_clock::time_point{};
 
-    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_fps_probe", F_OK) == 0) {
-        unlink("/data/user/0/com.zenith.auxcam/files/diag/trigger_fps_probe");
+    if (sCachedTriggerFpsProbe) {
+        sCachedTriggerFpsProbe = false;
         sBisectConfig = BisectConfig::CONFIG_A;
         sBisectPhaseStarted = false;
     }
