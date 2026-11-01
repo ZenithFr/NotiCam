@@ -1,9 +1,13 @@
 package com.zenith.auxcam.ui.components
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -11,6 +15,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -21,10 +26,10 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.unit.dp
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
@@ -36,7 +41,7 @@ import com.zenith.auxcam.ui.theme.CameraSpacing
  * Composition at a 72 dp visual size, inside a 96 dp paint/touch box:
  *   • 4 dp white ring
  *   • 3.5 dp transparent gap
- *   • solid white disc (red dot overlay while recording)
+ *   • solid white disc (disabled red disc in Video)
  *
  * Sizing note: the composable is deliberately **larger** than the disc so the
  * capture pulse ring (which expands towards 44 dp) is drawn inside its own
@@ -46,11 +51,12 @@ import com.zenith.auxcam.ui.theme.CameraSpacing
  */
 @Composable
 fun ShutterButton(
-    recording: Boolean,
+    videoMode: Boolean,
     enabled: Boolean,
     pulse: Int,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    busy: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -63,6 +69,18 @@ fun ShutterButton(
         label = "shutter-press",
     )
 
+    val busyAmount by animateFloatAsState(
+        targetValue = if (busy) 1f else 0f,
+        animationSpec = CameraMotion.fluid(), label = "capture-busy",
+    )
+    val enabledAmount by animateFloatAsState(
+        targetValue = if (enabled || busy) 1f else 0.55f,
+        animationSpec = CameraMotion.fade(200), label = "shutter-availability",
+    )
+    val discColor by animateColorAsState(
+        targetValue = if (videoMode) CameraColors.Red else Color.White,
+        animationSpec = CameraMotion.select(), label = "shutter-mode",
+    )
     // Arm the shutter the moment the finger lands: heavy click, like a real button.
     LaunchedEffect(pressed) {
         if (pressed && enabled) haptics.shutterDown()
@@ -85,7 +103,7 @@ fun ShutterButton(
     Box(
         modifier = modifier
             .size(CameraSpacing.shutterTouch)
-            .semantics { contentDescription = if (enabled) "Take photo" else "Camera busy or unavailable" }
+            .semantics { contentDescription = if (busy) "Saving photo" else if (videoMode) "Video recording is not available yet" else if (enabled) "Take photo" else "Camera busy or unavailable" }
             .clickable(
                 interactionSource = interaction,
                 // No ripple: the ring/disc compression is the feedback.
@@ -151,34 +169,24 @@ fun ShutterButton(
                 style = Stroke(width = ringWidth),
             )
 
-            // 3. Inner disc. Compresses a hair while the pulse ring is travelling.
+            // Video is visually distinct but deliberately disabled until recording exists.
             drawCircle(
-                color = Color.White,
-                radius = discRadius * (1f - 0.04f * (1f - pulseProgress.value).coerceIn(0f, 1f)),
+                color = discColor.copy(alpha = enabledAmount),
+                radius = discRadius * (1f - 0.16f * busyAmount) *
+                    (1f - 0.04f * (1f - pulseProgress.value).coerceIn(0f, 1f)),
                 center = center,
             )
 
-            // 4. Recording indicator.
-            if (recording) {
-                drawCircle(color = CameraColors.Red, radius = discRadius * 0.34f, center = center)
-            }
-
-            // 5. Micro-shading so the disc does not look flat on an AMOLED panel.
-            drawCircle(
-                color = Color.Black.copy(alpha = 0.05f),
-                radius = discRadius,
-                center = center,
-                style = Stroke(width = 1.dp.toPx()),
+        }
+        // Real pending work, not a fabricated percentage. The spinner exists
+        // only while capture/save is in flight and cannot enable the shutter.
+        AnimatedVisibility(visible = busy, enter = fadeIn(tween(100)), exit = fadeOut(tween(160))) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(CameraSpacing.shutterVisual + 8.dp),
+                color = CameraColors.Yellow,
+                trackColor = Color.Transparent,
+                strokeWidth = 1.5.dp,
             )
-
-            // 6. Disabled veil.
-            if (!enabled) {
-                drawCircle(
-                    color = Color.Black.copy(alpha = 0.45f),
-                    radius = discRadius,
-                    center = center,
-                )
-            }
         }
     }
 }

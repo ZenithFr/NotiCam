@@ -10,6 +10,9 @@ import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
 import android.graphics.Rect;
+import android.graphics.ImageFormat;
+import android.util.Size;
+import android.hardware.camera2.params.StreamConfigurationMap;
 import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
@@ -61,6 +64,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     private float mZoomRatio = 1.0f;
     private float mMaxDigitalZoom = 1.0f;
     private Rect mActiveArray;
+    private Rect mMaximumActiveArray;
     private Rect mCropRegion;
     private Rect mAfRegion;
     private Range<Integer> mCompensationRange;
@@ -77,6 +81,8 @@ public class CameraUserService extends IAuxCamService.Stub {
     private int mColorW = 1440, mColorH = 1080;
     private int mDepthW = 448, mDepthH = 288;
     private int mStillW = 4080, mStillH = 3072;
+    private int mStillFormat = ImageFormat.YUV_420_888;
+    private int mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
 
     private final class AfResetRunnable implements Runnable {
         @Override
@@ -213,18 +219,18 @@ public class CameraUserService extends IAuxCamService.Stub {
     public boolean openStereoSession(
             Surface colorSurface, int colorW, int colorH,
             Surface depthSurface, int depthW, int depthH,
-            Surface stillSurface, int stillW, int stillH,
+            Surface stillSurface, int stillW, int stillH, int stillFormat,
             String colorPhysicalId) {
         if (mCameraHandler == null) return false;
         mCameraHandler.post(() -> openSessionOnCameraThread(colorSurface, colorW, colorH,
-                depthSurface, depthW, depthH, stillSurface, stillW, stillH, colorPhysicalId));
+                depthSurface, depthW, depthH, stillSurface, stillW, stillH, stillFormat, colorPhysicalId));
         return true; // accepted; readiness/failure is delivered through the callback
     }
 
     private void openSessionOnCameraThread(
             Surface colorSurface, int colorW, int colorH,
             Surface depthSurface, int depthW, int depthH,
-            Surface stillSurface, int stillW, int stillH, String colorPhysicalId) {
+            Surface stillSurface, int stillW, int stillH, int stillFormat, String colorPhysicalId) {
         closeSessionOnCameraThread();
         Log.i(TAG, "openStereoSession requested: Color=[" + colorW + "x" + colorH + ", phys=" + colorPhysicalId + "], " +
                 "Depth=[" + depthW + "x" + depthH + "], Still=[" + stillW + "x" + stillH + "]");
@@ -239,7 +245,10 @@ public class CameraUserService extends IAuxCamService.Stub {
         mDepthH = depthH;
         mStillW = stillW;
         mStillH = stillH;
+        mStillFormat = stillFormat;
         mPhysicalId = colorPhysicalId;
+        mCurrentCameraId = stillFormat == ImageFormat.JPEG ? "0" :
+                ("2".equals(colorPhysicalId) || "3".equals(colorPhysicalId) ? colorPhysicalId : CAMERA_ID);
 
         Context shellContext = mContext;
         try {
@@ -259,6 +268,16 @@ public class CameraUserService extends IAuxCamService.Stub {
             return;
         }
 
+        if (mStillFormat == ImageFormat.JPEG) {
+            int[] size = getHighResolutionJpegSize();
+            if (size.length != 3 || size[0] != mStillW || size[1] != mStillH) {
+                notifyError("Requested 50 MP JPEG size is not advertised by the main camera");
+                return;
+            }
+            mStillPixelMode = size[2];
+        } else {
+            mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
+        }
         loadCameraCharacteristics(cm);
 
         try {
@@ -271,6 +290,45 @@ public class CameraUserService extends IAuxCamService.Stub {
         }
     }
 
+    /** Query standard, high-resolution and (API 31+) remosaic output maps.
+     * Returns width, height and sensor pixel mode. Prefer the default mode when
+     * it already exposes full resolution; never infer a size from the array.
+     */
+    @Override
+    public int[] getHighResolutionJpegSize() {
+        try {
+            CameraManager cm = (CameraManager) mContext.getSystemService(Context.CAMERA_SERVICE);
+            if (cm == null) return new int[0];
+            CameraCharacteristics chars = cm.getCameraCharacteristics("0");
+            Size size = find50MpJpeg(chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP));
+            if (size != null) return new int[]{size.getWidth(), size.getHeight(), CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT};
+            if (android.os.Build.VERSION.SDK_INT >= 31 &&
+                    chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) != null) {
+                size = find50MpJpeg(chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION));
+                if (size != null) return new int[]{size.getWidth(), size.getHeight(), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION};
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "50 MP capability query failed", t);
+        }
+        return new int[0];
+    }
+
+    private static Size find50MpJpeg(StreamConfigurationMap map) {
+        if (map == null) return null;
+        Size best = null;
+        Size[][] candidates = { map.getOutputSizes(ImageFormat.JPEG), map.getHighResolutionOutputSizes(ImageFormat.JPEG) };
+        for (Size[] sizes : candidates) {
+            if (sizes == null) continue;
+            for (Size size : sizes) {
+                long pixels = (long) size.getWidth() * size.getHeight();
+                double ratio = (double) Math.max(size.getWidth(), size.getHeight()) / Math.min(size.getWidth(), size.getHeight());
+                if (pixels >= 45_000_000L && pixels <= 55_000_000L && Math.abs(ratio - 4.0 / 3.0) < 0.02 &&
+                        (best == null || pixels > (long) best.getWidth() * best.getHeight())) best = size;
+            }
+        }
+        return best;
+    }
+
     void onDeviceOpened(CameraDevice camera, String colorPhysicalId) {
         mCameraDevice = camera;
         Log.i(TAG, "Camera " + mCurrentCameraId + " opened successfully. Configuring SessionConfiguration...");
@@ -278,6 +336,9 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             OutputConfiguration colorConfig = new OutputConfiguration(mColorSurface);
             OutputConfiguration stillConfig = new OutputConfiguration(mStillSurface);
+            if (mStillFormat == ImageFormat.JPEG && android.os.Build.VERSION.SDK_INT >= 31) {
+                stillConfig.addSensorPixelModeUsed(mStillPixelMode);
+            }
 
             List<OutputConfiguration> outputs = new ArrayList<OutputConfiguration>();
             outputs.add(colorConfig);
@@ -350,6 +411,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             mNoiseModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES);
             mEdgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES);
             mActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            mMaximumActiveArray = android.os.Build.VERSION.SDK_INT >= 31
+                    ? chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) : null;
             mCompensationRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
             Float maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
             mMaxDigitalZoom = (maxZoom != null && maxZoom > 1.0f) ? maxZoom : 1.0f;
@@ -404,8 +467,19 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     private void applyCropAndExposure(CaptureRequest.Builder b) {
+        applyCropAndExposure(b, false);
+    }
+
+    private void applyCropAndExposure(CaptureRequest.Builder b, boolean fullResolutionStill) {
         try {
-            if (mCropRegion != null) {
+            if (fullResolutionStill) {
+                // Maximum-resolution mode has a different sensor coordinate
+                // domain. Reusing the binned preview crop can cut out a quarter
+                // of the sensor, then upscale it into a misleading 50 MP JPEG.
+                Rect full = mStillPixelMode == CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION
+                        ? mMaximumActiveArray : mActiveArray;
+                if (full != null) b.set(CaptureRequest.SCALER_CROP_REGION, full);
+            } else if (mCropRegion != null) {
                 b.set(CaptureRequest.SCALER_CROP_REGION, mCropRegion);
             }
             if (mCompensationRange != null) {
@@ -754,7 +828,14 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             CaptureRequest.Builder stillBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             stillBuilder.addTarget(mStillSurface);
-            stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl);
+            stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl && mStillFormat != ImageFormat.JPEG);
+            if (mStillFormat == ImageFormat.JPEG) {
+                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                    stillBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
+                }
+                stillBuilder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
+                stillBuilder.set(CaptureRequest.JPEG_ORIENTATION, 90);
+            }
             stillBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
             if (mManualFocusActive) {
                 stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
@@ -769,7 +850,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             } else {
                 stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
             }
-            applyCropAndExposure(stillBuilder);
+            applyCropAndExposure(stillBuilder, mStillFormat == ImageFormat.JPEG);
             applyStillFlash(stillBuilder);
             applyMinimalProcessing(stillBuilder);
 
@@ -991,7 +1072,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             try { camera.close(); } catch (Throwable ignored) {}
             mService.mCameraDevice = null;
             mService.mCaptureSession = null;
-            if (!CAMERA_ID.equals(mService.mCurrentCameraId)) {
+            if (mService.mStillFormat != ImageFormat.JPEG && !CAMERA_ID.equals(mService.mCurrentCameraId)) {
                 Log.i(TAG, "Fallback from failing camera " + mService.mCurrentCameraId + " to " + CAMERA_ID);
                 mService.restartWithCamera(CAMERA_ID);
             } else {
@@ -1020,7 +1101,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             if (mGeneration != mService.mSessionGeneration) { session.close(); return; }
             Log.e(TAG, "Session configuration failed on Camera " + mService.mCurrentCameraId);
             mService.notifyError("CameraCaptureSession configuration failed");
-            if (!CAMERA_ID.equals(mService.mCurrentCameraId)) {
+            if (mService.mStillFormat != ImageFormat.JPEG && !CAMERA_ID.equals(mService.mCurrentCameraId)) {
                 Log.i(TAG, "Reverting to primary CAMERA_ID " + CAMERA_ID);
                 mService.restartWithCamera(CAMERA_ID);
             }

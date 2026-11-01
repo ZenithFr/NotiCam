@@ -23,11 +23,48 @@ class CaptureContracts(unittest.TestCase):
         cls.service = read('src/com/zenith/auxcam/CameraUserService.java')
 
     def test_sharp_modes_explicitly_bypass_bokeh(self):
-        self.assertIn('if (state.mode == CaptureMode.Portrait)', self.controller)
-        self.assertIn('if (frozen.mode == CaptureMode.Portrait)', self.controller)
+        self.assertIn('if (state.bokehActive)', self.controller)
+        self.assertIn('if (frozen.bokehActive)', self.controller)
         shader = read('jni/shaders/composite.comp')
         self.assertIn('(pc.rotate90 & 2) != 0', shader)
         self.assertIn('vec4(sharpRgba.rgb, 1.0)', shader)
+
+    def test_only_photo_video_modes_and_explicit_portrait_button(self):
+        state = read('src/com/zenith/auxcam/CameraUiState.kt')
+        self.assertNotIn('Portrait("Portrait")', state)
+        self.assertNotIn('Pro("Pro")', state)
+        self.assertIn('Video("Video")', state)
+        self.assertIn('mode == CaptureMode.Photo && sessionReady && !captureBusy', state)
+        screen = read('src/com/zenith/auxcam/ui/CameraScreen.kt')
+        self.assertIn('icon = NotiIcons.Portrait', screen)
+        self.assertIn('onClick = actions::onBokehToggle', screen)
+        self.assertIn('Video recording is coming later', screen)
+
+    def test_50mp_uses_actual_jpeg_capabilities_and_pixel_mode(self):
+        self.assertIn('getHighResolutionJpegSize()', self.service)
+        self.assertIn('map.getHighResolutionOutputSizes(ImageFormat.JPEG)', self.service)
+        self.assertIn('SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION', self.service)
+        self.assertIn('stillConfig.addSensorPixelModeUsed(mStillPixelMode)', self.service)
+        self.assertIn('CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode', self.service)
+        self.assertIn('CaptureRequest.JPEG_QUALITY, (byte) 100', self.service)
+        self.assertIn('SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION', self.service)
+        self.assertIn('applyCropAndExposure(stillBuilder, mStillFormat == ImageFormat.JPEG)', self.service)
+        self.assertNotIn('Resolution.High -> 8160', read('src/com/zenith/auxcam/DeviceProfile.kt'))
+
+    def test_50mp_preserves_encoded_pixels_without_full_bitmap_decode(self):
+        jpeg_path = self.controller.split('private fun saveHighResolutionJpeg(', 1)[1].split('private fun buildJpegThumbnail', 1)[0]
+        self.assertIn('inJustDecodeBounds = true', jpeg_path)
+        self.assertIn('CaptureOutput.matches(bounds.outWidth', jpeg_path)
+        self.assertIn('output.write(jpeg)', jpeg_path)
+        self.assertNotIn('Bitmap.createBitmap', jpeg_path)
+        self.assertNotIn('bitmap.compress(', jpeg_path)
+        self.assertIn('if (!published) uri?.let', jpeg_path)
+
+    def test_50mp_rolls_back_and_does_not_apply_bokeh_or_zoom(self):
+        self.assertIn('50 MP unavailable for this stream combination', self.controller)
+        self.assertIn('Zoom uses 12 MP. Switching', self.controller)
+        self.assertIn('Portrait effect uses 12 MP. Switching', self.controller)
+        self.assertIn('token == sessionToken', self.controller)
 
     def test_zero_blur_does_not_restore_default_radius(self):
         shader = read('jni/shaders/coc.comp')
@@ -80,7 +117,7 @@ class CaptureContracts(unittest.TestCase):
 
     def test_busy_gate_and_timer_cancellation(self):
         controls = read('src/com/zenith/auxcam/ui/components/Controls.kt')
-        self.assertIn('enabled = state.sessionReady && !state.captureBusy', controls)
+        self.assertIn('enabled = state.canTakePhoto', controls)
         self.assertIn('main.removeCallbacks(timerTick)', self.controller)
         self.assertNotIn('postDelayed({ stillCaptureInProgress.set(false) }', self.controller)
 

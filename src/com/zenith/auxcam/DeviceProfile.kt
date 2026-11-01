@@ -35,15 +35,8 @@ object DeviceProfile {
     const val STILL_WIDTH = 4080
     const val STILL_HEIGHT = 3072
 
-    /**
-     * Still stream size for a capture resolution. The sensor is 4:3, so both modes
-     * keep the 4:3 shape; 50 MP doubles the long edge (8160 x 6120) and is what the
-     * CMF Phone 2 Pro exposes as its full-resolution mode.
-     */
-    fun stillSize(resolution: Resolution): Pair<Int, Int> = when (resolution) {
-        Resolution.Standard -> STILL_WIDTH to STILL_HEIGHT
-        Resolution.High -> 8160 to 6120
-    }
+    // Full-resolution JPEG dimensions are queried from the privileged HAL.
+    // Do not infer them by doubling the bokeh pipeline's fixed dimensions.
 
     const val CAMERA_ID = "5"
 

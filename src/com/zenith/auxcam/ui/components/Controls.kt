@@ -2,10 +2,13 @@ package com.zenith.auxcam.ui.components
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -28,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -39,7 +43,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,7 +64,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -67,6 +79,7 @@ import com.zenith.auxcam.CameraController
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
+import com.zenith.auxcam.ui.effects.cameraMatte
 import com.zenith.auxcam.ui.effects.matte
 import com.zenith.auxcam.ui.effects.rememberMatteGrain
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
@@ -75,11 +88,12 @@ import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
+import kotlin.math.roundToInt
 
 /**
  * Matte icon button.
  *
- * A flat film disc (8 % white) with the matte grain on it — no rim, no sheen, no
+ * A flat neutral matte disc — no rim, no sheen, no
  * backdrop blur, so on a bright scene you read the glyph against the picture
  * rather than against a card. The 44 dp circle lives inside a 48 dp touch target
  * and only the circle is scaled on press (`clip = false`), so the glyph is never
@@ -93,21 +107,25 @@ fun MatteIconButton(
     modifier: Modifier = Modifier,
     selected: Boolean = false,
     tint: Color = CameraColors.Label,
+    enabled: Boolean = true,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val haptics = rememberCameraHaptics()
-    val grain = rememberMatteGrain()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.86f else 1f,
         // Down: crisp. Up: a touch of overshoot. This asymmetry is the whole trick.
         animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
         label = "matte-press",
     )
-    val background by animateColorAsState(
-        targetValue = if (selected) Color.White else CameraColors.Matte,
-        animationSpec = tween(180),
-        label = "matte-bg",
+    val surface by animateColorAsState(
+        targetValue = if (selected) CameraColors.Yellow else CameraColors.ControlSurface,
+        animationSpec = CameraMotion.select(),
+        label = "matte-surface",
+    )
+    val availability by animateFloatAsState(
+        targetValue = if (enabled) 1f else 0.4f,
+        animationSpec = CameraMotion.fade(180), label = "matte-availability",
     )
     val foreground by animateColorAsState(
         targetValue = if (selected) Color.Black else tint,
@@ -121,6 +139,7 @@ fun MatteIconButton(
             .clickable(
                 interactionSource = interaction,
                 indication = null,
+                enabled = enabled,
                 onClick = {
                     haptics.tap()
                     onClick()
@@ -136,14 +155,13 @@ fun MatteIconButton(
                     scaleY = scale
                     clip = false
                 }
-                .background(background, CircleShape)
-                .matte(grain, CircleShape, strength = if (selected) 0.35f else 1f),
+                .background(surface, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = contentDescription,
-                tint = foreground,
+                tint = foreground.copy(alpha = foreground.alpha * availability),
                 modifier = Modifier.size(CameraSpacing.iconSize),
             )
         }
@@ -222,30 +240,33 @@ fun LensChip(
     }
 }
 
-/** PHOTO · PORTRAIT · PRO, with the iOS yellow selection. */
+/** Two-mode dock, with a single traveling matte selection pill. */
 @Composable
 fun ModeCarousel(
     selected: CaptureMode,
     onSelect: (CaptureMode) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier,
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        CaptureMode.entries.forEach { mode ->
-            ModeLabel(
-                label = mode.label,
-                selected = mode == selected,
-                onClick = { onSelect(mode) },
-            )
+    val tabWidth = 104.dp
+    val indicatorX by animateDpAsState(
+        targetValue = tabWidth * selected.ordinal,
+        animationSpec = CameraMotion.select(),
+        label = "mode-indicator",
+    )
+    Box(modifier = modifier.cameraMatte(RoundedCornerShape(28.dp)).padding(4.dp)) {
+        Box(Modifier.offset(x = indicatorX).size(tabWidth, 48.dp)
+            .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp)))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            CaptureMode.entries.forEach { mode ->
+                ModeLabel(label = mode.label, selected = mode == selected,
+                    onClick = { onSelect(mode) }, modifier = Modifier.size(tabWidth, 48.dp))
+            }
         }
     }
 }
 
 @Composable
-private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val haptics = rememberCameraHaptics()
@@ -266,16 +287,12 @@ private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit) {
     )
 
     Box(
-        modifier = Modifier
+        modifier = modifier
             .clickable(
                 interactionSource = interaction,
                 indication = null,
-                onClick = {
-                    haptics.select()
-                    onClick()
-                },
-            )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+                onClick = { haptics.select(); onClick() },
+            ),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -293,7 +310,7 @@ private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** iOS-style thin slider with a white knob. */
+/** Direct under the finger; spring-settled on taps, resets and release. */
 @Composable
 fun IosSlider(
     value: Float,
@@ -302,60 +319,68 @@ fun IosSlider(
     modifier: Modifier = Modifier,
 ) {
     var widthPx by remember { mutableFloatStateOf(1f) }
-    val view = LocalView.current
-    val span = (valueRange.endInclusive - valueRange.start).takeIf { it != 0f } ?: 1f
+    var dragging by remember { mutableStateOf(false) }
+    var pressed by remember { mutableStateOf(false) }
+    var lastTick by remember { mutableIntStateOf(-1) }
+    val onChange by rememberUpdatedState(onValueChange)
+    val haptics = rememberCameraHaptics()
+    val insetPx = with(LocalDensity.current) { 10.dp.toPx() }
+    val span = (valueRange.endInclusive - valueRange.start).takeIf { it > 0f } ?: 1f
     val fraction = ((value - valueRange.start) / span).coerceIn(0f, 1f)
-
-    // Continuous: the value follows the finger with no snapping, which is what
-    // makes the aperture and exposure sliders feel like the iOS ones.
+    val displayedFraction by animateFloatAsState(
+        targetValue = fraction,
+        animationSpec = if (dragging) snap() else CameraMotion.fluid(),
+        label = "slider-position",
+    )
+    val knobScale by animateFloatAsState(
+        targetValue = if (dragging || pressed) 1.2f else 1f,
+        animationSpec = CameraMotion.release(),
+        label = "slider-touch",
+    )
     fun emit(x: Float) {
-        val raw = valueRange.start + (x / widthPx).coerceIn(0f, 1f) * span
-        onValueChange(raw.coerceIn(valueRange.start, valueRange.endInclusive))
+        val position = ((x - insetPx) / (widthPx - 2f * insetPx).coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val detent = (position * 12f).roundToInt()
+        if (dragging && detent != lastTick) { lastTick = detent; haptics.tick() }
+        onChange(valueRange.start + position * span)
     }
-
     Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(34.dp)
+        modifier = modifier.fillMaxWidth().height(44.dp)
             .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
-            .pointerInput(valueRange) {
-                detectTapGestures { offset -> emit(offset.x) }
+            .semantics {
+                progressBarRangeInfo = ProgressBarRangeInfo(value.coerceIn(valueRange), valueRange)
+                setProgress { requested -> onChange(requested.coerceIn(valueRange)); true }
             }
             .pointerInput(valueRange) {
-                detectHorizontalDragGestures { change, _ ->
-                    view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
-                    emit(change.position.x)
-                }
+                detectTapGestures(
+                    onPress = { pressed = true; try { tryAwaitRelease() } finally { pressed = false } },
+                    onTap = { offset -> emit(offset.x) },
+                )
+            }
+            .pointerInput(valueRange) {
+                detectHorizontalDragGestures(
+                    onDragStart = { dragging = true; lastTick = -1; emit(it.x) },
+                    onDragEnd = { dragging = false },
+                    onDragCancel = { dragging = false },
+                ) { change, _ -> change.consume(); emit(change.position.x) }
             },
     ) {
         Canvas(Modifier.fillMaxSize()) {
             val cy = size.height / 2f
-            val trackHeight = 4.dp.toPx()
+            val trackHeight = 3.dp.toPx()
             val radius = CornerRadius(trackHeight / 2f)
             val knobRadius = 10.dp.toPx()
             val travel = (size.width - knobRadius * 2f).coerceAtLeast(1f)
-            val knobX = knobRadius + travel * fraction
-
-            drawRoundRect(
-                color = CameraColors.SliderTrack,
-                topLeft = Offset(knobRadius, cy - trackHeight / 2f),
-                size = Size(travel, trackHeight),
-                cornerRadius = radius,
-            )
-            drawRoundRect(
-                color = CameraColors.SliderFill,
-                topLeft = Offset(knobRadius, cy - trackHeight / 2f),
-                size = Size((travel * fraction).coerceAtLeast(0f), trackHeight),
-                cornerRadius = radius,
-            )
-            // Knob halo + body.
-            drawCircle(color = Color.Black.copy(alpha = 0.18f), radius = knobRadius + 2.dp.toPx(), center = Offset(knobX, cy))
-            drawCircle(color = Color.White, radius = knobRadius, center = Offset(knobX, cy))
+            val knobX = knobRadius + travel * displayedFraction
+            drawRoundRect(CameraColors.SliderTrack, Offset(knobRadius, cy - trackHeight / 2f),
+                Size(travel, trackHeight), radius)
+            drawRoundRect(CameraColors.SliderFill, Offset(knobRadius, cy - trackHeight / 2f),
+                Size(travel * displayedFraction, trackHeight), radius)
+            drawCircle(Color.White, knobRadius * knobScale, Offset(knobX, cy))
         }
     }
 }
 
-/** White-when-active capsule used inside the Pro sheet. */
+/** White-when-active capsule used inside the camera-controls sheet. */
 @Composable
 fun TogglePill(
     label: String,
@@ -457,20 +482,22 @@ fun GalleryTile(
             ),
         contentAlignment = Alignment.Center,
     ) {
-        if (thumbnail != null) {
-            androidx.compose.foundation.Image(
-                bitmap = thumbnail,
-                contentDescription = "Last photo",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        } else {
-            Icon(
-                imageVector = NotiIcons.Gallery,
-                contentDescription = "Gallery",
-                tint = CameraColors.LabelTertiary,
-                modifier = Modifier.size(22.dp),
-            )
+        Crossfade(targetState = thumbnail, animationSpec = tween(260), label = "gallery-frame") { frame ->
+            if (frame != null) {
+                androidx.compose.foundation.Image(
+                    bitmap = frame,
+                    contentDescription = "Last photo",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                Icon(
+                    imageVector = NotiIcons.Gallery,
+                    contentDescription = "Gallery",
+                    tint = CameraColors.LabelTertiary,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
         }
 
         // White flash on arrival, fading over 420 ms.
@@ -486,7 +513,7 @@ fun GalleryTile(
 }
 
 /**
- * The Pro sheet: aperture ladder, exposure and the shoot toggles.
+ * The camera-controls sheet: aperture ladder, exposure and the shoot toggles.
  *
  * The panel itself is static — [BottomBar] performs the slide-in on the whole
  * panel (translation + fade + a 4 % scale) so the contents are never re-laid out
@@ -494,7 +521,7 @@ fun GalleryTile(
  * belongs to Portrait mode.
  */
 @Composable
-fun ProSheet(
+fun CameraSettings(
     state: CameraUiState,
     actions: CameraActions,
     modifier: Modifier = Modifier,
@@ -508,13 +535,14 @@ fun ProSheet(
             .matte(grain, RoundedCornerShape(CameraSpacing.panelRadius))
             .padding(horizontal = 20.dp, vertical = 18.dp),
     ) {
-        Text("CAPTURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
+        Text("Camera controls", style = CameraType.Value, color = CameraColors.Label)
         Spacer(Modifier.height(8.dp))
-        Text("12 MP · NATIVE 4:3 · JPEG 100", style = CameraType.Value, color = CameraColors.Label)
+        Text("${state.resolution.label} · 4:3 · JPEG 100", style = CameraType.Value, color = CameraColors.Label)
         Spacer(Modifier.height(8.dp))
         Text(
-            "Photo and Pro keep the scene sharp. Only Portrait adds software blur. " +
-                "Sensor RAW and 50 MP capture are not available yet. YUV still includes camera ISP processing.",
+            if (state.resolution == Resolution.High)
+                "Full-resolution main-camera JPEG. No upscaling or second JPEG encode. Portrait effect uses 12 MP."
+            else "Tap the person icon for the portrait effect. 50 MP uses the main camera at 1×. Sensor RAW is not available.",
             style = CameraType.Caption,
             color = CameraColors.LabelSecondary,
         )
@@ -541,7 +569,7 @@ fun ProSheet(
                         modifier = Modifier.size(16.dp),
                     )
                     Spacer(Modifier.width(7.dp))
-                    Text("APERTURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
+                    Text("DEPTH EFFECT", style = CameraType.Section, color = CameraColors.LabelTertiary)
                     Spacer(Modifier.weight(1f))
                     Text(state.fStopLabel, style = CameraType.Value, color = CameraColors.Label)
                 }
@@ -953,31 +981,17 @@ fun QuickFocusRow(
     }
 }
 
-/** Persistent camera identity and controls; status never sits beneath buttons. */
+/** Quiet iOS-inspired toolbar, with equal-sized side controls. */
 @Composable
 fun TopBar(
     state: CameraUiState,
     actions: CameraActions,
     modifier: Modifier = Modifier,
-    onInteraction: () -> Unit = {},
 ) {
     Row(
-        modifier = modifier.fillMaxWidth().height(72.dp)
-            .padding(horizontal = CameraSpacing.gutterWide),
+        modifier = modifier.fillMaxWidth().height(64.dp).padding(horizontal = 20.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text("NOTICAM", style = CameraType.Section, color = CameraColors.Yellow)
-            Spacer(Modifier.height(5.dp))
-            Text(
-                text = if (state.mode == CaptureMode.Portrait) "DEPTH / SOFTWARE BOKEH" else "12 MP / MINIMAL PROCESSING",
-                style = CameraType.Caption,
-                color = CameraColors.LabelSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
         MatteIconButton(
             icon = when (state.flash) {
                 FlashMode.Off -> NotiIcons.FlashOff
@@ -985,14 +999,32 @@ fun TopBar(
                 FlashMode.On -> NotiIcons.FlashOn
             },
             contentDescription = "Flash: ${state.flash.name}",
-            onClick = { onInteraction(); actions.onFlashClick() },
+            onClick = actions::onFlashClick,
+            enabled = state.mode == CaptureMode.Photo && state.sessionReady && !state.captureBusy,
+            tint = if (state.flash == FlashMode.Off) Color.White else CameraColors.Yellow,
         )
+        Spacer(Modifier.weight(1f))
         MatteIconButton(
-            icon = if (state.proSheetOpen) NotiIcons.Close else NotiIcons.Sliders,
-            contentDescription = if (state.proSheetOpen) "Close settings" else "Camera settings",
-            onClick = { onInteraction(); actions.onProToggle() },
-            selected = state.proSheetOpen,
+            icon = if (state.settingsOpen) NotiIcons.Close else NotiIcons.Sliders,
+            contentDescription = "Camera controls",
+            onClick = actions::onSettingsToggle,
+            selected = state.settingsOpen,
         )
+        Spacer(Modifier.weight(1f))
+        Box(Modifier.size(64.dp, 44.dp), contentAlignment = Alignment.Center) {
+            if (state.mode == CaptureMode.Photo) {
+                Text(
+                    text = if (state.resolution == Resolution.High) "50 MP" else "12 MP",
+                    style = CameraType.Value,
+                    color = if (state.resolution == Resolution.High) CameraColors.Yellow else Color.White,
+                    modifier = Modifier.cameraMatte(RoundedCornerShape(22.dp))
+                        .clickable(enabled = state.sessionReady && !state.captureBusy, onClick = actions::onResolutionToggle)
+                        .padding(horizontal = 11.dp, vertical = 13.dp),
+                )
+            } else {
+                Text("SOON", style = CameraType.Caption, color = CameraColors.LabelSecondary)
+            }
+        }
     }
 }
 
@@ -1011,9 +1043,7 @@ fun BottomBar(
             .padding(horizontal = CameraSpacing.gutterWide),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // The Pro menu is NOT built here: it lives in CameraScreen as an overlay
-        // anchored to the chrome band, so opening it never changes this Column's
-        // height (which would resize the SurfaceView underneath).
+        // Settings use a modal overlay and never resize the native preview.
         ModeCarousel(
             selected = state.mode,
             onSelect = { actions.onModeSelected(it) },
@@ -1022,7 +1052,7 @@ fun BottomBar(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 10.dp, start = 10.dp, end = 10.dp),
+                .padding(top = 20.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             GalleryTile(
@@ -1040,8 +1070,9 @@ fun BottomBar(
             Spacer(Modifier.weight(1f))
 
             ShutterButton(
-                recording = false,
-                enabled = state.sessionReady && !state.captureBusy,
+                videoMode = state.mode == CaptureMode.Video,
+                enabled = state.canTakePhoto,
+                busy = state.captureBusy,
                 pulse = state.capturePulse,
                 onClick = { actions.onShutterClick() },
                 modifier = Modifier.onGloballyPositioned { coords ->
@@ -1054,16 +1085,8 @@ fun BottomBar(
 
             Spacer(Modifier.weight(1f))
 
-            if (state.lensCount > 1) {
-                MatteIconButton(
-                    icon = NotiIcons.FlipCamera,
-                    contentDescription = "Switch lens",
-                    onClick = { actions.onSwitchLens() },
-                )
-            } else {
-                // Keeps the shutter optically centred when there is no lens flip.
-                Spacer(Modifier.size(CameraSpacing.touch))
-            }
+            // Match the gallery footprint without leaving a dead or invisible button.
+            Spacer(Modifier.size(CameraSpacing.gallery))
         }
     }
 }

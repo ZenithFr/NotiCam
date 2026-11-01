@@ -4,6 +4,7 @@ import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -74,6 +75,10 @@ fun Viewfinder(
     // Pinch detents are measured against the *live* engine zoom, not the gesture's
     // own accumulation, so they line up with the 0.6x/1x/2x stops exactly.
     val currentZoom by rememberUpdatedState(zoom)
+    val gridAlpha by animateFloatAsState(
+        targetValue = if (gridVisible) 1f else 0f,
+        animationSpec = CameraMotion.fade(220), label = "grid-opacity",
+    )
 
     val reticleScale = remember { Animatable(0.72f) }
     val reticleAlpha = remember { Animatable(0f) }
@@ -112,8 +117,8 @@ fun Viewfinder(
     LaunchedEffect(capturePulse) {
         if (capturePulse > 0) {
             bloomAlpha.snapTo(0f)
-            bloomAlpha.animateTo(0.85f, tween(durationMillis = 55))
-            bloomAlpha.animateTo(0f, tween(durationMillis = 280, easing = FastOutSlowInEasing))
+            bloomAlpha.animateTo(0.24f, tween(durationMillis = 70))
+            bloomAlpha.animateTo(0f, tween(durationMillis = 340, easing = FastOutSlowInEasing))
         }
     }
 
@@ -138,8 +143,8 @@ fun Viewfinder(
         )
 
         // Rule-of-thirds grid.
-        if (gridVisible) {
-            Canvas(Modifier.fillMaxSize()) {
+        if (gridVisible || gridAlpha > 0.001f) {
+            Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = gridAlpha }) {
                 val hairline = 0.5.dp.toPx()
                 val color = Color.White.copy(alpha = 0.22f)
                 drawLine(color, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), hairline)

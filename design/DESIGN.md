@@ -1,264 +1,84 @@
-# NotiCam — Apple Camera design system
+# NotiCam camera UI — Photo / Video
 
-The capture surface was rebuilt in the iOS Camera language (iOS 18/26 dark
-appearance) on **Jetpack Compose**, and is tuned for exactly one device: the
-**CMF Phone 2 Pro**.
+## Direction
 
-Open **`design/index.html`** for a clickable mock of the same composition
-(served statically, no build step). This document is the contract for anyone
-editing the UI: the layout rules, the tokens, the components, and the mapping
-back to code.
+An iOS-inspired, scene-first camera for the CMF Phone 2 Pro: black surround,
+camera-yellow selections, borderless matte capsules and oversized tactile
+capture controls. The requested iOS 27 direction is interpreted here, not claimed
+as a pixel-verified reproduction of an Apple screen. No Apple assets, private
+fonts or platform-only blur APIs are required.
 
----
+The Android app remains Kotlin/Jetpack Compose over the native Vulkan viewfinder.
+Changing the camera stack just for chrome would add risk without improving
+capture quality. A small `cameraMatte` modifier retains the control surfaces with
+a uniform dark neutral fill: no decorative stroke, reflective gradient, sheen or
+backdrop blur. Functional shutter/focus rings and keyboard focus outlines remain.
 
-## 1. Principles
+## Layout
 
-| Principle | What it means in code |
-|---|---|
-| **Nothing is painted over the framebuffer.** | `CameraScreen` is one `Column`: top bar → `weight(1f)` frame slot → lens chips → ƒ row → bottom bar. The chrome is *outside* the 4:3 region by construction, so no control can overlap the live image. Only the transient zoom dial floats on top, and only while the user is rotating it. |
-| **The frame is never stretched *or* sideways.** | The sensor streams 1440 × 1080; `composite.comp` rotates it **90° clockwise** into the swapchain, so the box is 3:4 portrait and the scene is upright in the hand. `CameraScreen` fits a box of exactly `DeviceProfile.previewAspect` inside the leftover slot and that box *is* the `SurfaceView` extent. |
-| **Two zoom gestures, and the wheel is neither.** | A **pinch on the scene** and a **drag along the chip row** both scrub the zoom and bring the wheel up. The wheel itself has no pointer input — it is a read-out, so no part of it can be grabbed and no framebuffer is occluded by its touch target. Tapping a chip is a *destination*, not a gesture: it selects the stop and leaves the chips alone. Visibility is keyed on the gesture, never on "the zoom value changed" — a lens flip also resets the zoom to 1×, and keying it on the value is what used to pop the wheel on a rotate. |
-| **One accent colour.** | `CameraColors.Yellow` (`#FFD60A`) marks selection (active mode, ƒ needle, "Done") and nothing else. `Red` (`#FF453A`) is reserved for recording. |
-| **Matte transparency, not glassmorphism.** | Chrome is a *thin flat shade* — 8 % white over the dark surface, 14 % black over the live scene — carrying a 64×64 grain tile repeated by the GPU (`ui/effects/Matte.kt`). No sheen, no hairline rim, no backdrop blur: a specular top-edge highlight is what makes a surface read as glass, so there isn't one. The grain alone is what tells you a control is there. |
-| **Motion has meaning.** | Everything is a Compose spring (`dampingRatio` 0.6–0.9, `StiffnessLow`…`StiffnessHigh`), 110–460 ms. No `LinearInterpolator`, no `ValueAnimator`. |
-| **Nothing clips.** | Every animated control composes at its *maximum* size and sets `clip = false` on its `graphicsLayer`; expansion animations run with `clip = false`. The shutter's pulse ring is drawn inside its own 96 dp box. |
-| **Thumb-reachable.** | Shutter, modes, lens chips and the ƒ row sit in the bottom half; flash/Pro in the top corners; everything ≥ 48 dp of touch target. |
+1. Safe-area toolbar: flash, camera-controls button, 12 MP / 50 MP selector.
+2. Largest fitting native 3:4 portrait viewfinder with rounded corners.
+   - Person-in-frame portrait-effect button in the top-right corner.
+   - Active-effect or 50 MP / 1× badge near the top.
+   - Lens selector centered near the lower edge, on a contrast gradient.
+   - Tap-to-focus, pinch/scrub zoom and AE/AF lock retain their camera actions.
+3. Reserved 48 dp strip: status/capture information, or the bokeh aperture slider.
+   Toggling bokeh never resizes the native surface.
+4. Matte mode capsule with **VIDEO / PHOTO only**.
+5. Large ring/disc shutter and gallery thumbnail. The rear-lens cycling button
+   is removed; an inert, equal-footprint spacer keeps the shutter centered. Lens
+   selection remains available through zoom stops, pinch and horizontal scrubbing.
+6. Quiet NotiCam wordmark, inside the safe navigation area.
 
----
+Camera settings open in a scrollable modal bottom sheet with system back and
+outside-tap dismissal. Manual focus/exposure are still available as controls;
+there is no separate Pro capture mode.
 
-## 2. Layout contract
+## Interaction contract
 
-```
-Column(windowInsetsPadding(safeDrawing))
- ├── TopBar            56 dp    flash · status pill · Pro
- ├── BoxWithConstraints weight(1f)   ← the ONLY flexible row
- │     └── Viewfinder   measured to exactly 4:3 (1440 × 1080)
- ├── ZoomChips         44 dp    0.6× · 1× · 2×   (collapse into the wheel)
- ├── QuickApertureRow  ~34 dp   Portrait only, expandVertically(clip = false)
- └── BottomBar                 Pro sheet (animated) · modes · shutter row
-       GalleryTile 52 dp · ShutterButton 96 dp box / 72 dp visual · flip 48 dp
-```
+- **Photo:** sharp by default. No synthetic blur unless the portrait button is on.
+- **Portrait icon:** toggles bokeh inside Photo. Yellow means enabled; a simulated
+  aperture slider appears. Starting from 50 MP explicitly returns to 12 MP.
+- **50 MP:** use an advertised main-camera JPEG output at 1×. Disable bokeh,
+  rebuild the still session and guard the shutter until ready. Unsupported sizes
+  or stream combinations must produce a visible message/12 MP recovery, not an
+  upscale. Zoom/lens changes explicitly return to 12 MP.
+- **Video:** preview shell only in this phase. Hide the bokeh button, display
+  “Video recording is coming later”, and disable the distinct red shutter. No
+  fake recording clock or successful-recording animation.
+- **Shutter:** disabled while capturing/saving or the session is unavailable;
+  admitted captures alone drive its pulse. Photo/Video changes are rejected
+  while capture is in flight.
 
-Consequences that the old `FrameLayout` could not give us:
+## Motion
 
-* The 4:3 box can never be covered — it is a sibling in normal flow, not a
-  backdrop under absolute chrome.
-* When the Pro sheet or the ƒ row expands, the *frame* gives up height
-  (`weight(1f)`), instead of the sheet sliding over the picture.
-* Nothing needs manual `translationY`, so there are no magic offsets to keep in
-  sync with the status bar / cutout.
+- Mode selection has one traveling pill; icon fills and labels ease between states.
+- The zoom disc follows a continuous, logarithmic position between lens stops and
+  becomes a faint guide away from exact stops. Readouts use critically damped
+  easing. No intermediate animated values are sent to Camera2: an animation must
+  never trigger repeated optical-lens changes or session rebuilds.
+- Sliders track the finger directly with matching track/touch insets. Taps and
+  programmatic resets spring-settle, the thumb grows on interaction, and haptics
+  are limited to detents. Each retains a 44 dp touch target and progress semantics.
+- Admitted captures drive shutter pulse rings and a restrained viewfinder flash.
+  Actual capture/save busy state contracts the disc and fades an indeterminate
+  indicator in/out. The button remains disabled until the real operation ends.
+- A successful save crossfades the gallery image and sends a small thumbnail from
+  the shutter to the gallery. Failures do not receive a success flight.
+- Status/aperture crossfades, badges and zoom readouts animate inside fixed bounds;
+  the settings sheet is an overlay. None of these resize the native surface.
+- Browser transitions and the thumbnail flight respect `prefers-reduced-motion`.
+  Native motion uses Compose animation APIs and the platform duration scale.
 
-The zoom dial and the shutter→gallery hand-off are the only overlays; they are
-siblings of the `Column` inside the root `Box`, so they can travel across the
-whole screen without being clipped by the toolbar or the frame.
+## Preview and verification
 
----
+`index.html` is an interactive design companion using `sample_portrait.jpg`,
+not a live camera or an Android emulator. It labels its simulated capabilities
+and capture actions. Native UI behavior remains in the Compose implementation.
 
-## 3. Tokens — `ui/theme/Theme.kt`
-
-### Colour — `CameraColors`
-| Token | Value | Use |
-|---|---|---|
-| `Yellow` | `#FFD60A` | selected mode, ƒ needle, "Done", focus reticle |
-| `Red` | `#FF453A` | recording indicator |
-| `Label` | `#FFFFFF` | primary glyphs and values |
-| `LabelSecondary` | 65 % | status pill text |
-| `LabelTertiary` | 40 % | unselected modes, section headers, captions |
-| `LabelQuaternary` | 25 % | slider end labels |
-| `Matte` | 8 % white | circular buttons, chips, RAW, gallery tile — flat film over the black surface |
-| `MatteScrim` | 14 % black | Pro sheet and zoom dial — flat shade over the live scene |
-| `Separator` | 12 % white | internal hairlines *between rows inside* a panel only — never a surface rim |
-| `SliderTrack` / `SliderFill` | 24 % / 100 % white | iOS slider |
-
-### Legibility with almost no shade
-
-The flat shade is deliberately thin, so it does **less** work than a frosted panel.
-Measured on `design/sample_portrait.jpg` (the bright bokeh frame the mock ships
-with), white label text over the sheet area gives:
-
-| Shade over the scene | Mean contrast | Brightest 10 % |
-|---|---|---|
-| 8 % black | 3.65 : 1 | 1.95 : 1 |
-| **14 % black (shipping)** | **3.86 : 1** | **2.08 : 1** |
-| 35 % black | 4.82 : 1 | 2.66 : 1 |
-
-Two things follow. First, adding shade has sharply diminishing returns — going from
-14 % to 35 % buys about one contrast step, while costing most of the see-through
-quality, which is why the thin value is the right trade. Second, small text over a
-blown-out sky will be marginal whatever the panel does; the lever there is glyph
-contrast (a 1 px ink shadow on the type), not a heavier surface. The mock keeps the
-thin shade and accepts the trade, the same way the iOS camera HUD puts white glyphs
-straight over the scene.
-
-### Spacing — `CameraSpacing`
-8-pt grid. `gutter` 16 dp (chrome), `gutterWide` 24 dp (bottom bar), `touch`
-48 dp, `iconSize` 22 dp, `shutterTouch` 96 dp, `shutterVisual` 72 dp, `gallery`
-52 dp, `capsuleHeight` 34 dp, `panelRadius` 24 dp.
-
-### Type — `CameraType`
-`Caption` 11 sp / 0.04 em · `Section` 11 sp / 0.12 em uppercase · `Mode` 12 sp /
-0.075 em uppercase · `Value` 13 sp semibold · `Lens` 12 sp semibold · `Dial`
-34 sp · `DialCaption` 11 sp · `Telemetry` 10 sp monospace.
-
----
-
-## 4. Components (`ui/components/`)
-
-| Component | File | Rules |
-|---|---|---|
-| `ShutterButton` | `ShutterButton.kt` | 4 dp white ring, 3.5 dp gap, solid disc, red dot while recording. Press = spring to 0.86, release = `DampingRatioMediumBouncy`. The capture pulse ring expands *into the 24 dp margin* of the 96 dp box, so it is never sliced. |
-| `Viewfinder` | `Viewfinder.kt` | `AndroidView(SurfaceView)` filling the box the caller sized to `previewAspect`. Rule-of-thirds grid, AE/AF reticle (spring-in, pivot at the tap), capture bloom, tap-to-focus + pinch-to-zoom detectors. |
-| `MatteIconButton` | `Controls.kt` | 44 dp flat-film disc inside a 48 dp touch target; press scales to 0.90 with `clip = false`. |
-| `StatusPill` | `Controls.kt` | Black 42 % capsule, `AnimatedContent` crossfade on text change. |
-| `ZoomChips` | `ZoomChips.kt` | **UW** (+ `0.6×` beneath) / 1× / 2× with a single white disc travelling between positions; `zoom` is the live engine value, so a pinch moves it too. Between stops the disc fades and the nearest label brightens. While the wheel is up the row fades to 0 and shrinks to 0.84 — it *becomes* the wheel. |
-| `ModeCarousel` | `Controls.kt` | `PHOTO · PORTRAIT · PRO`, `Yellow` for the selection, `animateColorAsState`. |
-| `IosSlider` | `Controls.kt` | 4 dp track, 20 dp white knob, tap or drag, integer snapping for the ƒ/EV ladders, `CLOCK_TICK` haptic on drag. |
-| `TogglePill` | `Controls.kt` | White when active — used for Grid / RAW / Timer. |
-| `GalleryTile` | `Controls.kt` | 52 dp tile showing the real decoded bokeh frame, else the gallery glyph. |
-| `ProSheet` | `Controls.kt` | Settings panel with no title and no Done button: framing segments (1:1 · **4:3** · 16:9 · Full), aperture (Portrait/Pro only), continuous ±4 EV, 12MP/50MP, Grid, Timer, telephoto assist, live telemetry. Rendered by `ProMenuOverlay`, which hangs it under the top bar and slides it **down**; tapping the scrim or the top-bar Pro button closes it. |
-| `TopBar` | `Controls.kt` | Flash + RAW on the left, status centred, Pro on the right. The whole header is a HUD: it fades out 2 s after the last interaction and returns on the next touch. |
-| `BottomBar` | `Controls.kt` | Pro sheet → modes → shutter row. Publishes the shutter and gallery centres via `onGloballyPositioned` for the hand-off animation. |
-| `ZoomDial` | `ZoomDial.kt` | Zoom wheel, **read-only**: top arc (161°→379°, 218° of travel at a 196 dp diameter), 56 ticks whose alpha follows `sin()`, flat vertical shade fading to nothing before the bottom, travelled thread + needle + glow knob, callout centred and lifted into the arc's opening. No pointer input: it is spawned by a pinch or by a chip-row drag, never dragged itself. |
-| `NotiIcons` | `ui/icons/NotiIcons.kt` | Nine hand-built `ImageVector`s on a 24 unit grid, 1.7 stroke, round caps. Resolution-independent, so scaling can never resample or crop a glyph. |
-
----
-
-## 5. Interaction map
-
-| Gesture | Result | Engine call |
-|---|---|---|
-| Tap the frame | Reticle springs in at the tap point | `focusAt(sensorX, sensorY)` on the privileged session |
-| **Hold** the frame | AE/AF locks: the reticle morphs into a padlock badge and stays until tapped | `focusAt(...)` + locked AE/AF |
-| Tap while locked | Releases the lock | — |
-| Pinch past 2× with TELE on | Session hands over to the physical telephoto lens | `setPhysicalLens(tele)` |
-| Pinch the frame | Chips morph into the wheel, zoom follows the pinch | `onZoomGesture(s)` → `showDial()` + `setZoom(z)`, throttled to 0.02 steps |
-| Drag the chip row | Same morph; zoom scrubs exponentially (~180 px doubles) | `onZoomDragStart/Drag/End` → `showDial()` |
-| Tap a chip | Selects the stop, wheel stays down | `onZoomSelected(z)` — never calls `showDial()` |
-| Flip the lens | Resets to 1×, wheel stays down | `onSwitchLens()` — deliberately not a zoom gesture |
-| Tap a lens chip | Jump to 0.6× / 1× / 2× (chips stay on screen) | `setZoom(z)` |
-| Tap the shutter | Bloom + ring pulse + shutter→gallery flight | capture request with the current ƒ and EV |
-| Tap Pro | Settings sheet slides down from under the top bar; button becomes a white ✕ | — |
-| Tap outside the sheet | Closes it (there is no Done button) | — |
-| Tap RAW | Toggles RAW capture (beside the flash, not in the sheet) | raw plane dump |
-| Tap flash | Off → Auto → On, icon + status pill update | `setFlashMode(mode)` |
-| Portrait mode | ƒ ladder appears in the bottom bar | — |
-| Tap gallery | Tile pops on arrival; opens the system gallery | `ACTION_VIEW` |
-| Framing 1:1 / 4:3 / 16:9 / Full | Crops the viewfinder box (never stretches) | — |
-| 12MP / 50MP | Rebuilds the still stream at 8160 × 6120 | session restart |
-| RAW press | Badge morphs into a bayer CFA sensor icon, then back | raw plane dump |
-
-Sensor-space mapping for a tap (`CameraController.onFocusAt`) mirrors the shader:
-with `PREVIEW_ROTATION_90` the normalised tap `(u, v)` becomes `sensorX = v`,
-`sensorY = 1 − u` — the same 90° clockwise mapping `composite.comp` uses.
-
----
-
-## 6. Motion & haptics reference
-
-All curves live in `ui/theme/Theme.kt` as `CameraMotion` — no composable defines
-its own spring, and nothing uses a default `animate*AsState()` spec. The shape is
-deliberately asymmetric: **press down is crisp, release is springy**.
-
-| Interaction | Spec |
-|---|---|
-| Press (icon button, chip, mode, toggle) | `spring(0.62, StiffnessHigh)` → scale 0.86–0.95 |
-| Release | `spring(DampingRatioMediumBouncy, StiffnessMediumLow)` → 1.0 |
-| Selection (mode/mode colour) | `spring(0.78, MediumLow)`; selected label sits at 1.06× |
-| Panels / overlays | `spring(0.9, MediumLow)` — damped so a panel never overshoots a neighbour |
-| Zoom wheel | `spring(LowBouncy, StiffnessLow)` — keeps momentum like a lens barrel |
-| Fades | 120–180 ms `tween`, always faster than the move they accompany |
-| Shutter press | `press()` → 0.86, release `release()` |
-| Shutter pulse | 520 ms `LinearOutSlowInEasing`, ring grows into the 96 dp margin |
-| Shutter disc | compresses 4 % while the pulse travels |
-| Capture bloom | 55 ms to 0.85 α, 280 ms `FastOutSlowIn` back to 0 |
-| Focus reticle | 110 ms fade + `release()` spring 0.72 → 1.0, 1.2 s hold |
-| Zoom chips | **one disc slides** between positions, `spring(0.72, MediumLow)`; labels cross-fade 180 ms |
-| Chips → wheel morph | chips fade 140 ms + shrink to 0.84 + drop 6 dp; wheel scales 0.55 → 1 from `TransformOrigin(0.5, 0)` on `slide()`, so the arc unfurls out of the chip line |
-| Settings sheet | slides **down** from under the top bar + fade 160 ms + scale 0.96 → 1 from the top edge; exit 130–160 ms; scrim fades 180 ms |
-| Gallery flight | 460 ms `FastOutSlowIn`, 96 dp tile, 26 dp arc lift |
-| Gallery landing | tile pops 1.10× and a white flash washes out over 420 ms |
-| Capture pulse | two staggered rings (main + chase) on one 560 ms clock, both drawn in the draw phase |
-| Header HUD | in 180 ms, out 420 ms, animated alpha read inside `graphicsLayer` |
-| AE/AF lock | square contracts to 0.82, corners round, padlock + "AE/AF LOCK" fade in on `slide()`; unlock reverses over 180 ms |
-
-### Layout-safe animation rules
-
-1. **Never animate the height of anything above the viewfinder.** The frame lives
-   in a `weight(1f)` slot; changing the column height resizes the `SurfaceView`
-   and therefore recreates the Vulkan swapchain on every frame. The ƒ row keeps a
-   fixed 36 dp slot and the Pro menu is a bottom overlay — both animate by
-   translation only.
-2. **Never clip.** Animated parents set `clip = false`; controls compose at their
-   maximum size (shutter 96 dp for a 72 dp disc).
-3. **One travel per action.** A zoom change moves exactly one thing (the disc);
-   a mode change moves exactly one thing (the label scale).
-
-### Haptics — `ui/feedback/Haptics.kt`
-
-`CameraHaptics` maps each interaction to a distinct, very short Android
-`VibrationEffect` (falling back to `HapticFeedbackConstants` below Android 10).
-Predefined effects respect the system touch-feedback setting.
-
-Haptics are **soft by design**. The old implementation used `VibrationEffect`
-predefined effects, which drive the main actuator at full strength — every tap felt
-like a notification. The vocabulary now goes through `View.performHapticFeedback`
-first, which uses the same tuned path as the keyboard, respects the user's haptic
-intensity, and is inherently a tick rather than a pulse.
-
-| Event | Constant (first that is supported wins) |
-|---|---|
-| Wheel summoned (pinch or chip-row drag) | `SEGMENT_TICK` (API 34) → `CLOCK_TICK` — once per summon |
-| Pinch crossing a lens stop | `SEGMENT_TICK` (API 34) → `CLOCK_TICK` |
-| Chip / mode / toggle / framing selection | `CONTEXT_CLICK` → `VIRTUAL_KEY` |
-| Plain button | `KEYBOARD_TAP` → `VIRTUAL_KEY` |
-| Finger down on the shutter | `LONG_PRESS` → `VIRTUAL_KEY` |
-| Frame captured | `CONFIRM` → `VIRTUAL_KEY` |
-| AE/AF hold to lock | `LONG_PRESS` → `CONTEXT_CLICK` |
-| AE/AF released | `CONTEXT_CLICK` → `VIRTUAL_KEY` |
-| Gesture end | `GESTURE_END` → `CLOCK_TICK` |
-
-Only if every constant is unavailable (or touch feedback is off system-wide) does it
-fall back to a 10 ms, amplitude-30 one-shot — never a full-strength vibration.
-
-**One tick per event, not per frame.** The wheel's engage tick is edge-triggered in
-`CameraController.showDial()` (guarded by `zoomDialVisible`), because a pinch emits
-dozens of scale events and a drag emits one per frame: firing on each would turn the
-softest haptic in the vocabulary into a continuous rattle. The same guard exists in
-the mock, which mirrors the tick with a guarded `navigator.vibrate(6)`.
-
----
-
-## 7. Device contract — CMF Phone 2 Pro
-
-| Property | Value | Where |
-|---|---|---|
-| Marketing name | CMF Phone 2 Pro | `DeviceProfile.MARKETING_NAME` |
-| SoC / GPU | Dimensity 7300 Pro · Mali-G615 MC2 | README |
-| Display | 1080 × 2392, 120 Hz | `DeviceProfile.DISPLAY_*` |
-| Prominent camera | id `5` (privileged session) | `DeviceProfile.CAMERA_ID` |
-| Preview colour | 1440 × 1080 (4:3) | `DeviceProfile.COLOR_*` |
-| Disparity | 448 × 288 (Y8) | `DeviceProfile.DEPTH_*` |
-| Still | 4080 × 3072 | `DeviceProfile.STILL_*` |
-
-`DeviceProfile.isTargetDevice()` matches the model/device strings; anywhere else
-the app still runs but the top bar renders a one-line warning, because the
-privileged session, the `AHardwareBuffer` imports and the Mali-G615 timings do
-not exist on other hardware.
-
----
-
-## 8. Verification
-
-There is no Android SDK in the design workspace, so the UI is guarded by
-`tools/verify_ui.py` (run by `build.sh`, or `python3 tools/verify_ui.py`):
-
-1. every `res/**/*.xml` parses and every `@type/name` / `R.type.name` resolves;
-2. every Kotlin/Java file is bracket- and string-balanced;
-3. every `com.zenith.auxcam.*` import resolves to a declared symbol;
-4. every `actions.onX(...)`, `state.prop`, `NotiIcons.X`, `CameraColors.X`,
-   `CameraSpacing.X` and `CameraType.X` reference exists;
-5. every project composable used across packages is imported.
-
-`aapt2 compile --dir res` and the glslang SPIR-V check cover the resource and
-shader layers. The Kotlin/C++ compile itself needs a real Android SDK + NDK
-(`./gradlew assembleDebug`).
+Run `python3 tools/preview_server.py` for the browser preview. No external font,
+image or runtime network service is required. The static design has been checked
+at desktop and 390 px widths, including Photo/Video, bokeh/resolution exclusivity,
+settings, grid, zoom/range motion, capture re-entry guards, reduced motion, and
+JavaScript errors. Android layout, touch behavior and HAL
+capture must still be verified on the actual phone.

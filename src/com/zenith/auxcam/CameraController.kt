@@ -12,6 +12,7 @@ import android.content.IntentFilter
 import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.hardware.HardwareBuffer
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import rikka.shizuku.Shizuku
 import java.io.File
+import java.io.ByteArrayInputStream
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
@@ -94,7 +96,8 @@ interface NativeBridge {
 /** Everything the Compose chrome can ask the camera to do. */
 interface CameraActions {
     fun onFlashClick()
-    fun onProToggle()
+    fun onBokehToggle()
+    fun onSettingsToggle()
     fun onModeSelected(mode: CaptureMode)
     fun onZoomSelected(zoom: Float)
     fun onZoomGesture(scaleFactor: Float)
@@ -141,7 +144,6 @@ interface CameraActions {
     /** Reset manual focus / AE/AF lock back to auto. */
     fun onFocusReset()
     fun onShutterClick()
-    fun onSwitchLens()
     /** Opens the phone's gallery on the newest picture. */
     fun onGalleryOpen()
 
@@ -217,6 +219,7 @@ class CameraController(
     private var service: IAuxCamService? = null
     private var serviceArgs: Shizuku.UserServiceArgs? = null
     private var serviceBinding = false
+    private var sessionToken = 0
     @Volatile private var surfaceHolder: SurfaceHolder? = null
     @Volatile private var engineReady = false
     @Volatile private var disposed = false
@@ -333,7 +336,7 @@ class CameraController(
                 val hq = intent.getBooleanExtra("high_quality", false)
                 val zsl = intent.getBooleanExtra("enable_zsl", true)
                 forceJpeg98 = intent.getBooleanExtra("quality_98", false)
-                update { it.copy(mode = if (hq) CaptureMode.Pro else it.mode) }
+                // Legacy diagnostics never select a removed capture mode.
                 triggerCapture(hq, zsl)
             }
         }
@@ -362,6 +365,7 @@ class CameraController(
     }
 
     fun pause() {
+        sessionToken++
         foreground = false
         timerRunning = false
         main.removeCallbacks(timerTick)
@@ -515,7 +519,7 @@ class CameraController(
             ComponentName(activity.packageName, CameraUserService::class.java.name),
         )
             .daemon(false)
-            .version(3)
+            .version(4)
             .processNameSuffix("auxcam_privileged")
         serviceArgs = args
         try { Shizuku.bindUserService(args, this) }
@@ -577,16 +581,7 @@ class CameraController(
             reader.setOnImageAvailableListener({ r -> onDepthImage(r) }, handler)
         }
 
-        val (stillW, stillH) = DeviceProfile.stillSize(state.resolution)
-        stillReader = ImageReader.newInstance(
-            stillW,
-            stillH,
-            ImageFormat.YUV_420_888,
-            2,
-            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
-        ).also { reader ->
-            reader.setOnImageAvailableListener({ r -> onStillImage(r) }, stillHandler ?: handler)
-        }
+        stillReader = createStillReader()
     }
 
     private fun startStereoSession() {
@@ -596,25 +591,27 @@ class CameraController(
         val color = colorReader ?: return
         val depth = depthReader ?: return
         val still = stillReader ?: return
-        val (stillW, stillH) = DeviceProfile.stillSize(state.resolution)
+        val stillW = still.width
+        val stillH = still.height
 
         // The preview surface must exist before the engine is initialised.
         if (!holder.surface.isValid) return
 
         try {
+            val token = ++sessionToken
             svc.setCallback(object : IAuxCamCallback.Stub() {
-                override fun onSessionReady(cameraId: String?) { post { this@CameraController.onSessionReady(cameraId) } }
-                override fun onSessionError(msg: String?) { post { this@CameraController.onSessionError(msg) } }
-                override fun onStillCaptured() { post { this@CameraController.onStillCaptured() } }
+                override fun onSessionReady(cameraId: String?) { post { if (token == sessionToken) this@CameraController.onSessionReady(cameraId) } }
+                override fun onSessionError(msg: String?) { post { if (token == sessionToken) this@CameraController.onSessionError(msg) } }
+                override fun onStillCaptured() { post { if (token == sessionToken) this@CameraController.onStillCaptured() } }
                 override fun onStats(colorFps: Float, depthFps: Float, dt: Float) {
-                    post { this@CameraController.onStats(colorFps, depthFps, dt) }
+                    post { if (token == sessionToken) this@CameraController.onStats(colorFps, depthFps, dt) }
                 }
             })
 
             val ok = svc.openStereoSession(
                 color.surface, DeviceProfile.COLOR_WIDTH, DeviceProfile.COLOR_HEIGHT,
                 depth.surface, DeviceProfile.DEPTH_WIDTH, DeviceProfile.DEPTH_HEIGHT,
-                still.surface, stillW, stillH,
+                still.surface, stillW, stillH, still.imageFormat,
                 currentLens,
             )
             update { it.copy(status = if (ok) "Starting engine…" else "Retrying session…") }
@@ -643,6 +640,7 @@ class CameraController(
             currentLens = actualLens
             invalidateAuxiliaryFrames()
         }
+        refreshHighResolutionCapability()
         onTele = currentLens == "3"
         if (onTele) native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
         else native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
@@ -658,7 +656,29 @@ class CameraController(
         }
     }
 
+    private fun refreshHighResolutionCapability() {
+        val svc = service ?: return
+        val generation = frameGeneration
+        io.execute {
+            val size = try { svc.getHighResolutionJpegSize() } catch (e: RemoteException) { null }
+            post {
+                if (generation == frameGeneration) {
+                    val width = size?.getOrNull(0) ?: 0
+                    val height = size?.getOrNull(1) ?: 0
+                    update { it.copy(highResolutionWidth = width, highResolutionHeight = height) }
+                }
+            }
+        }
+    }
+
     private fun onSessionError(msg: String?) {
+        if (state.resolution == Resolution.High) {
+            Toast.makeText(activity, "50 MP stream unavailable. Returning to 12 MP.", Toast.LENGTH_LONG).show()
+            finishCapture("50 MP stream rejected")
+            update { it.copy(resolution = Resolution.Standard, bokehEnabled = false, sessionReady = false) }
+            rebuildStillSession("50 MP unavailable for this stream combination. Restoring 12 MP…")
+            return
+        }
         timerRunning = false
         main.removeCallbacks(timerTick)
         finishCapture(msg ?: "Camera error")
@@ -730,11 +750,12 @@ class CameraController(
         var engineSubmitMs = 0.0
 
         try {
+            if (!foreground || !state.sessionReady || disposed) return
             val seg = matteSegmenter
             val nowMs = SystemClock.elapsedRealtime()
             val cadenceAllow = (nowMs - lastMatteDispatchMs >= 83L) // <= 12 Hz ceiling
 
-            if (state.mode == CaptureMode.Portrait && seg != null && seg.isAvailable && cadenceAllow) {
+            if (state.bokehActive && seg != null && seg.isAvailable && cadenceAllow) {
                 if (isMatteWorkerBusy.get()) {
                     matteDropCount5s++
                     native.notifyMatteDrop()
@@ -795,7 +816,7 @@ class CameraController(
             if (buffer != null) {
                 try {
                     if (engineReady && foreground && holder != null && holder.surface.isValid) {
-                        val targetFarFieldPx = if (state.mode == CaptureMode.Portrait) fStopToTargetFarFieldPx(state.fStop, currentLens) else 0f
+                        val targetFarFieldPx = if (state.bokehActive) fStopToTargetFarFieldPx(state.fStop, currentLens) else 0f
                         val tEng0 = SystemClock.elapsedRealtimeNanos()
                         native.renderFrame(
                             buffer,
@@ -838,6 +859,7 @@ class CameraController(
     private fun onDepthImage(reader: ImageReader) {
         val image = reader.acquireLatestImage() ?: return
         try {
+            if (!foreground || !state.sessionReady || disposed) return
             // Y8 rows may be padded. JNI expects tightly packed width × height bytes.
             val plane = image.planes[0]
             val bytes = FrameData.packPlane(plane.buffer, image.width, image.height, plane.rowStride, plane.pixelStride)
@@ -859,6 +881,10 @@ class CameraController(
         val image = reader.acquireLatestImage() ?: return
         val frozen = captureState ?: run { image.close(); return }
         main.removeCallbacks(captureTimeout)
+        if (image.format == ImageFormat.JPEG) {
+            receiveHighResolutionJpeg(image, frozen)
+            return
+        }
         val frozenW = image.width
         val frozenH = image.height
         var outPath: String? = null
@@ -884,14 +910,14 @@ class CameraController(
                 // builds; log the intent here so a mismatch is visible.
                 Log.i(TAG, "capture resolution=${state.resolution.label}")
 
-                val targetFarFieldPx = if (frozen.mode == CaptureMode.Portrait) fStopToTargetFarFieldPx(frozen.fStop, currentLens) else 0f
+                val targetFarFieldPx = if (frozen.bokehActive) fStopToTargetFarFieldPx(frozen.fStop, currentLens) else 0f
                 val timestamps = LongArray(4)
                 val processed = try { native.processStill(
                     buffer,
                     depthFor(image.timestamp),
                     DeviceProfile.DEPTH_WIDTH,
                     DeviceProfile.DEPTH_HEIGHT,
-                    if (frozen.mode == CaptureMode.Portrait) matteFor(image.timestamp) else null,
+                    if (frozen.bokehActive) matteFor(image.timestamp) else null,
                     256,
                     256,
                     frozen.fStop,
@@ -968,6 +994,93 @@ class CameraController(
                 saveStillToMediaStore(path, stamp, shutterNs, t4, frozenW, frozenH, expectedBytes)
             }
         }
+    }
+
+    private fun receiveHighResolutionJpeg(image: android.media.Image, frozen: CameraUiState) {
+        val expectedW = frozen.highResolutionWidth
+        val expectedH = frozen.highResolutionHeight
+        try {
+            check(frozen.resolution == Resolution.High && !frozen.bokehActive)
+            val source = image.planes[0].buffer
+            val jpeg = ByteArray(source.remaining())
+            source.get(jpeg)
+            io.execute { saveHighResolutionJpeg(jpeg, expectedW, expectedH) }
+        } catch (e: Exception) {
+            Log.e(TAG, "50 MP buffer read failed", e)
+            finishCapture("50 MP capture failed")
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun saveHighResolutionJpeg(jpeg: ByteArray, expectedW: Int, expectedH: Int) {
+        var uri: Uri? = null
+        var published = false
+        try {
+            // Decode headers only. A 50 MP ARGB bitmap would cost ~200 MB and
+            // recompressing it would both hurt quality and risk an OOM.
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
+            check(CaptureOutput.is50MpSize(bounds.outWidth, bounds.outHeight) &&
+                CaptureOutput.matches(bounds.outWidth, bounds.outHeight, expectedW, expectedH)) {
+                "Camera returned ${bounds.outWidth}×${bounds.outHeight}, expected ${expectedW}×${expectedH}"
+            }
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "NOTICAM_${stamp}_50MP.jpg")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NotiCam")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+                put(MediaStore.Images.Media.WIDTH, bounds.outWidth)
+                put(MediaStore.Images.Media.HEIGHT, bounds.outHeight)
+            }
+            val destination = checkNotNull(activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
+            uri = destination
+            checkNotNull(activity.contentResolver.openOutputStream(destination)).use { output ->
+                output.write(jpeg) // preserve the HAL's full-resolution data and EXIF byte-for-byte
+                output.flush()
+            }
+            val complete = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+            check(activity.contentResolver.update(destination, complete, null, null) > 0)
+            published = true
+            latestPhotoUri = destination
+            buildJpegThumbnail(jpeg, bounds.outWidth, bounds.outHeight)?.let { thumbnail ->
+                post { onThumbnailReady(thumbnail) }
+            }
+            Log.i(TAG, "50 MP saved: ${bounds.outWidth}×${bounds.outHeight}, ${jpeg.size} bytes")
+        } catch (e: Exception) {
+            Log.e(TAG, "50 MP save failed", e)
+        } finally {
+            if (!published) uri?.let { incomplete ->
+                try { activity.contentResolver.delete(incomplete, null, null) }
+                catch (e: Exception) { Log.w(TAG, "Remove incomplete 50 MP row", e) }
+            }
+            finishCapture(if (published) "50 MP saved to Photos" else "Could not save 50 MP photo")
+        }
+    }
+
+    private fun buildJpegThumbnail(jpeg: ByteArray, width: Int, height: Int): ImageBitmap? = try {
+        var sample = 1
+        while (maxOf(width, height) / sample > 336) sample *= 2
+        val bitmap = BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size,
+            BitmapFactory.Options().apply { inSampleSize = sample })
+        if (bitmap == null) null else {
+            val orientation = ExifInterface(ByteArrayInputStream(jpeg))
+                .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
+            val degrees = when (orientation) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                else -> 0f
+            }
+            val upright = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height,
+                Matrix().apply { postRotate(degrees) }, true)
+            if (upright !== bitmap) bitmap.recycle()
+            upright.asImageBitmap()
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "50 MP thumbnail unavailable", e)
+        null
     }
 
     private fun saveStillToMediaStore(
@@ -1160,7 +1273,7 @@ class CameraController(
     }
 
     private fun triggerCapture(highQuality: Boolean, enableZsl: Boolean) {
-        if (!foreground || !state.sessionReady || disposed) return
+        if (!foreground || !state.canTakePhoto || disposed) return
         val svc = service ?: run {
             Log.e(TAG, "triggerCapture failed: service is null")
             update { it.copy(status = "Camera not ready") }
@@ -1178,7 +1291,7 @@ class CameraController(
         lastShutterTriggerNs = nowNs
         Log.i(TAG, "triggerCapture: highQuality=$highQuality, enableZsl=$enableZsl")
         captureState = state
-        main.postDelayed(captureTimeout, 10_000L)
+        main.postDelayed(captureTimeout, if (state.resolution == Resolution.High) 25_000L else 10_000L)
         maxPreviewGapNsDuringCapture = 0L
         capturePreviewFrames = 0
         shutterClickNs = SystemClock.elapsedRealtimeNanos()
@@ -1191,7 +1304,7 @@ class CameraController(
             )
         }
         try {
-            svc.triggerStillWithZsl(shutterClickNs, highQuality, enableZsl)
+            svc.triggerStillWithZsl(shutterClickNs, false, enableZsl && state.resolution == Resolution.Standard)
             shutterDispatchNs = SystemClock.elapsedRealtimeNanos()
             Log.i("TIMING_FREEZE", "shutter_dispatched: $shutterDispatchNs ns")
         } catch (e: RemoteException) {
@@ -1252,15 +1365,16 @@ class CameraController(
         FlashMode.On -> "Flash on"
     }
 
-    override fun onProToggle() {
-        update { it.copy(proSheetOpen = !it.proSheetOpen) }
+    override fun onSettingsToggle() {
+        update { it.copy(settingsOpen = !it.settingsOpen) }
         haptic()
     }
 
     override fun onModeSelected(mode: CaptureMode) {
         if (mode == state.mode || state.captureBusy) return
         invalidateAuxiliaryFrames()
-        update { it.copy(mode = mode) }
+        update { it.copy(mode = mode, bokehEnabled = false, settingsOpen = false,
+            status = if (mode == CaptureMode.Video) "Video recording is coming later" else "Ready") }
         haptic()
     }
 
@@ -1320,7 +1434,12 @@ class CameraController(
             else -> "0"
         }
         update { it.copy(zoom = zoom) }
-        if (lens != currentLens) selectLens(lens)
+        if (state.resolution == Resolution.High && kotlin.math.abs(zoom - 1f) > 0.01f) {
+            currentLens = lens
+            onTele = lens == "3"
+            update { it.copy(resolution = Resolution.Standard) }
+            rebuildStillSession("Zoom uses 12 MP. Switching…")
+        } else if (lens != currentLens) selectLens(lens)
         if (force || kotlin.math.abs(zoom - lastSentZoom) > 0.02f) {
             lastSentZoom = zoom
             try { service?.setZoom(zoom) } catch (e: RemoteException) { Log.w(TAG, "setZoom failed", e) }
@@ -1330,6 +1449,11 @@ class CameraController(
     private fun selectLens(lens: String) {
         if (state.captureBusy || lens == currentLens) return
         currentLens = lens
+        if (state.resolution == Resolution.High) {
+            update { it.copy(resolution = Resolution.Standard) }
+            rebuildStillSession("Lens change uses 12 MP…")
+            return
+        }
         onTele = lens == "3"
         lensSwitching = true
         invalidateAuxiliaryFrames()
@@ -1398,10 +1522,64 @@ class CameraController(
         }
     }
 
+    override fun onBokehToggle() {
+        if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
+        val enabled = !state.bokehEnabled
+        invalidateAuxiliaryFrames()
+        if (enabled && state.resolution == Resolution.High) {
+            update { it.copy(bokehEnabled = true, resolution = Resolution.Standard) }
+            rebuildStillSession("Portrait effect uses 12 MP. Switching…")
+        } else {
+            update { it.copy(bokehEnabled = enabled, status = if (enabled) "Portrait effect on" else "Portrait effect off") }
+        }
+        haptic()
+    }
+
     override fun onResolutionToggle() {
-        // Native readback is currently fixed at 4080 × 3072. Never advertise a
-        // 50 MP capture that is silently downsampled or rejected after shutter.
-        update { it.copy(status = "50 MP unavailable in the current capture pipeline") }
+        if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
+        if (state.resolution == Resolution.High) {
+            update { it.copy(resolution = Resolution.Standard) }
+            rebuildStillSession("Switching to 12 MP…")
+        } else if (!state.supportsHighResolution) {
+            update { it.copy(status = "The camera HAL does not advertise a 50 MP JPEG stream") }
+        } else {
+            // Full-resolution remosaic is a main-camera-only path. Never upscale
+            // the 12 MP Vulkan readback or crop the image and still call it 50 MP.
+            currentLens = "0"
+            onTele = false
+            lastSentZoom = 1f
+            update { it.copy(resolution = Resolution.High, zoom = 1f, bokehEnabled = false) }
+            try { service?.setZoom(1f) } catch (e: RemoteException) { Log.w(TAG, "50 MP zoom reset", e) }
+            rebuildStillSession("Opening native 50 MP capture…")
+        }
+        haptic()
+    }
+
+    private fun createStillReader(): ImageReader {
+        val high = state.resolution == Resolution.High
+        val width = if (high) state.highResolutionWidth else DeviceProfile.STILL_WIDTH
+        val height = if (high) state.highResolutionHeight else DeviceProfile.STILL_HEIGHT
+        check(!high || CaptureOutput.is50MpSize(width, height)) { "50 MP was not advertised by this camera" }
+        val reader = if (high) ImageReader.newInstance(width, height, ImageFormat.JPEG, 2)
+        else ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2, HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
+        return reader.also { it.setOnImageAvailableListener(::onStillImage, stillHandler) }
+    }
+
+    private fun rebuildStillSession(message: String) {
+        sessionToken++
+        update { it.copy(sessionReady = false, status = message) }
+        invalidateAuxiliaryFrames()
+        try {
+            service?.closeSession()
+            val old = stillReader
+            old?.setOnImageAvailableListener(null, null)
+            stillReader = createStillReader()
+            stillHandler?.post { old?.close() }
+            startStereoSession()
+        } catch (e: Exception) {
+            Log.e(TAG, "Still session rebuild failed", e)
+            update { it.copy(status = "Could not configure capture stream", sessionReady = false) }
+        }
     }
 
     override fun onTelephotoToggle() {
@@ -1485,12 +1663,12 @@ class CameraController(
     }
 
     override fun onShutterClick() {
-        if (state.captureBusy || !state.sessionReady) return
+        if (!state.canTakePhoto) return
         Log.i(TAG, "onShutterClick called, sessionReady=${state.sessionReady}")
         if (state.timerSeconds > 0) {
             startTimerCapture(state.timerSeconds)
         } else {
-            triggerCapture(state.mode.highQualityNr, true)
+            triggerCapture(false, true)
         }
     }
 
@@ -1559,17 +1737,6 @@ class CameraController(
             Log.w(TAG, "Failed to query latest NotiCam photo: ${t.message}")
             null
         }
-    }
-
-    override fun onSwitchLens() {
-        if (state.captureBusy || !state.sessionReady) return
-        val lens = if (currentLens == "0") "2" else if (currentLens == "2") "3" else "0"
-        val zoom = if (lens == "2") 0.6f else if (lens == "3") 2f else 1f
-        update { it.copy(telephoto = lens == "3", zoom = zoom) }
-        selectLens(lens)
-        lastSentZoom = zoom
-        try { service?.setZoom(zoom) } catch (e: RemoteException) { Log.w(TAG, "lens zoom failed", e) }
-        haptic()
     }
 
     /**
