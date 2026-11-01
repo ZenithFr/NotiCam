@@ -118,6 +118,7 @@ struct AlphaPushConstants {
     uint32_t DISABLE_GUIDED;
     uint32_t gateBypass;
     uint32_t recordStats;
+    uint32_t alphaDiag;
 };
 
 struct GateStatsData {
@@ -128,6 +129,10 @@ struct GateStatsData {
     uint32_t alphaAfterSum;
     uint32_t preHist[10];
     uint32_t postHist[10];
+    uint32_t invalid;
+    uint32_t nearCount;
+    uint32_t ramp;
+    uint32_t farCount;
 };
 
 void VulkanPipeline::setDisableGuided(bool disable) {
@@ -1307,7 +1312,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, (float)mStillW };
-    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u), 0u, 0u };
+    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u), 0u, 0u, 0u };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f, 0 };
     CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90, 0 };
 
@@ -1340,7 +1345,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
         // Alpha (guided ON)
-        AlphaPushConstants pcAlphaOn{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u };
+        AlphaPushConstants pcAlphaOn{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 0u, 0u, 0u };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOn);
@@ -1523,8 +1528,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         transition(mImgBlurred, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         transition(mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-        // s1 at real focus, DISABLE_GUIDED = 0, gateBypass = 1, recordStats = 0
-        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 1u, 0u };
+        // s1 at real focus, DISABLE_GUIDED = 0, gateBypass = 1, recordStats = 0, alphaDiag = 0
+        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 1u, 0u, 0u };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOff);
@@ -1624,6 +1629,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         }
     }
     pcAlpha.recordStats = shouldRecordStats ? 1u : 0u;
+    pcAlpha.alphaDiag = shouldRecordStats ? 1u : 0u;
 
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
     vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
@@ -1718,6 +1724,16 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                 LOGI("ALPHA_POST_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
                      stats->postHist[0], stats->postHist[1], stats->postHist[2], stats->postHist[3], stats->postHist[4],
                      stats->postHist[5], stats->postHist[6], stats->postHist[7], stats->postHist[8], stats->postHist[9]);
+
+                uint32_t totalSub = stats->nearCount + stats->ramp + stats->farCount + stats->invalid;
+                if (totalSub > 0) {
+                    double nearPct = (100.0 * stats->nearCount) / totalSub;
+                    double rampPct = (100.0 * stats->ramp) / totalSub;
+                    double farPct = (100.0 * stats->farCount) / totalSub;
+                    double invalidPct = (100.0 * stats->invalid) / totalSub;
+                    LOGI("DEPTH_AT_SUBJECT: n=%u near=%.1f%% ramp=%.1f%% far=%.1f%% invalid=%.1f%% s1=%.2fm",
+                         totalSub, nearPct, rampPct, farPct, invalidPct, s1);
+                }
             }
         }
 
@@ -2704,7 +2720,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         }
 
         // 1. Guided Filter Alpha Pass on this tile
-        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u), 0u, 0u };
+        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u), 0u, 0u, 0u };
         vkCmdBindPipeline(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaStill, 0, nullptr);
         vkCmdPushConstants(cCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaSlice);

@@ -21,6 +21,10 @@ layout(std430, binding = 4) buffer GateStats {
     uint alphaAfterSum;
     uint preHist[10];
     uint postHist[10];
+    uint invalid;
+    uint nearCount;
+    uint ramp;
+    uint farCount;
 } stats;
 
 layout(push_constant) uniform AlphaPushConstants {
@@ -32,6 +36,7 @@ layout(push_constant) uniform AlphaPushConstants {
     uint DISABLE_GUIDED; // 1 = bypass guided filter, read pre-guided baseAlpha directly
     uint gateBypass; // 1 = bypass depth gate, 0 = depth gate active
     uint recordStats; // 1 = record gate stats, 0 = skip
+    uint alphaDiag; // 1 = record subject depth discriminator, 0 = skip
 } pc;
 
 void main() {
@@ -80,34 +85,41 @@ void main() {
         }
     }
 
+    float alphaBefore = alpha;
+
     if (pc.stubAlphaMode == 0) {
-        // Low-light amplitude recovery. In good light this is a no-op.
-        alpha = smoothstep(0.35, 0.85, alpha);
-        float alphaBefore = alpha;
+        // Lift-only low-light recovery. Never suppresses mid-alpha.
+        //   alpha 0.0 - 0.5  ->  unchanged
+        //   alpha 0.5 - 1.0  ->  pulled toward 1.0, monotone
+        float lift = max(0.0, (alpha - 0.5) * 2.0);
+        alpha = clamp(alpha + (1.0 - alpha) * lift * lift, 0.0, 1.0);
+    }
 
-        // Depth gate: anything clearly beyond subject depth is
-        // background regardless of the AI's confidence.
-        float gate = 1.0;
-        if (pc.gateBypass == 0) {
-            vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
-            float depth_m = texture(uDepth, depthUv).r;
-            gate = 1.0 - smoothstep(s1 * 1.2, s1 * 2.5, depth_m);
-            alpha *= gate;
-        }
+    // DEPTH GATE REMOVED pending discriminator run. Depth gate removed.
 
-        if (pc.recordStats != 0) {
-            atomicAdd(stats.totalCount, 1);
-            if (gate < 0.999) {
-                atomicAdd(stats.gatedCount, 1);
-            }
-            atomicAdd(stats.gateSum, uint(gate * 1000.0));
-            atomicAdd(stats.alphaBeforeSum, uint(alphaBefore * 1000.0));
-            atomicAdd(stats.alphaAfterSum, uint(alpha * 1000.0));
+    if (pc.recordStats != 0) {
+        atomicAdd(stats.totalCount, 1);
+        atomicAdd(stats.alphaBeforeSum, uint(alphaBefore * 1000.0));
+        atomicAdd(stats.alphaAfterSum, uint(alpha * 1000.0));
 
-            int bPre = clamp(int(alphaBefore * 10.0), 0, 9);
-            atomicAdd(stats.preHist[bPre], 1);
-            int bPost = clamp(int(alpha * 10.0), 0, 9);
-            atomicAdd(stats.postHist[bPost], 1);
+        int bPre = clamp(int(alphaBefore * 10.0), 0, 9);
+        atomicAdd(stats.preHist[bPre], 1);
+        int bPost = clamp(int(alpha * 10.0), 0, 9);
+        atomicAdd(stats.postHist[bPost], 1);
+    }
+
+    if (pc.alphaDiag != 0 && pc.stubAlphaMode == 0 && alpha >= 0.9) {
+        vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
+        float d = texture(uDepth, depthUv).r;
+        // DPE invalid depth (y8 == 0) is stored as 10.0m in gridDepth
+        if (d < 0.05 || d >= 9.95) {
+            atomicAdd(stats.invalid, 1);
+        } else if (d < s1 * 1.2) {
+            atomicAdd(stats.nearCount, 1);
+        } else if (d < s1 * 2.5) {
+            atomicAdd(stats.ramp, 1);
+        } else {
+            atomicAdd(stats.farCount, 1);
         }
     }
 
