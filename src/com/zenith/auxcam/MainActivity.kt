@@ -56,6 +56,11 @@ class MainActivity : ComponentActivity(), NativeBridge {
             DISABLE_GUIDED = true
         }
 
+        val forceFps30Intent = intent?.getBooleanExtra("force_fps_30", false) ?: false
+        if (forceFps30Intent) {
+            CameraUserService.sForceFps30 = true
+        }
+
         controller = CameraController(this, this)
 
         setContent {

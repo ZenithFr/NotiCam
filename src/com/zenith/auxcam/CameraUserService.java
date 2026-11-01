@@ -45,7 +45,11 @@ public class CameraUserService extends IAuxCamService.Stub {
     private Surface mStillSurface;
 
     private CaptureRequest.Builder mPreviewRequestBuilder;
-    private long mShutterCommandNs = 0;
+    long mShutterCommandNs = 0;
+    public static volatile boolean sForceFps30 = false;
+    public static volatile float sLatestS1Matte = 0.65f;
+    private long mLastCadenceLogMs = 0;
+    private boolean mLastForceFps30 = false;
 
     // ─── Live camera controls (flash / exposure / zoom / focus / lens) ───────
     private static final int FLASH_OFF = 0;
@@ -336,6 +340,16 @@ public class CameraUserService extends IAuxCamService.Stub {
             mMaxDigitalZoom = (maxZoom != null && maxZoom > 1.0f) ? maxZoom : 1.0f;
             Float minFocus = chars.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
             mMinFocusDistance = (minFocus != null && minFocus > 0f) ? minFocus : 10.0f;
+            android.util.Range<Integer>[] fpsRanges = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+            if (fpsRanges != null) {
+                StringBuilder sb = new StringBuilder("AE_FPS_RANGES: [");
+                for (int i = 0; i < fpsRanges.length; i++) {
+                    if (i > 0) sb.append(",");
+                    sb.append("[").append(fpsRanges[i].getLower()).append(",").append(fpsRanges[i].getUpper()).append("]");
+                }
+                sb.append("]");
+                Log.i(TAG, sb.toString());
+            }
             recomputeCropRegion();
             Log.i(TAG, "Characteristics for Camera " + mCurrentCameraId + ": activeArray=" + mActiveArray
                     + " maxDigitalZoom=" + mMaxDigitalZoom
@@ -394,6 +408,14 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
+            boolean forceFps = false;
+            try {
+                forceFps = sForceFps30 || new java.io.File("/data/local/tmp/force_fps_30").exists();
+            } catch (Throwable ignored) {}
+            Log.i(TAG, "force_fps_30 check: forceFps=" + forceFps);
+            if (forceFps) {
+                b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new android.util.Range<Integer>(30, 30));
+            }
             if (mManualFocusActive) {
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
                 b.set(CaptureRequest.LENS_FOCUS_DISTANCE, mManualFocusDistance);
@@ -767,6 +789,62 @@ public class CameraUserService extends IAuxCamService.Stub {
     void onCaptureResult(TotalCaptureResult result) {
         mColorFrameCount++;
         mDepthFrameCount++; // Synced hardware DPE frames
+
+        long nowCadence = SystemClock.elapsedRealtime();
+        if (nowCadence - mLastCadenceLogMs >= 1000) {
+            mLastCadenceLogMs = nowCadence;
+
+            boolean forceFps30Active = false;
+            try {
+                forceFps30Active = sForceFps30 || new java.io.File("/data/local/tmp/force_fps_30").exists();
+            } catch (Throwable ignored) {}
+            if (forceFps30Active != mLastForceFps30) {
+                mLastForceFps30 = forceFps30Active;
+                refreshRepeatingRequest();
+            }
+
+            Long frameDurNs = result.get(CaptureResult.SENSOR_FRAME_DURATION);
+            Long expoNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
+            Integer iso = result.get(CaptureResult.SENSOR_SENSITIVITY);
+            Integer aeState = result.get(CaptureResult.CONTROL_AE_STATE);
+            android.util.Range<Integer> targetFpsRange = result.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE);
+
+            Log.i(TAG, String.format(java.util.Locale.US,
+                "SENSOR_CADENCE: frameDur=%.2fms expo=%.2fms iso=%d aeState=%d targetFpsRange=[%d,%d] lux=n/a",
+                (frameDurNs != null ? frameDurNs / 1e6 : 0.0),
+                (expoNs != null ? expoNs / 1e6 : 0.0),
+                (iso != null ? iso : 0),
+                (aeState != null ? aeState : -1),
+                (targetFpsRange != null ? targetFpsRange.getLower() : 0),
+                (targetFpsRange != null ? targetFpsRange.getUpper() : 0)));
+
+            Float focusDistanceDiopters = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
+            Integer afState = result.get(CaptureResult.CONTROL_AF_STATE);
+            android.hardware.camera2.params.MeteringRectangle[] afRegions = result.get(CaptureResult.CONTROL_AF_REGIONS);
+            float s1Hal = (focusDistanceDiopters != null && focusDistanceDiopters > 0.001f) ? (1.0f / focusDistanceDiopters) : 0.0f;
+            float s1Matte = sLatestS1Matte;
+            String afStateStr = "INACTIVE";
+            if (afState != null) {
+                if (afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED || afState == CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED) {
+                    afStateStr = "LOCKED";
+                } else if (afState == CaptureResult.CONTROL_AF_STATE_ACTIVE_SCAN || afState == CaptureResult.CONTROL_AF_STATE_PASSIVE_SCAN) {
+                    afStateStr = "SCANNING";
+                } else if (afState == CaptureResult.CONTROL_AF_STATE_INACTIVE) {
+                    afStateStr = "INACTIVE";
+                } else {
+                    afStateStr = "STATIONARY";
+                }
+            }
+            int inFlag = ((afStateStr.equals("LOCKED") || afStateStr.equals("STATIONARY")) && s1Hal > 0.05f && s1Hal < 20.0f) ? 1 : 0;
+            int rx0 = 0, ry0 = 0, rx1 = 0, ry1 = 0;
+            if (afRegions != null && afRegions.length > 0 && afRegions[0] != null) {
+                android.graphics.Rect r = afRegions[0].getRect();
+                rx0 = r.left; ry0 = r.top; rx1 = r.right; ry1 = r.bottom;
+            }
+            Log.i(TAG, String.format(java.util.Locale.US,
+                "AF_META: s1_hal=%.2fm s1_matte=%.2fm state=%s afRegion=[%d,%d,%d,%d] in=%d",
+                s1Hal, s1Matte, afStateStr, rx0, ry0, rx1, ry1, inFlag));
+        }
 
         long nowNs = SystemClock.elapsedRealtimeNanos();
         if (mLastViewfinderFrameNs > 0) {

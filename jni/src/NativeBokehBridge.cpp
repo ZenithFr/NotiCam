@@ -75,6 +75,13 @@ Java_com_zenith_auxcam_MainActivity_nativeRenderFrame(
             targetFarFieldPx
     );
 
+    jclass cls = env->FindClass("com/zenith/auxcam/CameraUserService");
+    if (cls) {
+        jfieldID fid = env->GetStaticFieldID(cls, "sLatestS1Matte", "F");
+        if (fid) env->SetStaticFloatField(cls, fid, gPipeline->getS1FocusM());
+        env->DeleteLocalRef(cls);
+    }
+
     if (depthBytes != nullptr) {
         env->ReleaseByteArrayElements(depthY8Array, depthBytes, JNI_ABORT);
     }

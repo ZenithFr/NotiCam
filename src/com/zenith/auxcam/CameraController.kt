@@ -227,6 +227,11 @@ class CameraController(
     private var latestPhotoUri: Uri? = null
     private var lensSwitching = false
 
+    private var lastCpuFrameLogMs = 0L
+    private var lastColorCbNs = 0L
+    private var buffersAcquiredCount = 0L
+    private var buffersReleasedCount = 0L
+
     private var powerManager: PowerManager? = null
     private var thermalListener: PowerManager.OnThermalStatusChangedListener? = null
     private var captureReceiver: BroadcastReceiver? = null
@@ -606,6 +611,8 @@ class CameraController(
 
     private fun onColorImage(reader: ImageReader) {
         val t0 = SystemClock.elapsedRealtimeNanos()
+        val sensorCbMs = if (lastColorCbNs > 0L) (t0 - lastColorCbNs) / 1_000_000.0 else 0.0
+        lastColorCbNs = t0
         val nowPreviewNs = t0
         if (lastPreviewTimestampNs > 0L) {
             val gapNs = nowPreviewNs - lastPreviewTimestampNs
@@ -617,7 +624,16 @@ class CameraController(
             }
         }
         lastPreviewTimestampNs = nowPreviewNs
+
+        val tAcq0 = SystemClock.elapsedRealtimeNanos()
         val image = reader.acquireLatestImage() ?: return
+        val tAcq1 = SystemClock.elapsedRealtimeNanos()
+        buffersAcquiredCount++
+
+        val imageReaderCbMs = (tAcq1 - tAcq0) / 1_000_000.0
+        var ahbImportMs = 0.0
+        var engineSubmitMs = 0.0
+
         try {
             try {
                 matteSegmenter?.let { seg ->
@@ -636,14 +652,19 @@ class CameraController(
                 dumpPreviewDiagnostics(image)
             }
 
+            val tAhb0 = SystemClock.elapsedRealtimeNanos()
             val buffer = try {
                 image.hardwareBuffer
             } catch (t: Throwable) {
                 null
             }
+            val tAhb1 = SystemClock.elapsedRealtimeNanos()
+            ahbImportMs = (tAhb1 - tAhb0) / 1_000_000.0
+
             if (buffer != null) {
                 try {
                     val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
+                    val tEng0 = SystemClock.elapsedRealtimeNanos()
                     native.renderFrame(
                         buffer,
                         latestDepth,
@@ -655,6 +676,8 @@ class CameraController(
                         state.fStop,
                         targetFarFieldPx,
                     )
+                    val tEng1 = SystemClock.elapsedRealtimeNanos()
+                    engineSubmitMs = (tEng1 - tEng0) / 1_000_000.0
                 } catch (t: Throwable) {
                     Log.e(TAG, "renderFrame error: ${t.message}")
                 } finally {
@@ -663,9 +686,20 @@ class CameraController(
             }
         } finally {
             image.close()
+            buffersReleasedCount++
         }
-        val dtMs = (SystemClock.elapsedRealtimeNanos() - t0) / 1_000_000
-        if (dtMs > 60) Log.w(TAG, "slow preview frame: ${dtMs}ms")
+        val tTotalEnd = SystemClock.elapsedRealtimeNanos()
+        val totalMs = (tTotalEnd - t0) / 1_000_000.0
+
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastCpuFrameLogMs >= 1000) {
+            lastCpuFrameLogMs = nowMs
+            Log.i(TAG, String.format(Locale.US,
+                "CPU_FRAME: sensorCb=%.2fms imageReaderCb=%.2fms ahbImport=%.2fms engineSubmit=%.2fms present=0.00ms total=%.2fms acquired=%d released=%d",
+                sensorCbMs, imageReaderCbMs, ahbImportMs, engineSubmitMs, totalMs, buffersAcquiredCount, buffersReleasedCount))
+        }
+
+        if (totalMs > 60.0) Log.w(TAG, "slow preview frame: ${totalMs.toLong()}ms")
     }
 
     private fun onDepthImage(reader: ImageReader) {

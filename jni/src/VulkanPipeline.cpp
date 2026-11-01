@@ -964,6 +964,68 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             LOGI("FOCUS s1=%.2fm confidentPct=%.2f source=%s", mOpticalParams.s1FocusM, confidentPct, focusSource);
         }
 
+        // 2a. DEPTH ALIGNMENT ROI
+        static struct timespec sLastRoiLog = {0, 0};
+        double dtRoi = (tsNowFocus.tv_sec - sLastRoiLog.tv_sec) + (tsNowFocus.tv_nsec - sLastRoiLog.tv_nsec) * 1e-9;
+        if (dtRoi >= 1.0 || doTriggerAb) {
+            sLastRoiLog = tsNowFocus;
+            uint32_t ffNear = 0, ffRamp = 0, ffFar = 0, ffInvalid = 0, ffN = 0;
+            uint32_t roiNear = 0, roiRamp = 0, roiFar = 0, roiInvalid = 0, roiN = 0;
+            uint32_t rx0 = depthW * 35 / 100;
+            uint32_t rx1 = depthW * 65 / 100;
+            uint32_t ry0 = depthH * 30 / 100;
+            uint32_t ry1 = depthH * 70 / 100;
+
+            if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
+                for (uint32_t dy = 0; dy < depthH; ++dy) {
+                    uint32_t aY = (dy * alphaH) / depthH;
+                    bool inRoiY = (dy >= ry0 && dy < ry1);
+                    for (uint32_t dx = 0; dx < depthW; ++dx) {
+                        uint32_t aX = (dx * alphaW) / depthW;
+                        uint8_t aByte = alphaMatte[aY * alphaW + aX];
+                        if (aByte >= 128) {
+                            uint32_t idx = dy * depthW + dx;
+                            float d = gridDepth[idx];
+                            bool isValid = (gridValid[idx] != 0 && d >= 0.05f && d <= 9.95f);
+                            bool inRoi = inRoiY && (dx >= rx0 && dx < rx1);
+
+                            ffN++;
+                            if (inRoi) roiN++;
+
+                            if (!isValid) {
+                                ffInvalid++;
+                                if (inRoi) roiInvalid++;
+                            } else if (d <= s1 * 1.5f) {
+                                ffNear++;
+                                if (inRoi) roiNear++;
+                            } else if (d <= s1 * 3.0f) {
+                                ffRamp++;
+                                if (inRoi) roiRamp++;
+                            } else {
+                                ffFar++;
+                                if (inRoi) roiFar++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            double ffNearFrac = (ffN > 0) ? ((double)ffNear / ffN) : 0.0;
+            double ffRampFrac = (ffN > 0) ? ((double)ffRamp / ffN) : 0.0;
+            double ffFarFrac = (ffN > 0) ? ((double)ffFar / ffN) : 0.0;
+            double ffInvFrac = (ffN > 0) ? ((double)ffInvalid / ffN) : 0.0;
+
+            double roiNearFrac = (roiN > 0) ? ((double)roiNear / roiN) : 0.0;
+            double roiRampFrac = (roiN > 0) ? ((double)roiRamp / roiN) : 0.0;
+            double roiFarFrac = (roiN > 0) ? ((double)roiFar / roiN) : 0.0;
+            double roiInvFrac = (roiN > 0) ? ((double)roiInvalid / roiN) : 0.0;
+
+            LOGI("DEPTH_AT_SUBJECT_ROI: fullFrame [near=%.2f ramp=%.2f far=%.2f invalid=%.2f n=%u] centerRoi [near=%.2f ramp=%.2f far=%.2f invalid=%.2f n=%u] roiRect=[%u,%u,%u,%u] s1=%.2fm",
+                 ffNearFrac, ffRampFrac, ffFarFrac, ffInvFrac, ffN,
+                 roiNearFrac, roiRampFrac, roiFarFrac, roiInvFrac, roiN,
+                 rx0, ry0, rx1, ry1, s1);
+        }
+
         static bool sLoggedSkipInpaintPreview = false;
         if (invalidCount == 0) {
             if (!sLoggedSkipInpaintPreview) {
@@ -1874,19 +1936,61 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         dTotalGpu = (ts[5] - ts[0]) * timestampPeriod / 1e6;
     }
 
-    // Bisect Phase GPU pass logging and FPS_PROBE evaluation
+    // Rolling 60-frame GPU pass instrumentation (mean and p95 over 60 frames)
+    static std::vector<double> sCocSamples;
+    static std::vector<double> sGuidedSamples;
+    static std::vector<double> sGatherSamples;
+    static std::vector<double> sCompSamples;
+    static std::vector<double> sAlphaSamples;
+    static std::vector<double> sTotalSamples;
+
+    if (dCoc > 0.0) sCocSamples.push_back(dCoc);
+    if (dAlpha > 0.0) sGuidedSamples.push_back(dAlpha);
+    if (dGather > 0.0) sGatherSamples.push_back(dGather);
+    if (dComp > 0.0) sCompSamples.push_back(dComp);
+    if (dAlpha > 0.0) sAlphaSamples.push_back(dAlpha);
+    if (dTotalGpu > 0.0) sTotalSamples.push_back(dTotalGpu);
+
+    if (sCocSamples.size() >= 60) {
+        auto calcMeanP95 = [](std::vector<double>& v) -> std::pair<double, double> {
+            double sum = 0.0;
+            for (double x : v) sum += x;
+            double mean = sum / v.size();
+            std::sort(v.begin(), v.end());
+            double p95 = v[static_cast<size_t>(v.size() * 0.95)];
+            return {mean, p95};
+        };
+
+        auto cocMP = calcMeanP95(sCocSamples);
+        auto guidedMP = calcMeanP95(sGuidedSamples);
+        auto gatherMP = calcMeanP95(sGatherSamples);
+        auto compMP = calcMeanP95(sCompSamples);
+        auto alphaMP = calcMeanP95(sAlphaSamples);
+        auto totalMP = calcMeanP95(sTotalSamples);
+
+        LOGI("GPU_PASS n=%zu coc=%.2f/%.2f guided=%.2f/%.2f gather=%.2f/%.2f composite=%.2f/%.2f alpha=%.2f/%.2f total=%.2f/%.2f",
+             sCocSamples.size(),
+             cocMP.first, cocMP.second,
+             guidedMP.first, guidedMP.second,
+             gatherMP.first, gatherMP.second,
+             compMP.first, compMP.second,
+             alphaMP.first, alphaMP.second,
+             totalMP.first, totalMP.second);
+
+        sCocSamples.clear();
+        sGuidedSamples.clear();
+        sGatherSamples.clear();
+        sCompSamples.clear();
+        sAlphaSamples.clear();
+        sTotalSamples.clear();
+    }
+
+    // Config A and B FPS_PROBE evaluation
     if (sBisectConfig != BisectConfig::DONE && sBisectPhaseStarted) {
         double elapsedPhaseSec = std::chrono::duration<double>(tPresentSteady - sBisectPhaseStart).count();
-        if (!sBisectLoggedGpuPass && elapsedPhaseSec >= 1.0) {
-            sBisectLoggedGpuPass = true;
-            LOGI("GPU_PASS: coc=%.2fms guided=%.2fms gather=%.2fms composite=%.2fms alpha=%.2fms total=%.2fms",
-                 dCoc, dAlpha, dGather, dComp, dAlpha, dTotalGpu);
-        }
 
         if (elapsedPhaseSec >= 5.0) {
-            char cfgChar = (sBisectConfig == BisectConfig::CONFIG_A) ? 'A' :
-                           (sBisectConfig == BisectConfig::CONFIG_B) ? 'B' :
-                           (sBisectConfig == BisectConfig::CONFIG_C) ? 'C' : 'D';
+            char cfgChar = (sBisectConfig == BisectConfig::CONFIG_A) ? 'A' : 'B';
             double meanFps = 0.0;
             double p50Ms = 0.0;
             double maxMs = 0.0;
@@ -1903,13 +2007,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
             if (sBisectConfig == BisectConfig::CONFIG_A) {
                 sBisectConfig = BisectConfig::CONFIG_B;
-            } else if (sBisectConfig == BisectConfig::CONFIG_B) {
-                sBisectConfig = BisectConfig::CONFIG_C;
-            } else if (sBisectConfig == BisectConfig::CONFIG_C) {
-                sBisectConfig = BisectConfig::CONFIG_D;
             } else {
                 sBisectConfig = BisectConfig::DONE;
-                LOGI("=== FPS_PROBE COMPLETE ===");
+                LOGI("=== FPS_PROBE CONFIG A/B COMPLETE ===");
             }
             sBisectPhaseStarted = false;
         }
