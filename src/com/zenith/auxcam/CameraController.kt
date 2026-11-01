@@ -1,10 +1,9 @@
 package com.zenith.auxcam
 
+import android.Manifest
 import android.app.Activity
-import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
-import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -30,17 +29,18 @@ import android.os.RemoteException
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
+import android.util.Size
 import android.view.HapticFeedbackConstants
 import android.view.Surface
+import android.view.PixelCopy
 import android.view.SurfaceHolder
 import android.widget.Toast
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import rikka.shizuku.Shizuku
-import java.io.File
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
@@ -48,10 +48,11 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.exp
 import kotlin.math.roundToInt
+import rikka.shizuku.Shizuku
 
 /** Native JNI entry points, implemented by [MainActivity]. */
 interface NativeBridge {
@@ -99,6 +100,7 @@ interface CameraActions {
     fun onBokehToggle()
     fun onSettingsToggle()
     fun onModeSelected(mode: CaptureMode)
+    fun onZoomBlendFinished(token: Int) {}
     fun onZoomSelected(zoom: Float)
     fun onZoomGesture(scaleFactor: Float)
 
@@ -123,9 +125,6 @@ interface CameraActions {
     /** 12MP <-> 50MP. */
     fun onResolutionToggle()
 
-    /** Tele lens assist above 2x. */
-    fun onTelephotoToggle()
-
     /** Cycle 1:1 -> 4:3 -> 16:9 -> Full. */
     fun onFrameRatioCycle()
 
@@ -144,8 +143,10 @@ interface CameraActions {
     /** Reset manual focus / AE/AF lock back to auto. */
     fun onFocusReset()
     fun onShutterClick()
-    /** Opens the phone's gallery on the newest picture. */
+    /** Opens the built-in, app-owned media viewer. */
     fun onGalleryOpen()
+    fun onGalleryClose()
+    fun onCameraReport()
 
     /** Normalised tap inside the viewfinder (0..1, upright screen space). */
     fun onFocusAt(normalisedX: Float, normalisedY: Float)
@@ -175,9 +176,6 @@ class CameraController(
         const val CAPTURE_JPEG_QUALITY = 100
         @Volatile var forceJpeg98 = false
         const val DEBUG_DUMP_RGBA = false
-
-        /** Above this zoom the telephoto assist hands over to the physical tele. */
-        private const val TELE_THRESHOLD = 2.0f
 
         /** Apple's Portrait aperture ladder: f/1.4 → f/16. */
         val FSTOPS = floatArrayOf(
@@ -212,14 +210,15 @@ class CameraController(
     private var readerThread: HandlerThread? = null
     private var readerHandler: Handler? = null
 
-    private var colorReader: ImageReader? = null
+    @Volatile private var colorReader: ImageReader? = null
     private var depthReader: ImageReader? = null
     private var stillReader: ImageReader? = null
 
     private var service: IAuxCamService? = null
     private var serviceArgs: Shizuku.UserServiceArgs? = null
     private var serviceBinding = false
-    private var sessionToken = 0
+    @Volatile private var sessionToken = 0
+    private var pendingRebuildToken: Int? = null
     @Volatile private var surfaceHolder: SurfaceHolder? = null
     @Volatile private var engineReady = false
     @Volatile private var disposed = false
@@ -268,6 +267,93 @@ class CameraController(
     private var capturePreviewFrames = 0
     private var latestPhotoUri: Uri? = null
     private var lensSwitching = false
+    @Volatile private var zoomHandoffPending = false
+    @Volatile private var zoomHandoffToken = 0
+    private var zoomHandoffOrigin = 1f
+    private var zoomHandoffCommitted = false
+    private var queuedZoom: Float? = null
+    @Volatile private var blendFreshFrames = 0
+    @Volatile private var lastRenderedSessionToken = -1
+    private var deliveredFrameCount = 0
+    private var renderedCounterToken = -1
+    private var deliveredFrameWindowMs = 0L
+    private val preview30Fallbacks = mutableSetOf<String>()
+    private fun previewKey() = "$currentLens/${state.resolution}/${state.bokehActive}/${recordingSurface != null}"
+    private val previewFrameTimeout = Runnable {
+        if (foreground && !disposed && !state.galleryOpen &&
+            (!state.sessionReady || lastRenderedSessionToken != sessionToken || (zoomHandoffPending && blendFreshFrames < 4))) {
+            onSessionError("No fresh viewfinder frames for the requested preview profile")
+        }
+    }
+
+    private fun cancelZoomHandoff() {
+        if (zoomHandoffPending && !zoomHandoffCommitted) update { it.copy(zoom = zoomHandoffOrigin) }
+        ++zoomHandoffToken
+        zoomHandoffPending = false
+        queuedZoom = null
+        main.removeCallbacks(previewFrameTimeout)
+        update { it.copy(zoomBlendImage = null, zoomBlendPending = false, zoomBlendReady = false) }
+    }
+
+    /** Copy only on a physical handoff, never per preview frame or for a saved still. */
+    private fun beginZoomHandoff(fromZoom: Float, toZoom: Float, switch: () -> Unit) {
+        val token = ++zoomHandoffToken
+        zoomHandoffPending = true
+        zoomHandoffOrigin = fromZoom
+        zoomHandoffCommitted = false
+        blendFreshFrames = 0
+        update { it.copy(sessionReady = false, zoom = toZoom, zoomBlendToken = token,
+            zoomBlendPending = true, zoomBlendReady = false, zoomBlendScale = toZoom / fromZoom) }
+        val committed = AtomicBoolean(false)
+        fun commit(snapshot: Bitmap?) {
+            if (!committed.compareAndSet(false, true)) { snapshot?.recycle(); return }
+            if (disposed || !foreground || token != zoomHandoffToken) { snapshot?.recycle(); return }
+            update { it.copy(zoomBlendImage = snapshot?.asImageBitmap()) }
+            // Allow Compose to place the freeze layer before closing the old camera.
+            activity.window.decorView.postOnAnimation {
+                activity.window.decorView.postOnAnimation {
+                    if (!disposed && foreground && token == zoomHandoffToken) {
+                        zoomHandoffCommitted = true
+                        switch()
+                    }
+                }
+            }
+        }
+        val holder = surfaceHolder
+        if (holder == null || !holder.surface.isValid) { commit(null); return }
+        val frame = holder.surfaceFrame
+        val width = frame.width().coerceIn(1, 1080)
+        val height = (width.toLong() * frame.height().coerceAtLeast(1) / frame.width().coerceAtLeast(1)).toInt().coerceIn(1, 1920)
+        val bitmap = try {
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        } catch (_: OutOfMemoryError) {
+            commit(null)
+            return
+        } catch (_: Exception) {
+            commit(null)
+            return
+        }
+        // PixelCopy can fail before the first present. Never block a handoff waiting for it.
+        val timeout = Runnable { commit(null) }
+        main.postDelayed(timeout, 200)
+        try {
+            PixelCopy.request(holder.surface, bitmap, { result ->
+                main.removeCallbacks(timeout)
+                if (result == PixelCopy.SUCCESS) commit(bitmap)
+                else { bitmap.recycle(); commit(null) }
+            }, main)
+        } catch (_: Exception) { main.removeCallbacks(timeout); bitmap.recycle(); commit(null) }
+    }
+
+    override fun onZoomBlendFinished(token: Int) {
+        if (token != zoomHandoffToken) return
+        zoomHandoffPending = false
+        update { it.copy(zoomBlendImage = null, zoomBlendPending = false, zoomBlendReady = false) }
+        val next = queuedZoom
+        queuedZoom = null
+        if (next != null) applyZoom(next, force = true)
+    }
+
 
     private var lastCpuFrameLogMs = 0L
     private var lastColorCbNs = 0L
@@ -286,6 +372,21 @@ class CameraController(
     private var viewfinderGeometry = ViewfinderGeometry.defaultPortrait()
 
     private var started = false
+    @Volatile private var videoGeneration = 0
+    private var videoCapture: VideoCapture? = null // IO thread only
+    @Volatile private var recordingSurface: Surface? = null
+    private var microphonePermissionAsked = false
+    private var recordingStartedAt = 0L
+    private val videoTick = object : Runnable {
+        override fun run() {
+            if (!state.videoRecording) return
+            update { it.copy(videoElapsedSeconds = (SystemClock.elapsedRealtime() - recordingStartedAt) / 1000) }
+            main.postDelayed(this, 500)
+        }
+    }
+    private val videoStartTimeout = Runnable {
+        if (state.videoStarting) stopVideo(save = false, restore = true)
+    }
 
     // ── Shizuku callbacks ───────────────────────────────────────────────────
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { _, grantResult ->
@@ -302,6 +403,10 @@ class CameraController(
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
+        cancelZoomHandoff()
+        if (state.videoStarting || state.videoRecording) stopVideo(save = false, restore = false)
+        ++sessionToken
+        pendingRebuildToken = null
         serviceBinding = false
         service = null
         update { it.copy(status = "Reconnecting…", sessionReady = false) }
@@ -312,7 +417,7 @@ class CameraController(
     fun start() {
         foreground = true
         if (started) {
-            if (!state.sessionReady) startStereoSession()
+            if (!state.sessionReady) rebuildStillSession("Resuming native capture…")
             return
         }
         started = true
@@ -365,16 +470,21 @@ class CameraController(
     }
 
     fun pause() {
+        cancelZoomHandoff()
+        if (state.videoStarting || state.videoRecording) stopVideo(save = state.videoRecording, restore = false)
         sessionToken++
+        pendingRebuildToken = null
         foreground = false
         timerRunning = false
         main.removeCallbacks(timerTick)
         try { service?.closeSession() } catch (e: RemoteException) { Log.w(TAG, "pause session", e) }
-        update { it.copy(sessionReady = false, captureBusy = stillCaptureInProgress.get(), status = "Camera paused") }
+        update { it.copy(sessionReady = false, captureBusy = state.captureBusy || stillCaptureInProgress.get(), status = "Camera paused") }
     }
 
     fun dispose() {
         if (disposed) return
+        if (state.videoStarting || state.videoRecording) stopVideo(save = state.videoRecording, restore = false)
+        cancelZoomHandoff()
         disposed = true
         foreground = false
         engineReady = false
@@ -486,6 +596,7 @@ class CameraController(
     }
 
     override fun onPreviewSurfaceDestroyed(holder: SurfaceHolder) {
+        cancelZoomHandoff()
         engineReady = false
         surfaceHolder = null
     }
@@ -519,7 +630,7 @@ class CameraController(
             ComponentName(activity.packageName, CameraUserService::class.java.name),
         )
             .daemon(false)
-            .version(4)
+            .version(6)
             .processNameSuffix("auxcam_privileged")
         serviceArgs = args
         try { Shizuku.bindUserService(args, this) }
@@ -535,10 +646,14 @@ class CameraController(
         if (disposed) return
         service = binder?.let { IAuxCamService.Stub.asInterface(it) }
         update { it.copy(status = "Opening session…") }
-        startStereoSession()
+        rebuildStillSession("Opening native JPEG capture…")
     }
 
     override fun onServiceDisconnected(name: ComponentName?) {
+        cancelZoomHandoff()
+        if (state.videoStarting || state.videoRecording) stopVideo(save = false, restore = false)
+        ++sessionToken
+        pendingRebuildToken = null
         serviceBinding = false
         service = null
         update { it.copy(status = "Disconnected", sessionReady = false) }
@@ -584,10 +699,40 @@ class CameraController(
         stillReader = createStillReader()
     }
 
+    private fun configurePreviewReader(svc: IAuxCamService) {
+        val prefer60 = previewKey() !in preview30Fallbacks && recordingSurface == null
+        val profile = svc.getPreviewConfiguration(currentLens, state.bokehActive,
+            state.resolution == Resolution.High, prefer60)
+        check(profile.size == 4 && profile[0] > 0 && profile[1] > 0) { "No advertised full-field preview profile" }
+        val old = colorReader
+        // A fresh queue excludes pre-switch buffers from the new-frame handoff signal.
+        colorReader = ImageReader.newInstance(profile[0], profile[1], ImageFormat.YUV_420_888, 3,
+            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or HardwareBuffer.USAGE_CPU_READ_OFTEN).also {
+            it.setOnImageAvailableListener(::onColorImage, readerHandler)
+        }
+        old?.setOnImageAvailableListener(null, null)
+        readerHandler?.post { old?.close() }
+        update { it.copy(previewWidth = profile[0], previewHeight = profile[1], previewTargetFps = profile[3],
+            previewMeasuredFps = 0f,
+            previewFallback = when {
+                recordingSurface != null -> "30 fps while recording the 30 fps video stream"
+                !prefer60 -> "60 fps session unavailable; full-quality still retained"
+                profile[1] < 1080 -> "1080-line/60 fps profile not exposed; smaller preview only, full-quality still retained"
+                profile[3] < 60 -> "60 fps not advertised at this preview size; full-quality still retained"
+                else -> "1080-line full-field preview · 60 fps target"
+            }) }
+    }
+
     private fun startStereoSession() {
-        if (!foreground || disposed || !engineReady) return
+        if (pendingRebuildToken != null) return
+        if (!foreground || disposed || !engineReady || state.galleryOpen) return
         val svc = service ?: return
         val holder = surfaceHolder ?: return
+        try { configurePreviewReader(svc) } catch (e: Exception) {
+            cancelZoomHandoff()
+            update { it.copy(sessionReady = false, status = "Preview configuration failed: ${e.message}") }
+            return
+        }
         val color = colorReader ?: return
         val depth = depthReader ?: return
         val still = stillReader ?: return
@@ -599,6 +744,8 @@ class CameraController(
 
         try {
             val token = ++sessionToken
+            main.removeCallbacks(previewFrameTimeout)
+            main.postDelayed(previewFrameTimeout, 6000)
             svc.setCallback(object : IAuxCamCallback.Stub() {
                 override fun onSessionReady(cameraId: String?) { post { if (token == sessionToken) this@CameraController.onSessionReady(cameraId) } }
                 override fun onSessionError(msg: String?) { post { if (token == sessionToken) this@CameraController.onSessionError(msg) } }
@@ -609,10 +756,11 @@ class CameraController(
             })
 
             val ok = svc.openStereoSession(
-                color.surface, DeviceProfile.COLOR_WIDTH, DeviceProfile.COLOR_HEIGHT,
+                color.surface, color.width, color.height,
                 depth.surface, DeviceProfile.DEPTH_WIDTH, DeviceProfile.DEPTH_HEIGHT,
                 still.surface, stillW, stillH, still.imageFormat,
-                currentLens,
+                currentLens, recordingSurface.takeIf { state.videoStarting || state.videoRecording },
+                state.mode == CaptureMode.Video, state.zoom, state.previewTargetFps,
             )
             update { it.copy(status = if (ok) "Starting engine…" else "Retrying session…") }
             if (!ok) {
@@ -634,17 +782,23 @@ class CameraController(
 
     private fun onSessionReady(cameraId: String?) {
         if (!foreground || disposed) return
-        lensSwitching = false
-        val actualLens = if (cameraId == DeviceProfile.CAMERA_ID) "0" else cameraId ?: "0"
+        main.removeCallbacks(previewFrameTimeout)
+        main.postDelayed(previewFrameTimeout, 4000)
+        blendFreshFrames = 0
+        val actualLens = if (state.resolution == Resolution.High || cameraId == DeviceProfile.CAMERA_ID) "0" else cameraId ?: "0"
         if (actualLens != currentLens) {
             currentLens = actualLens
             invalidateAuxiliaryFrames()
         }
-        refreshHighResolutionCapability()
+        if (state.mode == CaptureMode.Photo) refreshHighResolutionCapability()
         onTele = currentLens == "3"
         if (onTele) native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
         else native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
-        val actualZoom = if (currentLens == "2") 0.6f else if (currentLens == "3") state.zoom.coerceAtLeast(2f) else state.zoom.coerceAtLeast(1f)
+        try {
+            if (state.manualFocus) service?.setManualFocus(state.focusFraction)
+            else if (state.aeAfLocked) service?.setAfLock(true)
+        } catch (e: RemoteException) { Log.w(TAG, "Restore focus controls", e) }
+        val actualZoom = if (currentLens == "2") state.zoom.coerceIn(.6f, .9999f) else if (currentLens == "3") state.zoom.coerceAtLeast(2f) else state.zoom.coerceAtLeast(1f)
         update {
             it.copy(
                 zoom = actualZoom,
@@ -653,6 +807,26 @@ class CameraController(
                 lensIndex = physicalLenses.indexOf(currentLens).coerceAtLeast(0),
                 lensCount = physicalLenses.size.coerceAtLeast(1),
             )
+        }
+        if (state.videoStarting && recordingSurface != null) {
+            val generation = videoGeneration
+            io.execute {
+                try {
+                    if (generation != videoGeneration || !foreground) return@execute
+                    videoCapture?.start() ?: error("Recorder disappeared")
+                    post {
+                        if (generation == videoGeneration && foreground) {
+                            main.removeCallbacks(videoStartTimeout)
+                            recordingStartedAt = SystemClock.elapsedRealtime()
+                            update { it.copy(videoStarting = false, videoRecording = true, captureBusy = false,
+                                videoElapsedSeconds = 0, status = if (it.videoHasAudio) "Recording with audio" else "Recording • microphone off") }
+                            videoTick.run()
+                        }
+                    }
+                } catch (e: Exception) {
+                    post { if (generation == videoGeneration) stopVideo(save = false, restore = true) }
+                }
+            }
         }
     }
 
@@ -665,13 +839,29 @@ class CameraController(
                 if (generation == frameGeneration) {
                     val width = size?.getOrNull(0) ?: 0
                     val height = size?.getOrNull(1) ?: 0
-                    update { it.copy(highResolutionWidth = width, highResolutionHeight = height) }
+                    update { it.copy(highResolutionWidth = width, highResolutionHeight = height, highResolutionChecked = true,
+                        status = if (it.status.startsWith("Checking all exposed")) {
+                            if (CaptureOutput.is50MpSize(width, height)) "50 MP available • tap resolution to enable"
+                            else "50 MP not exposed by these Camera2 paths • share Camera report from controls"
+                        } else it.status) }
                 }
             }
         }
     }
 
     private fun onSessionError(msg: String?) {
+        main.removeCallbacks(previewFrameTimeout)
+        // Never make a 60 fps retry shrink the JPEG or switch to a preview screenshot.
+        if (!state.captureBusy && state.previewTargetFps > 30 && preview30Fallbacks.add(previewKey())) {
+            rebuildStillSession("60 fps preview rejected; retrying at 30 fps with the same still quality…")
+            return
+        }
+        cancelZoomHandoff()
+        if (state.videoStarting || state.videoRecording) {
+            stopVideo(save = false, restore = true)
+            Toast.makeText(activity, msg ?: "Video session failed", Toast.LENGTH_LONG).show()
+            return
+        }
         if (state.resolution == Resolution.High) {
             Toast.makeText(activity, "50 MP stream unavailable. Returning to 12 MP.", Toast.LENGTH_LONG).show()
             finishCapture("50 MP stream rejected")
@@ -687,11 +877,8 @@ class CameraController(
         if (lensSwitching) {
             lensSwitching = false
             currentLens = "0"
-            try {
-                service?.setPhysicalLens("0")
-            } catch (e: RemoteException) {
-                Log.w(TAG, "lens revert failed")
-            }
+            update { it.copy(zoom = 1f) }
+            rebuildStillSession("Lens unavailable; returned to 1× without digital cropping")
         }
     }
 
@@ -703,7 +890,8 @@ class CameraController(
         matteSegmenter?.onFpsMeasured(colorFps)
         val text = String.format(
             Locale.US,
-            "VIEWFINDER · %.0f FPS · DEPTH · %.0f FPS · Δt %.1f ms",
+            "RENDERED · %.0f FPS · SENSOR · %.0f FPS · DEPTH · %.0f FPS · Δt %.1f ms",
+            state.previewMeasuredFps,
             colorFps,
             depthFps,
             dt,
@@ -725,6 +913,8 @@ class CameraController(
     }
 
     private fun onColorImage(reader: ImageReader) {
+        if (reader !== colorReader) return
+        val renderToken = sessionToken
         val t0 = SystemClock.elapsedRealtimeNanos()
         val sensorCbMs = if (lastColorCbNs > 0L) (t0 - lastColorCbNs) / 1_000_000.0 else 0.0
         lastColorCbNs = t0
@@ -815,10 +1005,10 @@ class CameraController(
             val holder = surfaceHolder
             if (buffer != null) {
                 try {
-                    if (engineReady && foreground && holder != null && holder.surface.isValid) {
+                    if (reader === colorReader && renderToken == sessionToken && engineReady && foreground && holder != null && holder.surface.isValid) {
                         val targetFarFieldPx = if (state.bokehActive) fStopToTargetFarFieldPx(state.fStop, currentLens) else 0f
                         val tEng0 = SystemClock.elapsedRealtimeNanos()
-                        native.renderFrame(
+                        val rendered = native.renderFrame(
                             buffer,
                             depthFor(image.timestamp),
                             DeviceProfile.DEPTH_WIDTH,
@@ -829,6 +1019,34 @@ class CameraController(
                             state.fStop,
                             targetFarFieldPx,
                         )
+                        if (rendered && reader === colorReader && renderToken == sessionToken) {
+                            lastRenderedSessionToken = renderToken
+                            val count = ++blendFreshFrames
+                            val handoff = zoomHandoffToken
+                            if (count == 4) post {
+                                if (renderToken == sessionToken) {
+                                    main.removeCallbacks(previewFrameTimeout)
+                                    lensSwitching = false
+                                    if (zoomHandoffPending && handoff == zoomHandoffToken) {
+                                        if (state.zoomBlendImage == null) onZoomBlendFinished(handoff)
+                                        else update { it.copy(zoomBlendReady = true, zoomBlendPending = false) }
+                                    }
+                                }
+                            }
+                            if (renderedCounterToken != renderToken) {
+                                renderedCounterToken = renderToken
+                                deliveredFrameWindowMs = nowMs
+                                deliveredFrameCount = 0
+                            }
+                            deliveredFrameCount++
+                            val elapsed = nowMs - deliveredFrameWindowMs
+                            if (deliveredFrameWindowMs == 0L) { deliveredFrameWindowMs = nowMs; deliveredFrameCount = 0 }
+                            else if (elapsed >= 1000) {
+                                val fps = deliveredFrameCount * 1000f / elapsed
+                                deliveredFrameWindowMs = nowMs; deliveredFrameCount = 0
+                                post { if (renderToken == sessionToken) update { it.copy(previewMeasuredFps = fps) } }
+                            }
+                        }
                         val tEng1 = SystemClock.elapsedRealtimeNanos()
                         engineSubmitMs = (tEng1 - tEng0) / 1_000_000.0
                     }
@@ -882,7 +1100,7 @@ class CameraController(
         val frozen = captureState ?: run { image.close(); return }
         main.removeCallbacks(captureTimeout)
         if (image.format == ImageFormat.JPEG) {
-            receiveHighResolutionJpeg(image, frozen)
+            receiveCameraJpeg(image, frozen)
             return
         }
         val frozenW = image.width
@@ -996,24 +1214,24 @@ class CameraController(
         }
     }
 
-    private fun receiveHighResolutionJpeg(image: android.media.Image, frozen: CameraUiState) {
-        val expectedW = frozen.highResolutionWidth
-        val expectedH = frozen.highResolutionHeight
+    private fun receiveCameraJpeg(image: android.media.Image, frozen: CameraUiState) {
+        val expectedW = frozen.photoWidth
+        val expectedH = frozen.photoHeight
         try {
-            check(frozen.resolution == Resolution.High && !frozen.bokehActive)
+            check(!frozen.bokehActive)
             val source = image.planes[0].buffer
             val jpeg = ByteArray(source.remaining())
             source.get(jpeg)
-            io.execute { saveHighResolutionJpeg(jpeg, expectedW, expectedH) }
+            io.execute { saveCameraJpeg(jpeg, expectedW, expectedH, frozen.resolution == Resolution.High) }
         } catch (e: Exception) {
-            Log.e(TAG, "50 MP buffer read failed", e)
-            finishCapture("50 MP capture failed")
+            Log.e(TAG, "JPEG buffer read failed", e)
+            finishCapture("JPEG capture failed")
         } finally {
             image.close()
         }
     }
 
-    private fun saveHighResolutionJpeg(jpeg: ByteArray, expectedW: Int, expectedH: Int) {
+    private fun saveCameraJpeg(jpeg: ByteArray, expectedW: Int, expectedH: Int, high: Boolean) {
         var uri: Uri? = null
         var published = false
         try {
@@ -1021,13 +1239,13 @@ class CameraController(
             // recompressing it would both hurt quality and risk an OOM.
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(jpeg, 0, jpeg.size, bounds)
-            check(CaptureOutput.is50MpSize(bounds.outWidth, bounds.outHeight) &&
+            check((!high || CaptureOutput.is50MpSize(bounds.outWidth, bounds.outHeight)) &&
                 CaptureOutput.matches(bounds.outWidth, bounds.outHeight, expectedW, expectedH)) {
                 "Camera returned ${bounds.outWidth}×${bounds.outHeight}, expected ${expectedW}×${expectedH}"
             }
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
             val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, "NOTICAM_${stamp}_50MP.jpg")
+                put(MediaStore.Images.Media.DISPLAY_NAME, "NOTICAM_${stamp}${if (high) "_50MP" else ""}.jpg")
                 put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
                 put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NotiCam")
                 put(MediaStore.Images.Media.IS_PENDING, 1)
@@ -1047,15 +1265,15 @@ class CameraController(
             buildJpegThumbnail(jpeg, bounds.outWidth, bounds.outHeight)?.let { thumbnail ->
                 post { onThumbnailReady(thumbnail) }
             }
-            Log.i(TAG, "50 MP saved: ${bounds.outWidth}×${bounds.outHeight}, ${jpeg.size} bytes")
+            Log.i(TAG, "JPEG saved: ${bounds.outWidth}×${bounds.outHeight}, ${jpeg.size} bytes")
         } catch (e: Exception) {
-            Log.e(TAG, "50 MP save failed", e)
+            Log.e(TAG, "JPEG save failed", e)
         } finally {
             if (!published) uri?.let { incomplete ->
                 try { activity.contentResolver.delete(incomplete, null, null) }
                 catch (e: Exception) { Log.w(TAG, "Remove incomplete 50 MP row", e) }
             }
-            finishCapture(if (published) "50 MP saved to Photos" else "Could not save 50 MP photo")
+            finishCapture(if (published) "Photo saved" else "Could not save photo")
         }
     }
 
@@ -1371,10 +1589,12 @@ class CameraController(
     }
 
     override fun onModeSelected(mode: CaptureMode) {
-        if (mode == state.mode || state.captureBusy) return
+        if (state.previewTransitioning) return
+        if (mode == state.mode || state.captureBusy || state.videoRecording || state.videoStarting) return
         invalidateAuxiliaryFrames()
         update { it.copy(mode = mode, bokehEnabled = false, settingsOpen = false,
-            status = if (mode == CaptureMode.Video) "Video recording is coming later" else "Ready") }
+            resolution = Resolution.Standard, manualFocus = false, aeAfLocked = false, status = "Switching mode…") }
+        rebuildStillSession("Opening ${mode.label}…")
         haptic()
     }
 
@@ -1425,50 +1645,49 @@ class CameraController(
     }
 
     private fun applyZoom(requested: Float, force: Boolean) {
-        if (!requested.isFinite() || state.captureBusy || !foreground || disposed) return
+        if (!requested.isFinite() || state.captureBusy || state.videoRecording || state.videoStarting || !foreground || disposed) return
         val zoom = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
-        if (!force && kotlin.math.abs(zoom - state.zoom) < 0.005f) return
-        val lens = when {
-            zoom < 0.9f -> "2"
-            state.telephoto && zoom >= TELE_THRESHOLD -> "3"
-            else -> "0"
+        if (zoomHandoffPending) { queuedZoom = zoom; return }
+        if (!state.sessionReady) return
+        if (!force && kotlin.math.abs(zoom - state.zoom) < .005f) return
+        val oldZoom = state.zoom
+        val lens = CameraZoom.lensForZoom(zoom)
+        if (lens != currentLens || (state.resolution == Resolution.High && kotlin.math.abs(zoom - 1f) > .01f)) {
+            beginZoomHandoff(oldZoom, zoom) {
+                if (state.resolution == Resolution.High && kotlin.math.abs(zoom - 1f) > .01f) {
+                    currentLens = lens
+                    onTele = lens == "3"
+                    lensSwitching = true
+                    update { it.copy(resolution = Resolution.Standard) }
+                    rebuildStillSession("Zoom uses 12 MP. Switching…")
+                } else selectLens(lens)
+                lastSentZoom = zoom
+            }
+            return
         }
         update { it.copy(zoom = zoom) }
-        if (state.resolution == Resolution.High && kotlin.math.abs(zoom - 1f) > 0.01f) {
-            currentLens = lens
-            onTele = lens == "3"
-            update { it.copy(resolution = Resolution.Standard) }
-            rebuildStillSession("Zoom uses 12 MP. Switching…")
-        } else if (lens != currentLens) selectLens(lens)
-        if (force || kotlin.math.abs(zoom - lastSentZoom) > 0.02f) {
+        if (force || kotlin.math.abs(zoom - lastSentZoom) > .005f) {
             lastSentZoom = zoom
             try { service?.setZoom(zoom) } catch (e: RemoteException) { Log.w(TAG, "setZoom failed", e) }
         }
     }
 
     private fun selectLens(lens: String) {
-        if (state.captureBusy || lens == currentLens) return
+        if (state.captureBusy || state.videoRecording || state.videoStarting || lens == currentLens) return
         currentLens = lens
-        if (state.resolution == Resolution.High) {
-            update { it.copy(resolution = Resolution.Standard) }
-            rebuildStillSession("Lens change uses 12 MP…")
-            return
-        }
         onTele = lens == "3"
         lensSwitching = true
+        update { it.copy(aeAfLocked = false, manualFocus = false) }
+        if (state.resolution == Resolution.High || state.bokehEnabled) {
+            update { it.copy(resolution = Resolution.Standard, bokehEnabled = false, aeAfLocked = false, manualFocus = false) }
+        }
         invalidateAuxiliaryFrames()
         if (onTele) native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
         else native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
-        update { it.copy(sessionReady = false, status = "Switching lens…") }
-        try { service?.setPhysicalLens(lens) }
-        catch (e: RemoteException) {
-            lensSwitching = false
-            update { it.copy(status = "Lens switch failed") }
-        }
+        // Recreate the still stream for the selected sensor. 2× is optical on
+        // camera 3, not a 2× SCALER_CROP_REGION on the main camera.
+        rebuildStillSession("Switching lens…")
     }
-
-    private fun switchToTele() = selectLens("3")
-    private fun switchToMain() = selectLens("0")
 
     /**
      * Brings the radial wheel up and re-arms its timer.
@@ -1523,25 +1742,29 @@ class CameraController(
     }
 
     override fun onBokehToggle() {
+        if (state.previewTransitioning) return
         if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
         val enabled = !state.bokehEnabled
-        invalidateAuxiliaryFrames()
-        if (enabled && state.resolution == Resolution.High) {
-            update { it.copy(bokehEnabled = true, resolution = Resolution.Standard) }
-            rebuildStillSession("Portrait effect uses 12 MP. Switching…")
-        } else {
-            update { it.copy(bokehEnabled = enabled, status = if (enabled) "Portrait effect on" else "Portrait effect off") }
-        }
+        if (enabled) { currentLens = "0"; onTele = false; lastSentZoom = 1f }
+        update { it.copy(bokehEnabled = enabled, resolution = Resolution.Standard, aeAfLocked = false, manualFocus = false,
+            zoom = if (enabled) 1f else it.zoom) }
+        rebuildStillSession(if (enabled) "Opening portrait processing…" else "Opening native JPEG capture…")
         haptic()
     }
 
     override fun onResolutionToggle() {
+        if (state.previewTransitioning) return
         if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
         if (state.resolution == Resolution.High) {
             update { it.copy(resolution = Resolution.Standard) }
             rebuildStillSession("Switching to 12 MP…")
+        } else if (!state.highResolutionChecked) {
+            refreshHighResolutionCapability()
+            update { it.copy(status = "Checking all exposed main-camera 50 MP paths…") }
         } else if (!state.supportsHighResolution) {
-            update { it.copy(status = "The camera HAL does not advertise a 50 MP JPEG stream") }
+            refreshHighResolutionCapability()
+            Toast.makeText(activity, "50 MP is not exposed through Camera2 yet. Use Camera controls → Camera report.", Toast.LENGTH_LONG).show()
+            update { it.copy(status = "50 MP is not exposed by the queried Camera2 paths. Share Camera report from settings to inspect vendor/extension support.") }
         } else {
             // Full-resolution remosaic is a main-camera-only path. Never upscale
             // the 12 MP Vulkan readback or crop the image and still call it 50 MP.
@@ -1557,40 +1780,54 @@ class CameraController(
 
     private fun createStillReader(): ImageReader {
         val high = state.resolution == Resolution.High
-        val width = if (high) state.highResolutionWidth else DeviceProfile.STILL_WIDTH
-        val height = if (high) state.highResolutionHeight else DeviceProfile.STILL_HEIGHT
+        val bokeh = state.bokehActive
+        val advertised = if (!high && !bokeh) try { service?.getStandardJpegSize(currentLens) } catch (e: Exception) { null } else null
+        if (!high && !bokeh && service != null) check(advertised?.size == 2) { "This lens has no advertised native JPEG output" }
+        val width = if (high) state.highResolutionWidth else if (bokeh) DeviceProfile.STILL_WIDTH
+            else advertised?.getOrNull(0) ?: DeviceProfile.STILL_WIDTH
+        val height = if (high) state.highResolutionHeight else if (bokeh) DeviceProfile.STILL_HEIGHT
+            else advertised?.getOrNull(1) ?: DeviceProfile.STILL_HEIGHT
         check(!high || CaptureOutput.is50MpSize(width, height)) { "50 MP was not advertised by this camera" }
-        val reader = if (high) ImageReader.newInstance(width, height, ImageFormat.JPEG, 2)
+        update { it.copy(photoWidth = width, photoHeight = height) }
+        val reader = if (!bokeh) ImageReader.newInstance(width, height, ImageFormat.JPEG, 2)
         else ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2, HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
         return reader.also { it.setOnImageAvailableListener(::onStillImage, stillHandler) }
     }
 
     private fun rebuildStillSession(message: String) {
-        sessionToken++
+        val svc = service ?: return
+        val generation = ++sessionToken
+        pendingRebuildToken = generation
+        main.removeCallbacks(previewFrameTimeout)
         update { it.copy(sessionReady = false, status = message) }
         invalidateAuxiliaryFrames()
-        try {
-            service?.closeSession()
-            val old = stillReader
-            old?.setOnImageAvailableListener(null, null)
-            stillReader = createStillReader()
-            stillHandler?.post { old?.close() }
-            startStereoSession()
-        } catch (e: Exception) {
-            Log.e(TAG, "Still session rebuild failed", e)
-            update { it.copy(status = "Could not configure capture stream", sessionReady = false) }
-        }
-    }
-
-    override fun onTelephotoToggle() {
-        if (state.captureBusy || !state.sessionReady) return
-        val next = !state.telephoto
-        update { it.copy(telephoto = next) }
-        haptic()
-        if (next && state.zoom >= TELE_THRESHOLD) {
-            switchToTele()
-        } else if (!next && onTele) {
-            switchToMain()
+        io.execute {
+            try {
+                svc.closeSession()
+                post {
+                    if (pendingRebuildToken == generation) pendingRebuildToken = null
+                    if (generation == sessionToken && service === svc && foreground && !state.galleryOpen) {
+                        try {
+                            val old = stillReader
+                            old?.setOnImageAvailableListener(null, null)
+                            stillReader = createStillReader()
+                            stillHandler?.post { old?.close() }
+                            startStereoSession()
+                        } catch (e: Exception) {
+                            cancelZoomHandoff()
+                            update { it.copy(status = "Could not configure capture stream: ${e.message}", sessionReady = false) }
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                post {
+                    if (pendingRebuildToken == generation) pendingRebuildToken = null
+                    if (generation == sessionToken) {
+                        cancelZoomHandoff()
+                        update { it.copy(status = "Could not close camera stream", sessionReady = false) }
+                    }
+                }
+            }
         }
     }
 
@@ -1663,6 +1900,11 @@ class CameraController(
     }
 
     override fun onShutterClick() {
+        if (state.mode == CaptureMode.Video) {
+            if (state.videoRecording) stopVideo(save = true, restore = true)
+            else if (state.canUseShutter) startVideo()
+            return
+        }
         if (!state.canTakePhoto) return
         Log.i(TAG, "onShutterClick called, sessionReady=${state.sessionReady}")
         if (state.timerSeconds > 0) {
@@ -1672,70 +1914,113 @@ class CameraController(
         }
     }
 
-    override fun onGalleryOpen() {
-        val uri = latestPhotoUri ?: queryLatestNotiCamUri()
-        if (uri != null) {
-            Log.i(TAG, "Opening gallery with uri=$uri")
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "image/jpeg")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                setPackage("com.nothing.gallery")
-            }
+    fun onMicrophonePermissionResult(granted: Boolean) {
+        if (!foreground || disposed || state.mode != CaptureMode.Video) return
+        if (granted) startVideo()
+        else {
+            Toast.makeText(activity, "Microphone denied. Tap Record again to record without audio.", Toast.LENGTH_LONG).show()
+            update { it.copy(status = "Microphone off • tap Record for silent video") }
+        }
+    }
+
+    private fun startVideo() {
+        if (!state.canUseShutter || state.videoRecording || disposed || !foreground) return
+        val audio = activity.checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        if (!audio && !microphonePermissionAsked) {
+            microphonePermissionAsked = true
+            activity.requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 201)
+            return
+        }
+        val svc = service ?: return
+        val lens = currentLens
+        val generation = ++videoGeneration
+        update { it.copy(videoStarting = true, captureBusy = true, sessionReady = false,
+            settingsOpen = false, videoHasAudio = audio, status = "Preparing video…") }
+        main.postDelayed(videoStartTimeout, 15_000)
+        io.execute {
             try {
-                activity.startActivity(intent)
-            } catch (t: ActivityNotFoundException) {
-                Log.w(TAG, "com.nothing.gallery not found, falling back to chooser: ${t.message}")
-                val fallbackIntent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, "image/jpeg")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                try {
-                    activity.startActivity(Intent.createChooser(fallbackIntent, "Open photo with"))
-                } catch (t2: Throwable) {
-                    Toast.makeText(activity, "No gallery app found", Toast.LENGTH_SHORT).show()
-                }
-            }
-        } else {
-            val launchIntent = activity.packageManager.getLaunchIntentForPackage("com.nothing.gallery")
-            if (launchIntent != null) {
-                activity.startActivity(launchIntent)
-            } else {
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                try {
-                    activity.startActivity(intent)
-                } catch (t: Throwable) {
-                    Toast.makeText(activity, "No gallery app found", Toast.LENGTH_SHORT).show()
+                val size = svc.getVideoSize(lens)
+                check(size.size == 3) { "This lens does not expose a 30 fps recorder stream" }
+                val capture = VideoCapture(activity.applicationContext)
+                videoCapture = capture
+                capture.prepare(size[0], size[1], audio, size[2],
+                    onFailure = { post { if (generation == videoGeneration) stopVideo(false, true) } },
+                    onLimit = { post { if (generation == videoGeneration) stopVideo(true, true) } })
+                recordingSurface = capture.surface
+                post { if (generation == videoGeneration && foreground) {
+                    update { it.copy(videoWidth = size[0], videoHeight = size[1]) }
+                    startStereoSession()
+                } }
+            } catch (e: Exception) {
+                Log.e(TAG, "Video prepare failed", e)
+                videoCapture?.finish(false)
+                videoCapture = null
+                recordingSurface = null
+                post {
+                    if (generation == videoGeneration) {
+                        main.removeCallbacks(videoStartTimeout)
+                        update { it.copy(videoStarting = false, captureBusy = false, status = "Could not prepare video: ${e.message}") }
+                        if (foreground) startStereoSession()
+                    }
                 }
             }
         }
     }
 
-    private fun queryLatestNotiCamUri(): Uri? {
-        val projection = arrayOf(MediaStore.Images.Media._ID)
-        val selection = "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?"
-        val selectionArgs = arrayOf("%Pictures/NotiCam%")
-        val sortOrder = "${MediaStore.Images.Media.DATE_ADDED} DESC"
-        return try {
-            activity.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                selection,
-                selectionArgs,
-                sortOrder,
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID))
-                    ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-                } else null
+    private fun stopVideo(save: Boolean, restore: Boolean) {
+        if (!state.videoStarting && !state.videoRecording) return
+        val generation = ++videoGeneration
+        ++sessionToken // Late errors from the closing recorder session are irrelevant.
+        main.removeCallbacks(videoTick)
+        main.removeCallbacks(videoStartTimeout)
+        update { it.copy(videoRecording = false, videoStarting = false, captureBusy = true,
+            sessionReady = false, status = "Finishing video…") }
+        try { service?.closeSession() } catch (_: Exception) { }
+        io.execute {
+            recordingSurface = null
+            val destination = videoCapture?.finish(save)
+            videoCapture = null
+            val thumbnail = destination?.let { uri ->
+                try { activity.contentResolver.loadThumbnail(uri, Size(168, 168), null).asImageBitmap() }
+                catch (_: Exception) { null }
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "Failed to query latest NotiCam photo: ${t.message}")
-            null
+            post {
+                if (generation == videoGeneration) {
+                    thumbnail?.let { onThumbnailReady(it) }
+                    update { it.copy(captureBusy = false, status = if (destination != null) "Video saved" else "Video not saved — empty or interrupted clip") }
+                    if (restore && foreground) startStereoSession()
+                }
+            }
+        }
+    }
+
+    override fun onGalleryOpen() {
+        if (state.previewTransitioning) return
+        main.removeCallbacks(previewFrameTimeout)
+        if (state.captureBusy || state.videoRecording || state.videoStarting) return
+        ++sessionToken
+        pendingRebuildToken = null
+        try { service?.closeSession() } catch (_: Exception) { }
+        update { it.copy(galleryOpen = true, settingsOpen = false, sessionReady = false) }
+    }
+
+    override fun onGalleryClose() {
+        update { it.copy(galleryOpen = false) }
+        if (foreground) rebuildStillSession("Returning to native capture…")
+    }
+
+    override fun onCameraReport() {
+        val svc = service ?: return
+        update { it.copy(status = "Inspecting camera capabilities…") }
+        io.execute {
+            val report = try { svc.getCameraDiagnostics() } catch (e: Exception) { "Camera report failed: ${e.message}" }
+            post {
+                activity.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_SUBJECT, "NotiCam camera capability report")
+                    putExtra(Intent.EXTRA_TEXT, report)
+                }, "Share camera capability report"))
+            }
         }
     }
 

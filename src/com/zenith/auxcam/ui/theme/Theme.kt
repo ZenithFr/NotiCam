@@ -16,16 +16,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/**
- * Apple Camera tokens, expressed as Compose values.
- *
- * Everything the chrome draws comes from here so the capture surface cannot
- * drift away from the design language: one accent (systemYellow), flat
- * see-through matte film, hairline separators and an SF-style type ramp.
+/** Independent BitChord-inspired visual tokens: neutral floating glass, white
+ * selections, generous radii and a quiet type hierarchy. No copied font assets.
+ * Artwork atmosphere belongs behind chrome, never in the camera's image path.
  */
 object CameraColors {
-    /** Camera yellow: selected mode, focus and active optical controls. */
+    val Accent = Color.White
+    /** Functional focus reticle; not the UI selection accent. */
     val Yellow = Color(0xFFFFD60A)
+    val Atmosphere = Color(0xFFB77A49)
     /** iOS systemRed — recording only. */
     val Red = Color(0xFFFF453A)
     /** iOS systemGreen — reserved for future "ready" states. */
@@ -37,27 +36,11 @@ object CameraColors {
     val LabelQuaternary = Color(0x40FFFFFF)
     val OnLight = Color.Black
 
-    /**
-     * Flat film over dark chrome — 8 % white.
-     *
-     * The chrome is transparent: what tells you a control is there is a barely
-     * tinted, uniformly shaded disc plus the matte grain (see `effects/Matte.kt`),
-     * not an opaque card. Over the black capture surface a *white* film is used so
-     * the disc still separates from the background; a black shade would be
-     * invisible there.
-     */
+    /** Subtle inset fill, not a decorative outline. */
     val Matte = Color(0x14FFFFFF)
-    /** Borderless, neutral matte control fill, readable over the live scene. */
-    val ControlSurface = Color(0xD92A2B2E)
-
-    /**
-     * Flat shade over the live scene — 14 % black.
-     *
-     * Same idea inverted: the settings sheet hangs over the preview, where a white
-     * film would wash the picture out. Darkening keeps the scene visible through
-     * the panel while white labels stay legible against it.
-     */
-    val MatteScrim = Color(0xF2181B1F)
+    val ControlSurface = Color(0x803D3B3A)
+    /** Sheets need their own readable body over the native camera SurfaceView. */
+    val MatteScrim = Color(0xF21D1B1A)
 
     /** Internal hairline *between rows inside* a panel. Never a surface rim. */
     val Separator = Color(0x1FFFFFFF)
@@ -99,7 +82,7 @@ object CameraSpacing {
  *  • **release** is slower and slightly bouncy, which is where the iOS "lift"
  *    feel comes from;
  *  • **selection** (chips, modes) is a medium spring — visible travel, no wobble;
- *  • **slides** (Pro sheet, dial) are heavily damped so panels never overshoot
+ *  • **slides** (controls sheet, dial) are heavily damped so panels never overshoot
  *    into their neighbours;
  *  • physical detents (zoom wheel) use a low-bouncy, low-stiffness spring so the
  *    indicator keeps a little momentum like a real lens barrel.
@@ -144,41 +127,55 @@ object CameraMotion {
 }
 
 object CameraType {
-    private val sf = FontFamily.SansSerif
+    private val sans = FontFamily.SansSerif
+
+    val Title = TextStyle(
+        fontFamily = sans,
+        fontWeight = FontWeight.Medium,
+        fontSize = 26.sp,
+        letterSpacing = (-0.8).sp,
+    )
+
+    val Heading = TextStyle(
+        fontFamily = sans,
+        fontWeight = FontWeight.Medium,
+        fontSize = 20.sp,
+        letterSpacing = (-0.4).sp,
+    )
 
     val Mode = TextStyle(
-        fontFamily = sf,
+        fontFamily = sans,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 14.sp,
-        letterSpacing = 0.5.sp,
+        fontSize = 15.sp,
+        letterSpacing = (-0.2).sp,
     )
 
     val Lens = TextStyle(
-        fontFamily = sf,
+        fontFamily = sans,
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         letterSpacing = 0.24.sp,
     )
 
     val Section = TextStyle(
-        fontFamily = sf,
+        fontFamily = sans,
         fontWeight = FontWeight.SemiBold,
         fontSize = 12.sp,
-        letterSpacing = 2.2.sp,
+        letterSpacing = 1.2.sp,
     )
 
     val Value = TextStyle(
-        fontFamily = sf,
+        fontFamily = sans,
         fontWeight = FontWeight.Medium,
         fontSize = 13.sp,
         letterSpacing = 0.2.sp,
     )
 
     val Caption = TextStyle(
-        fontFamily = sf,
+        fontFamily = sans,
         fontWeight = FontWeight.Normal,
-        fontSize = 11.sp,
-        letterSpacing = 0.4.sp,
+        fontSize = 12.sp,
+        letterSpacing = 0.sp,
     )
 
     val Telemetry = TextStyle(
@@ -189,14 +186,14 @@ object CameraType {
     )
 
     val Dial = TextStyle(
-        fontFamily = sf,
+        fontFamily = sans,
         fontWeight = FontWeight.Medium,
         fontSize = 34.sp,
         letterSpacing = 0.5.sp,
     )
 
     val DialCaption = TextStyle(
-        fontFamily = sf,
+        fontFamily = sans,
         fontWeight = FontWeight.Normal,
         fontSize = 11.sp,
         letterSpacing = 0.8.sp,
@@ -204,7 +201,7 @@ object CameraType {
 }
 
 private val NotiCamColorScheme = darkColorScheme(
-    primary = CameraColors.Yellow,
+    primary = CameraColors.Accent,
     onPrimary = CameraColors.OnLight,
     secondary = CameraColors.Label,
     background = CameraColors.Black,

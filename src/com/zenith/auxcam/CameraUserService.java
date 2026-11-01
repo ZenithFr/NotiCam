@@ -35,6 +35,9 @@ public class CameraUserService extends IAuxCamService.Stub {
     private static final String CAMERA_ID = "5";
 
     private final Context mContext;
+    private Context mCameraContext;
+    private CameraManager mPrivilegedCameraManager;
+    private String mCameraContextSource = "not initialized";
     private HandlerThread mCameraThread;
     private Handler mCameraHandler;
     private HandlerExecutor mExecutor;
@@ -46,13 +49,16 @@ public class CameraUserService extends IAuxCamService.Stub {
     private Surface mColorSurface;
     private Surface mDepthSurface;
     private Surface mStillSurface;
+    private Surface mRecordingSurface;
+    private boolean mVideoMode;
+    private boolean mHighResolutionStill;
+    private volatile CameraCapabilities.Target mHighResolutionTarget;
 
     private CaptureRequest.Builder mPreviewRequestBuilder;
     long mShutterCommandNs = 0;
     public static volatile boolean sForceFps30 = false;
     public static volatile float sLatestS1Matte = 0.65f;
     private long mLastCadenceLogMs = 0;
-    private boolean mLastForceFps30 = false;
 
     // ─── Live camera controls (flash / exposure / zoom / focus / lens) ───────
     private static final int FLASH_OFF = 0;
@@ -62,6 +68,9 @@ public class CameraUserService extends IAuxCamService.Stub {
     private int mFlashMode = FLASH_OFF;
     private int mEvSteps = 0;
     private float mZoomRatio = 1.0f;
+    private float mRequestedZoom = 1.0f;
+    private int mPreviewMaxFps = 30;
+    private Range<Integer> mPreviewFpsRange;
     private float mMaxDigitalZoom = 1.0f;
     private Rect mActiveArray;
     private Rect mMaximumActiveArray;
@@ -82,6 +91,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     private int mDepthW = 448, mDepthH = 288;
     private int mStillW = 4080, mStillH = 3072;
     private int mStillFormat = ImageFormat.YUV_420_888;
+    private int mSensorOrientation = 90;
     private int mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
 
     private final class AfResetRunnable implements Runnable {
@@ -171,6 +181,28 @@ public class CameraUserService extends IAuxCamService.Stub {
         }
     }
 
+    /** One privileged client for discovery AND capture. Attribution is not a UID escalation. */
+    private synchronized CameraManager cameraManager() {
+        if (mPrivilegedCameraManager != null) return mPrivilegedCameraManager;
+        Context shellContext = mContext;
+        mCameraContextSource = "UserService context (shell context setup unavailable)";
+        try {
+            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+            Object at = activityThreadClass.getMethod("currentActivityThread").invoke(null);
+            if (at == null) at = activityThreadClass.getMethod("systemMain").invoke(null);
+            Context systemContext = (Context) activityThreadClass.getMethod("getSystemContext").invoke(at);
+            fixAttribution(systemContext, "com.android.shell", 2000);
+            shellContext = systemContext.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
+            fixAttribution(shellContext, "com.android.shell", 2000);
+            mCameraContextSource = "com.android.shell context";
+        } catch (Throwable t) {
+            Log.w(TAG, "shellContext setup fallback: " + t);
+        }
+        mCameraContext = shellContext;
+        mPrivilegedCameraManager = (CameraManager) shellContext.getSystemService(Context.CAMERA_SERVICE);
+        return mPrivilegedCameraManager;
+    }
+
     private void startBackgroundThread() {
         mCameraThread = new HandlerThread("CameraUserThread");
         mCameraThread.start();
@@ -220,17 +252,17 @@ public class CameraUserService extends IAuxCamService.Stub {
             Surface colorSurface, int colorW, int colorH,
             Surface depthSurface, int depthW, int depthH,
             Surface stillSurface, int stillW, int stillH, int stillFormat,
-            String colorPhysicalId) {
+            String colorPhysicalId, Surface recordingSurface, boolean videoMode, float requestedZoom, int previewMaxFps) {
         if (mCameraHandler == null) return false;
         mCameraHandler.post(() -> openSessionOnCameraThread(colorSurface, colorW, colorH,
-                depthSurface, depthW, depthH, stillSurface, stillW, stillH, stillFormat, colorPhysicalId));
+                depthSurface, depthW, depthH, stillSurface, stillW, stillH, stillFormat, colorPhysicalId, recordingSurface, videoMode, requestedZoom, previewMaxFps));
         return true; // accepted; readiness/failure is delivered through the callback
     }
 
     private void openSessionOnCameraThread(
             Surface colorSurface, int colorW, int colorH,
             Surface depthSurface, int depthW, int depthH,
-            Surface stillSurface, int stillW, int stillH, int stillFormat, String colorPhysicalId) {
+            Surface stillSurface, int stillW, int stillH, int stillFormat, String colorPhysicalId, Surface recordingSurface, boolean videoMode, float requestedZoom, int previewMaxFps) {
         closeSessionOnCameraThread();
         Log.i(TAG, "openStereoSession requested: Color=[" + colorW + "x" + colorH + ", phys=" + colorPhysicalId + "], " +
                 "Depth=[" + depthW + "x" + depthH + "], Still=[" + stillW + "x" + stillH + "]");
@@ -238,6 +270,12 @@ public class CameraUserService extends IAuxCamService.Stub {
         mColorSurface = colorSurface;
         mDepthSurface = depthSurface;
         mStillSurface = stillSurface;
+        mRecordingSurface = recordingSurface;
+        mVideoMode = videoMode;
+        mZoomRatio = Float.isFinite(requestedZoom) ? Math.max(.6f, Math.min(10f, requestedZoom)) : 1f;
+        mRequestedZoom = mZoomRatio;
+        mPreviewMaxFps = previewMaxFps >= 60 && recordingSurface == null ? 60 : 30;
+        mHighResolutionStill = !videoMode && stillFormat == ImageFormat.JPEG && (long) stillW * stillH >= 45_000_000L;
 
         mColorW = colorW;
         mColorH = colorH;
@@ -247,38 +285,33 @@ public class CameraUserService extends IAuxCamService.Stub {
         mStillH = stillH;
         mStillFormat = stillFormat;
         mPhysicalId = colorPhysicalId;
-        mCurrentCameraId = stillFormat == ImageFormat.JPEG ? "0" :
-                ("2".equals(colorPhysicalId) || "3".equals(colorPhysicalId) ? colorPhysicalId : CAMERA_ID);
+        mAfRegion = null;
+        mAfLocked = false;
+        mManualFocusActive = false;
+        mCurrentCameraId = "2".equals(colorPhysicalId) || "3".equals(colorPhysicalId) ? colorPhysicalId :
+                (videoMode || stillFormat == ImageFormat.JPEG ? "0" : CAMERA_ID);
 
-        Context shellContext = mContext;
-        try {
-            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
-            Object at = activityThreadClass.getMethod("systemMain").invoke(null);
-            Context systemContext = (Context) activityThreadClass.getMethod("getSystemContext").invoke(at);
-            fixAttribution(systemContext, "com.android.shell", 2000);
-            shellContext = systemContext.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
-            fixAttribution(shellContext, "com.android.shell", 2000);
-        } catch (Throwable t) {
-            Log.w(TAG, "shellContext setup fallback: " + t);
-        }
-
-        CameraManager cm = (CameraManager) shellContext.getSystemService(Context.CAMERA_SERVICE);
+        CameraManager cm = cameraManager();
         if (cm == null) {
             notifyError("CameraManager unavailable");
             return;
         }
 
-        if (mStillFormat == ImageFormat.JPEG) {
+        if (mHighResolutionStill) {
             int[] size = getHighResolutionJpegSize();
             if (size.length != 3 || size[0] != mStillW || size[1] != mStillH) {
                 notifyError("Requested 50 MP JPEG size is not advertised by the main camera");
                 return;
             }
             mStillPixelMode = size[2];
+            mCurrentCameraId = mHighResolutionTarget.cameraId;
+            Log.i(TAG, "50 MP path: " + mCurrentCameraId + " / " + mHighResolutionTarget.source);
         } else {
             mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
         }
+        mPreviewFpsRange = null;
         loadCameraCharacteristics(cm);
+        if (mPreviewFpsRange == null) { notifyError("No advertised frame rate for selected preview stream"); return; }
 
         try {
             cm.openCamera(mCurrentCameraId, new DeviceStateCallback(this, colorPhysicalId), mCameraHandler);
@@ -290,43 +323,74 @@ public class CameraUserService extends IAuxCamService.Stub {
         }
     }
 
-    /** Query standard, high-resolution and (API 31+) remosaic output maps.
-     * Returns width, height and sensor pixel mode. Prefer the default mode when
-     * it already exposes full resolution; never infer a size from the array.
-     */
     @Override
     public int[] getHighResolutionJpegSize() {
         try {
-            CameraManager cm = (CameraManager) mContext.getSystemService(Context.CAMERA_SERVICE);
-            if (cm == null) return new int[0];
-            CameraCharacteristics chars = cm.getCameraCharacteristics("0");
-            Size size = find50MpJpeg(chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP));
-            if (size != null) return new int[]{size.getWidth(), size.getHeight(), CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT};
-            if (android.os.Build.VERSION.SDK_INT >= 31 &&
-                    chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) != null) {
-                size = find50MpJpeg(chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION));
-                if (size != null) return new int[]{size.getWidth(), size.getHeight(), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION};
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "50 MP capability query failed", t);
-        }
+            CameraManager cm = cameraManager();
+            CameraCapabilities.Target target = CameraCapabilities.discover(cm);
+            mHighResolutionTarget = target;
+            if (target != null) return new int[]{target.size.getWidth(), target.size.getHeight(), target.pixelMode};
+        } catch (Throwable t) { Log.w(TAG, "50 MP capability query failed", t); }
         return new int[0];
     }
 
-    private static Size find50MpJpeg(StreamConfigurationMap map) {
-        if (map == null) return null;
-        Size best = null;
-        Size[][] candidates = { map.getOutputSizes(ImageFormat.JPEG), map.getHighResolutionOutputSizes(ImageFormat.JPEG) };
-        for (Size[] sizes : candidates) {
-            if (sizes == null) continue;
-            for (Size size : sizes) {
-                long pixels = (long) size.getWidth() * size.getHeight();
-                double ratio = (double) Math.max(size.getWidth(), size.getHeight()) / Math.min(size.getWidth(), size.getHeight());
-                if (pixels >= 45_000_000L && pixels <= 55_000_000L && Math.abs(ratio - 4.0 / 3.0) < 0.02 &&
-                        (best == null || pixels > (long) best.getWidth() * best.getHeight())) best = size;
+    @Override
+    public int[] getStandardJpegSize(String lensId) {
+        try {
+            CameraManager cm = cameraManager();
+            String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
+            Size size = CameraCapabilities.jpegSize(cm.getCameraCharacteristics(id).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP), false);
+            if (size != null) return new int[]{size.getWidth(), size.getHeight()};
+        } catch (Throwable t) { Log.w(TAG, "JPEG size query failed", t); }
+        return new int[0];
+    }
+
+    @Override
+    public int[] getVideoSize(String lensId) {
+        try {
+            CameraManager cm = cameraManager();
+            String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
+            Size size = CameraCapabilities.videoSize(cm, id);
+            if (size != null) {
+                Integer orientation = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION);
+                return new int[]{size.getWidth(), size.getHeight(), orientation == null ? 90 : orientation};
             }
-        }
-        return best;
+        } catch (Throwable t) { Log.w(TAG, "Video size query failed", t); }
+        return new int[0];
+    }
+
+    @Override
+    public int[] getPreviewConfiguration(String lensId, boolean bokeh, boolean highResolution, boolean prefer60) {
+        try {
+            CameraManager cm = cameraManager();
+            String id = bokeh ? CAMERA_ID : ("2".equals(lensId) || "3".equals(lensId) ? lensId : "0");
+            if (highResolution) {
+                CameraCapabilities.Target target = CameraCapabilities.discover(cm);
+                if (target != null) id = target.cameraId;
+            }
+            boolean diagnostic30 = sForceFps30 || new java.io.File("/data/local/tmp/force_fps_30").exists();
+            return CameraCapabilities.previewConfig(cm, id, prefer60 && !diagnostic30);
+        } catch (Throwable t) { Log.w(TAG, "Preview capability query failed", t); }
+        return new int[0];
+    }
+
+    @Override
+    public String getCameraDiagnostics() {
+        try {
+            CameraManager cm = cameraManager();
+            String attribution = "not available before API 31";
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                android.content.AttributionSource source = mCameraContext.getAttributionSource();
+                attribution = source.getPackageName() + " / uid=" + source.getUid();
+            }
+            String header = "Backend: Shizuku UserService\nProcess UID: " + android.os.Process.myUid()
+                    + " (shell=2000; root=0; attribution does not change this)\nContext: " + mCameraContextSource
+                    + "\nCamera attribution: " + attribution
+                    + "\nCAMERA permission: " + (mCameraContext.checkSelfPermission("android.permission.CAMERA") == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                    + "\nSYSTEM_CAMERA permission: " + (mCameraContext.checkSelfPermission("android.permission.SYSTEM_CAMERA") == android.content.pm.PackageManager.PERMISSION_GRANTED)
+                    + "\nNo global permissions, app-ops, sensor privacy or vendor properties changed.\n\n";
+            return header + CameraCapabilities.report(cm);
+        } catch (Throwable t) { return "Camera report failed (UserService UID=" + android.os.Process.myUid() + "): " + t; }
     }
 
     void onDeviceOpened(CameraDevice camera, String colorPhysicalId) {
@@ -335,20 +399,16 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         try {
             OutputConfiguration colorConfig = new OutputConfiguration(mColorSurface);
-            OutputConfiguration stillConfig = new OutputConfiguration(mStillSurface);
-            if (mStillFormat == ImageFormat.JPEG && android.os.Build.VERSION.SDK_INT >= 31) {
-                stillConfig.addSensorPixelModeUsed(mStillPixelMode);
-            }
-
             List<OutputConfiguration> outputs = new ArrayList<OutputConfiguration>();
             outputs.add(colorConfig);
-
-            boolean isStereoCam = CAMERA_ID.equals(mCurrentCameraId);
-            if (isStereoCam && mDepthSurface != null) {
-                OutputConfiguration depthConfig = new OutputConfiguration(mDepthSurface);
-                outputs.add(depthConfig);
+            if (mVideoMode) {
+                if (mRecordingSurface != null) outputs.add(new OutputConfiguration(mRecordingSurface));
+            } else {
+                OutputConfiguration stillConfig = new OutputConfiguration(mStillSurface);
+                if (mHighResolutionStill && android.os.Build.VERSION.SDK_INT >= 31) stillConfig.addSensorPixelModeUsed(mStillPixelMode);
+                if (!mVideoMode && !mHighResolutionStill && CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) outputs.add(new OutputConfiguration(mDepthSurface));
+                outputs.add(stillConfig);
             }
-            outputs.add(stillConfig);
 
             SessionConfiguration sessionConfig = new SessionConfiguration(
                     SessionConfiguration.SESSION_REGULAR,
@@ -370,9 +430,10 @@ public class CameraUserService extends IAuxCamService.Stub {
         Log.i(TAG, "Camera " + mCurrentCameraId + " CameraCaptureSession configured and ready!");
 
         try {
-            mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            mPreviewRequestBuilder = mCameraDevice.createCaptureRequest(mVideoMode ? CameraDevice.TEMPLATE_RECORD : CameraDevice.TEMPLATE_PREVIEW);
             mPreviewRequestBuilder.addTarget(mColorSurface);
-            if (CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) {
+            if (mVideoMode && mRecordingSurface != null) mPreviewRequestBuilder.addTarget(mRecordingSurface);
+            if (!mVideoMode && !mHighResolutionStill && CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) {
                 mPreviewRequestBuilder.addTarget(mDepthSurface);
             }
 
@@ -408,6 +469,11 @@ public class CameraUserService extends IAuxCamService.Stub {
     private void loadCameraCharacteristics(CameraManager cm) {
         try {
             CameraCharacteristics chars = cm.getCameraCharacteristics(mCurrentCameraId);
+            mPreviewFpsRange = CameraCapabilities.previewRange(cm, mCurrentCameraId, new Size(mColorW, mColorH), mPreviewMaxFps);
+            if (mPreviewFpsRange == null) throw new IllegalStateException("No advertised FPS range for the preview stream");
+            Log.i(TAG, "PREVIEW_TARGET: " + mColorW + "x" + mColorH + " " + mPreviewFpsRange + " (still " + mStillW + "x" + mStillH + " unchanged)");
+            Integer orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
+            mSensorOrientation = orientation == null ? 90 : orientation;
             mNoiseModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES);
             mEdgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES);
             mActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
@@ -444,8 +510,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             mCropRegion = null;
             return;
         }
-        float baseZoom = "3".equals(mCurrentCameraId) ? 2.0f : ("2".equals(mCurrentCameraId) ? 0.6f : 1.0f);
-        float z = Math.max(1.0f, Math.min(mMaxDigitalZoom, mZoomRatio / baseZoom));
+        float z = CameraZoom.digitalRatio(mZoomRatio, mCurrentCameraId, mMaxDigitalZoom);
         int w = Math.round(mActiveArray.width() / z);
         int h = Math.round(mActiveArray.height() / z);
         w = Math.max(2, w - (w % 2));
@@ -494,16 +559,12 @@ public class CameraUserService extends IAuxCamService.Stub {
         applyCropAndExposure(b);
         applyMinimalProcessing(b);
         try {
+            b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
+            if (mVideoMode) b.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD);
+            if (mPreviewFpsRange != null) b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mPreviewFpsRange);
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
-            boolean forceFps = false;
-            try {
-                forceFps = sForceFps30 || new java.io.File("/data/local/tmp/force_fps_30").exists();
-            } catch (Throwable ignored) {}
-            Log.i(TAG, "force_fps_30 check: forceFps=" + forceFps);
-            if (forceFps) {
-                b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new android.util.Range<Integer>(30, 30));
-            }
+
             if (mManualFocusActive) {
                 b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
                 b.set(CaptureRequest.LENS_FOCUS_DISTANCE, mManualFocusDistance);
@@ -526,7 +587,7 @@ public class CameraUserService extends IAuxCamService.Stub {
                 b.set(CaptureRequest.CONTROL_AE_LOCK, false);
                 b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
             } else {
-                b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                b.set(CaptureRequest.CONTROL_AF_MODE, mVideoMode ? CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO : CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
                 b.set(CaptureRequest.CONTROL_AE_LOCK, false);
                 b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
             }
@@ -591,20 +652,28 @@ public class CameraUserService extends IAuxCamService.Stub {
         });
     }
 
+    private long mLastZoomStepMs;
+    private final Runnable mZoomStep = new Runnable() {
+        @Override public void run() {
+            if (mCaptureSession == null) return;
+            long now = SystemClock.elapsedRealtime();
+            mZoomRatio = CameraZoom.smoothPreviewZoom(mZoomRatio, mRequestedZoom, now - mLastZoomStepMs);
+            mLastZoomStepMs = now;
+            recomputeCropRegion();
+            refreshRepeatingRequest();
+            if (mZoomRatio != mRequestedZoom) mCameraHandler.postDelayed(this, 16);
+        }
+    };
+
     @Override
     public void setZoom(final float ratio) {
         if (mCameraHandler == null) return;
-        mCameraHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                if (!Float.isFinite(ratio)) return;
-                // Lens choice belongs to the controller. Zoom here is a crop
-                // relative to that lens, not a second implicit camera switch.
-                mZoomRatio = Math.max(0.6f, Math.min(10.0f, ratio));
-                recomputeCropRegion();
-                Log.i(TAG, "Zoom -> " + mZoomRatio + "x on Camera " + mCurrentCameraId + ", crop=" + mCropRegion);
-                refreshRepeatingRequest();
-            }
+        mCameraHandler.post(() -> {
+            if (!Float.isFinite(ratio)) return;
+            mRequestedZoom = Math.max(.6f, Math.min(10f, ratio));
+            mCameraHandler.removeCallbacks(mZoomStep);
+            mLastZoomStepMs = SystemClock.elapsedRealtime() - 16;
+            mZoomStep.run();
         });
     }
 
@@ -701,7 +770,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             CaptureRequest.Builder af = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
             af.addTarget(mColorSurface);
-            if (CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) {
+            if (!mVideoMode && !mHighResolutionStill && CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) {
                 af.addTarget(mDepthSurface);
             }
             af.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
@@ -720,91 +789,6 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     @Override
-    public void setPhysicalLens(final String physicalId) {
-        if (mCameraHandler == null) return;
-        mCameraHandler.post(new Runnable() {
-            @Override
-            public void run() {
-                String targetId;
-                if ("3".equals(physicalId)) {
-                    targetId = "3"; // Telephoto
-                } else if ("2".equals(physicalId)) {
-                    targetId = "2"; // Ultra-wide
-                } else {
-                    targetId = CAMERA_ID; // Main stereo VSDOF "5"
-                }
-                if (targetId.equals(mCurrentCameraId)) return;
-                restartWithCamera(targetId);
-            }
-        });
-    }
-
-    /** Tears the device down and re-opens the specified camera. */
-    private void restartWithCamera(String targetCameraId) {
-        Log.i(TAG, "Switching camera device from " + mCurrentCameraId + " to '" + targetCameraId + "'");
-        try {
-            if (mCaptureSession != null) {
-                try {
-                    mCaptureSession.stopRepeating();
-                } catch (Throwable ignore) {
-                    // session already gone
-                }
-                mCaptureSession.close();
-                mCaptureSession = null;
-            }
-            if (mCameraDevice != null) {
-                mCameraDevice.close();
-                mCameraDevice = null;
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "Camera switch teardown: " + t);
-        }
-
-        mSessionGeneration++;
-        mPreviewRequestBuilder = null;
-        mCurrentCameraId = targetCameraId;
-        mAfRegion = null;
-
-        Context shellContext = mContext;
-        try {
-            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
-            Object at = activityThreadClass.getMethod("systemMain").invoke(null);
-            Context systemContext = (Context) activityThreadClass.getMethod("getSystemContext").invoke(at);
-            fixAttribution(systemContext, "com.android.shell", 2000);
-            shellContext = systemContext.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
-            fixAttribution(shellContext, "com.android.shell", 2000);
-        } catch (Throwable t) {
-            Log.w(TAG, "shellContext setup fallback: " + t);
-        }
-
-        CameraManager cm = (CameraManager) shellContext.getSystemService(Context.CAMERA_SERVICE);
-        if (cm == null) {
-            notifyError("CameraManager unavailable");
-            return;
-        }
-
-        loadCameraCharacteristics(cm);
-
-        try {
-            cm.openCamera(mCurrentCameraId, new DeviceStateCallback(this, null), mCameraHandler);
-        } catch (Throwable t) {
-            Log.e(TAG, "Failed to open Camera " + mCurrentCameraId + ", falling back to " + CAMERA_ID, t);
-            if (!CAMERA_ID.equals(mCurrentCameraId)) {
-                mCurrentCameraId = CAMERA_ID;
-                loadCameraCharacteristics(cm);
-                try {
-                    cm.openCamera(CAMERA_ID, new DeviceStateCallback(this, null), mCameraHandler);
-                } catch (Throwable t2) {
-                    Log.e(TAG, "Fallback to CAMERA_ID failed", t2);
-                    notifyError("Failed to open camera: " + t.getMessage());
-                }
-            } else {
-                notifyError("Failed to open camera: " + t.getMessage());
-            }
-        }
-    }
-
-    @Override
     public void triggerStill(long shutterCommandNs, boolean highQualityNr) {
         triggerStillWithZsl(shutterCommandNs, highQualityNr, true);
     }
@@ -816,7 +800,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     private void captureStillOnCameraThread(long shutterCommandNs, boolean enableZsl) {
-        if (mCameraDevice == null || mCaptureSession == null || mStillSurface == null) {
+        if (mVideoMode || mCameraDevice == null || mCaptureSession == null || mStillSurface == null) {
             Log.e(TAG, "Cannot trigger still capture: session not ready");
             notifyError("Session not ready for still capture");
             return;
@@ -826,6 +810,11 @@ public class CameraUserService extends IAuxCamService.Stub {
         Log.i("TIMING_FREEZE", "capture_request_submitted: " + SystemClock.elapsedRealtimeNanos() + " ns");
         Log.i(TAG, "TIMING t0 (shutter_command): " + mShutterCommandNs + " ns. Dispatching STILL_CAPTURE request (minimalProcessing=true, enableZsl=" + enableZsl + ")...");
         try {
+            // A full-quality still uses the final requested crop, never an in-between animation step.
+            mCameraHandler.removeCallbacks(mZoomStep);
+            mZoomRatio = mRequestedZoom;
+            recomputeCropRegion();
+            refreshRepeatingRequest();
             CaptureRequest.Builder stillBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             stillBuilder.addTarget(mStillSurface);
             stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl && mStillFormat != ImageFormat.JPEG);
@@ -834,7 +823,7 @@ public class CameraUserService extends IAuxCamService.Stub {
                     stillBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
                 }
                 stillBuilder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
-                stillBuilder.set(CaptureRequest.JPEG_ORIENTATION, 90);
+                stillBuilder.set(CaptureRequest.JPEG_ORIENTATION, mSensorOrientation);
             }
             stillBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
             if (mManualFocusActive) {
@@ -850,7 +839,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             } else {
                 stillBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
             }
-            applyCropAndExposure(stillBuilder, mStillFormat == ImageFormat.JPEG);
+            applyCropAndExposure(stillBuilder, mHighResolutionStill);
             applyStillFlash(stillBuilder);
             applyMinimalProcessing(stillBuilder);
 
@@ -896,15 +885,6 @@ public class CameraUserService extends IAuxCamService.Stub {
         long nowCadence = SystemClock.elapsedRealtime();
         if (nowCadence - mLastCadenceLogMs >= 1000) {
             mLastCadenceLogMs = nowCadence;
-
-            boolean forceFps30Active = false;
-            try {
-                forceFps30Active = sForceFps30 || new java.io.File("/data/local/tmp/force_fps_30").exists();
-            } catch (Throwable ignored) {}
-            if (forceFps30Active != mLastForceFps30) {
-                mLastForceFps30 = forceFps30Active;
-                refreshRepeatingRequest();
-            }
 
             Long frameDurNs = result.get(CaptureResult.SENSOR_FRAME_DURATION);
             Long expoNs = result.get(CaptureResult.SENSOR_EXPOSURE_TIME);
@@ -1010,8 +990,10 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     private void closeSessionOnCameraThread() {
         mSessionGeneration++;
+        mCameraHandler.removeCallbacks(mZoomStep);
         mCameraHandler.removeCallbacks(mAfResetRunnable);
         mPreviewRequestBuilder = null;
+        mRecordingSurface = null;
         Log.i(TAG, "closeSession() invoked: closing capture session and camera...");
         try {
             if (mCaptureSession != null) {
@@ -1072,12 +1054,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             try { camera.close(); } catch (Throwable ignored) {}
             mService.mCameraDevice = null;
             mService.mCaptureSession = null;
-            if (mService.mStillFormat != ImageFormat.JPEG && !CAMERA_ID.equals(mService.mCurrentCameraId)) {
-                Log.i(TAG, "Fallback from failing camera " + mService.mCurrentCameraId + " to " + CAMERA_ID);
-                mService.restartWithCamera(CAMERA_ID);
-            } else {
-                mService.notifyError("Camera error code: " + error);
-            }
+            mService.notifyError("Camera error code: " + error);
         }
     }
 
@@ -1101,10 +1078,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             if (mGeneration != mService.mSessionGeneration) { session.close(); return; }
             Log.e(TAG, "Session configuration failed on Camera " + mService.mCurrentCameraId);
             mService.notifyError("CameraCaptureSession configuration failed");
-            if (mService.mStillFormat != ImageFormat.JPEG && !CAMERA_ID.equals(mService.mCurrentCameraId)) {
-                Log.i(TAG, "Reverting to primary CAMERA_ID " + CAMERA_ID);
-                mService.restartWithCamera(CAMERA_ID);
-            }
+
         }
     }
 

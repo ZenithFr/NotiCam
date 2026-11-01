@@ -7,12 +7,13 @@ UI = ROOT / 'src/com/zenith/auxcam/ui'
 
 
 class UiContracts(unittest.TestCase):
-    def test_matte_surface_retains_fill_without_decorative_rim(self):
+    def test_glass_surface_retains_body_without_decorative_rim(self):
         surface = (UI / 'effects/ControlSurface.kt').read_text()
-        self.assertIn('background(CameraColors.ControlSurface, shape)', surface)
-        for forbidden in ('Brush.', '.border(', 'drawRoundRect', 'blur('):
+        self.assertIn('background(baseColor, shape)', surface)
+        self.assertIn('Brush.linearGradient', surface)
+        for forbidden in ('.border(', 'drawRoundRect', 'blur('):
             self.assertNotIn(forbidden, surface)
-        self.assertFalse(any('cameraGlass' in p.read_text() for p in UI.rglob('*.kt')))
+        self.assertTrue(any('cameraGlass' in p.read_text() for p in UI.rglob('*.kt')))
 
     def test_rear_lens_cycle_button_removed_not_zoom_selection(self):
         controller = (ROOT / 'src/com/zenith/auxcam/CameraController.kt').read_text()
@@ -44,18 +45,18 @@ class UiContracts(unittest.TestCase):
         shutter = (UI / 'components/ShutterButton.kt').read_text()
         screen = (UI / 'CameraScreen.kt').read_text()
         self.assertIn('busy = state.captureBusy', controls)
-        self.assertIn('enabled = state.canTakePhoto', controls)
+        self.assertIn('enabled = state.canUseShutter', controls)
         self.assertIn('AnimatedVisibility(visible = busy', shutter)
         self.assertIn('GalleryFlight(pulse = state.galleryPulse', screen)
         self.assertIn('thumbnail != null && from != Offset.Zero && to != Offset.Zero', screen)
         self.assertIn('height(48.dp)', screen)
         self.assertIn('text = label ?: lastLabel', screen)
 
-    def test_browser_keeps_matte_controls_and_removes_only_lens_cycle(self):
+    def test_browser_keeps_glass_body_without_edge_stroke(self):
         preview = (ROOT / 'design/index.html').read_text()
         self.assertNotIn('id="switch"', preview)
         self.assertNotIn('$("switch")', preview)
-        self.assertNotIn('backdrop-filter:', preview)
+        self.assertIn('backdrop-filter:', preview)
         self.assertNotIn('inset 0 1px', preview)
         for control in ('portrait', 'resolution', 'shutter', 'zoomRange', 'fstop', 'ev'):
             self.assertIn(f'id="{control}"', preview)
@@ -63,7 +64,7 @@ class UiContracts(unittest.TestCase):
         self.assertIn('--mode-x', preview)
         self.assertIn('prefers-reduced-motion: reduce', preview)
         self.assertIn('if (reducedMotion.matches) return', preview)
-        self.assertIn('mode === "Video" || capturing', preview)
+        self.assertIn('Start video simulation', preview)
         self.assertIn('no photo is captured', preview)
 
 

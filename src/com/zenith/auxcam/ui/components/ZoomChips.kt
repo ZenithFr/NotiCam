@@ -30,8 +30,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zenith.auxcam.DeviceProfile
-import com.zenith.auxcam.ui.effects.matte
-import com.zenith.auxcam.ui.effects.rememberMatteGrain
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
@@ -150,7 +148,6 @@ private fun ZoomChip(
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val grain = rememberMatteGrain()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.88f else 1f,
         animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
@@ -178,11 +175,8 @@ private fun ZoomChip(
                 scaleY = scale
                 clip = false
             }
-            // Flat film, no rim: the chip is a shade of the background plus grain,
-            // not a bordered tile. The travelling white disc still marks selection.
-            .background(CameraColors.Matte, CircleShape)
+            // Shared glass body lives on the containing capsule. No nested rims or grain.
             .clip(CircleShape)
-            .matte(grain, CircleShape, strength = if (selected) 0.3f else 1f)
             .clickable(
                 interactionSource = interaction,
                 indication = null,

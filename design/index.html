@@ -7,7 +7,9 @@
     <style>
       :root {
         color-scheme: dark;
-        --yellow: #ffd60a;
+        --accent: #fff;
+        --focus: #ffd60a;
+        --scene-tone: 183, 122, 73;
         --muted: #a5a5ad;
         font-family:
           Inter,
@@ -24,7 +26,9 @@
       }
       body {
         margin: 0;
-        background: #0d0e11;
+        background:
+          radial-gradient(ellipse at 85% 20%, #35251c55, transparent 65%),
+          #111110;
         color: #fff;
         min-height: 100svh;
         display: grid;
@@ -52,7 +56,7 @@
       }
       button:focus-visible,
       input:focus-visible {
-        outline: 2px solid var(--yellow);
+        outline: 2px solid var(--accent);
         outline-offset: 4px;
       }
       button:active {
@@ -74,7 +78,7 @@
       .intro .eyebrow {
         font-size: 11px;
         letter-spacing: 3px;
-        color: var(--yellow);
+        color: var(--accent);
         font-weight: 600;
       }
       .intro h1 {
@@ -113,7 +117,18 @@
       .phone {
         position: relative;
         width: 368px;
-        background: #000;
+        background:
+          radial-gradient(
+            ellipse at 15% 15%,
+            rgba(var(--scene-tone), 0.28),
+            transparent 70%
+          ),
+          radial-gradient(
+            ellipse at 95% 95%,
+            rgba(var(--scene-tone), 0.2),
+            transparent 70%
+          ),
+          #050504;
         border: 6px solid #26272b;
         outline: 1px solid #46474a;
         border-radius: 49px;
@@ -161,18 +176,27 @@
         border-radius: 1px;
       }
       .toolbar {
-        height: 60px;
+        height: 76px;
+        gap: 4px;
         display: flex;
         align-items: center;
         justify-content: space-between;
         padding: 0 9px;
       }
-      .matte {
-        background: #2a2b2ed9;
+      .glass {
+        background: linear-gradient(
+          135deg,
+          #ffffff20,
+          #ffffff10 45%,
+          #34302d99
+        );
+        backdrop-filter: blur(14px) saturate(1.15);
+        -webkit-backdrop-filter: blur(14px) saturate(1.15);
       }
       .round {
-        width: 42px;
-        height: 42px;
+        width: 44px;
+        height: 44px;
+        flex-shrink: 0;
         display: grid;
         place-items: center;
         border-radius: 50%;
@@ -181,14 +205,27 @@
         font-size: 11px;
         letter-spacing: 0.1px;
         width: 58px;
-        height: 36px;
+        height: 44px;
+        flex-shrink: 0;
         border-radius: 22px;
         font-weight: 650;
       }
-      .toolbar .left {
-        width: 58px;
-        display: flex;
-        justify-content: center;
+      .camera-heading {
+        flex: 1;
+        min-width: 0;
+      }
+      .camera-heading strong {
+        display: block;
+        font-size: 26px;
+        font-weight: 520;
+        letter-spacing: -0.8px;
+      }
+      .camera-heading small {
+        display: block;
+        font-size: 12px;
+        line-height: 20px;
+        color: #ffffffb8;
+        white-space: nowrap;
       }
       .scene {
         position: relative;
@@ -208,6 +245,12 @@
           filter 220ms;
         transform: scale(var(--scene-zoom, 1));
       }
+      .scene .zoom-freeze {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        will-change: transform, opacity;
+      }
       .shade {
         position: absolute;
         inset: 70% 0 0;
@@ -220,7 +263,7 @@
         top: 10px;
       }
       .active {
-        background: var(--yellow) !important;
+        background: var(--accent) !important;
         color: #000 !important;
       }
       .badge {
@@ -233,7 +276,7 @@
         white-space: nowrap;
         padding: 8px 11px;
         border-radius: 20px;
-        color: var(--yellow);
+        color: var(--accent);
         opacity: 0;
         visibility: hidden;
         transition:
@@ -276,7 +319,7 @@
         position: absolute;
         width: 62px;
         height: 62px;
-        border: 1px solid var(--yellow);
+        border: 1px solid var(--focus);
         pointer-events: none;
         display: none;
         transform: translate(-50%, -50%);
@@ -327,10 +370,10 @@
         align-items: center;
         gap: 10px;
         width: 210px;
-        color: var(--yellow);
+        color: var(--accent);
       }
       input[type="range"] {
-        accent-color: var(--yellow);
+        accent-color: var(--accent);
         appearance: none;
         -webkit-appearance: none;
         height: 44px;
@@ -355,16 +398,16 @@
         background: none;
         border-radius: 24px;
         width: 104px;
-        height: 44px;
+        height: 48px;
         position: relative;
         z-index: 1;
-        font-size: 11px;
-        font-weight: 650;
-        letter-spacing: 1px;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: -0.2px;
         color: #a9a9b0;
       }
       .modes .selected {
-        color: var(--yellow);
+        color: #000;
       }
       .capture {
         height: 112px;
@@ -431,7 +474,8 @@
         bottom: 0;
         left: 0;
         right: 0;
-        background: #1a1b1f;
+        background: linear-gradient(140deg, #46403bdd, #1d1b1aef 70%);
+        backdrop-filter: blur(20px);
 
         border-radius: 30px 30px 0 0;
         padding: 12px 24px 30px;
@@ -458,10 +502,10 @@
         margin-bottom: 25px;
       }
       .sheet h2 {
-        font-size: 18px;
+        font-size: 26px;
         letter-spacing: -0.3px;
         margin: 0;
-        font-weight: 600;
+        font-weight: 500;
       }
       .sheet .close {
         width: 28px;
@@ -553,7 +597,7 @@
         opacity: 1;
       }
 
-      /* Flat controls, with one traveling selection rather than flashing fills. */
+      /* Floating glass, with one traveling white selection rather than flashing fills. */
       .zoom::before,
       .modes::before {
         content: "";
@@ -575,9 +619,9 @@
       }
       .modes::before {
         width: 104px;
-        height: 44px;
+        height: 48px;
         border-radius: 24px;
-        background: #ffffff18;
+        background: #fff;
         transform: translateX(var(--mode-x, 104px));
       }
       .lens-spacer {
@@ -622,7 +666,7 @@
         border-radius: 3px;
         background: linear-gradient(
           to right,
-          var(--yellow) var(--fill, 0%),
+          var(--accent) var(--fill, 0%),
           #ffffff30 var(--fill, 0%)
         );
       }
@@ -631,7 +675,7 @@
         border-radius: 3px;
         background: linear-gradient(
           to right,
-          var(--yellow) var(--fill, 0%),
+          var(--accent) var(--fill, 0%),
           #ffffff30 var(--fill, 0%)
         );
       }
@@ -672,8 +716,8 @@
         inset: -9px;
         border-radius: 50%;
         border: 2px solid transparent;
-        border-top-color: var(--yellow);
-        border-right-color: var(--yellow);
+        border-top-color: var(--accent);
+        border-right-color: var(--accent);
         animation: saving 800ms linear infinite;
       }
       @keyframes saving {
@@ -689,6 +733,128 @@
         object-fit: cover;
         pointer-events: none;
         z-index: 7;
+      }
+
+      .shutter.recording::before {
+        transform: scale(0.5);
+        border-radius: 20%;
+      }
+      .viewer {
+        width: min(420px, 96vw);
+        height: min(850px, 96svh);
+        max-height: 96svh;
+        color: white;
+        border: 0;
+        border-radius: 24px;
+        background:
+          radial-gradient(
+            ellipse at 15% 15%,
+            rgba(var(--scene-tone), 0.3),
+            transparent 70%
+          ),
+          radial-gradient(
+            ellipse at 95% 95%,
+            rgba(var(--scene-tone), 0.22),
+            transparent 70%
+          ),
+          #050504;
+        padding: 16px;
+      }
+      .viewer::backdrop {
+        background: #000c;
+        backdrop-filter: blur(10px);
+      }
+      .viewer[open] {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .viewer header,
+      .viewer footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .viewer header .viewer-heading {
+        flex: 1;
+        padding-left: 12px;
+        text-align: left;
+        font-size: 12px;
+        line-height: 1.6;
+        color: #b8b8c0;
+      }
+      .viewer button {
+        display: grid;
+        place-items: center;
+        font-size: 26px;
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+      }
+      #viewerFavorite.is-favorite svg {
+        fill: currentColor;
+      }
+      .viewer-image {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        display: grid;
+        place-items: center;
+      }
+      .viewer img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        transition: transform 300ms;
+      }
+      .viewer img.enlarged {
+        transform: scale(2);
+      }
+      .viewer footer {
+        justify-content: space-evenly;
+        padding: 4px 12px;
+      }
+      .viewer-heading strong {
+        display: block;
+        color: #fff;
+        font-size: 20px;
+        letter-spacing: -0.4px;
+        font-weight: 500;
+      }
+      .viewer-caption {
+        padding: 2px 8px;
+      }
+      .viewer-caption h2 {
+        font-size: 22px;
+        letter-spacing: -0.4px;
+        font-weight: 500;
+        margin: 0 0 4px;
+      }
+      .viewer-caption span {
+        color: #ffffffb8;
+        font-size: 12px;
+      }
+      .viewer-image {
+        border-radius: 22px;
+      }
+      .viewer header .count {
+        font-size: 12px;
+        color: #ffffffb8;
+      }
+      .viewer .filmstrip {
+        display: block;
+        width: 35px;
+        height: 48px;
+        object-fit: cover;
+        margin: auto;
+        border-radius: 4px;
+      }
+      .viewer p {
+        font-size: 10px;
+        line-height: 1.6;
+        text-align: center;
+        color: #85858e;
+        margin: 0;
       }
       @media (max-width: 760px) {
         body {
@@ -720,6 +886,14 @@
           font-size: 9px;
         }
       }
+      @media (max-width: 340px) {
+        .camera-heading strong {
+          font-size: 22px;
+        }
+        .camera-heading small {
+          font-size: 10px;
+        }
+      }
       @media (prefers-reduced-motion: reduce) {
         *,
         *:before,
@@ -732,15 +906,16 @@
   </head>
   <body>
     <aside class="intro">
-      <div class="eyebrow">NOTICAM / CAMERA, RECONSIDERED</div>
-      <h1>Less interface.<br />More moment.</h1>
+      <div class="eyebrow">NOTICAM / BITCHORD-INSPIRED</div>
+      <h1>Every frame.<br />Its own atmosphere.</h1>
       <p>
-        A quieter camera for your CMF Phone 2 Pro. Two modes. Full-resolution
-        photos. A portrait effect, only when you want it.
+        BitChord’s floating glass and artwork-inspired atmosphere, reimagined
+        for your camera. White selections. Quiet controls. The original photo
+        stays untouched.
       </p>
       <div class="features">
-        <span>Photo + Video</span><span>Native 50 MP path</span
-        ><span>Optional bokeh</span>
+        <span>Floating glass</span><span>Photo + Video</span
+        ><span>Original JPEG</span>
       </div>
       <p class="note">
         INTERACTIVE DESIGN PREVIEW<br />Sample photo and simulated capabilities.
@@ -757,29 +932,31 @@
         </div>
       </div>
       <div class="toolbar">
-        <div class="left">
-          <button class="round matte" id="flashMode" aria-label="Cycle flash">
-            <svg viewBox="0 0 24 24">
-              <path d="m14 2-8 12h6l-2 8 8-13h-6z" />
-              <path id="flashSlash" d="M3 3 21 21" />
-            </svg>
-          </button>
+        <div class="camera-heading">
+          <strong>NotiCam</strong><small id="cameraSubtitle">Photo · 4:3</small>
         </div>
         <button
-          class="round matte"
+          class="glass format"
+          id="resolution"
+          aria-label="Switch photo resolution"
+        >
+          12 MP
+        </button>
+        <button class="round glass" id="flashMode" aria-label="Cycle flash">
+          <svg viewBox="0 0 24 24">
+            <path d="m14 2-8 12h6l-2 8 8-13h-6z" />
+            <path id="flashSlash" d="M3 3 21 21" />
+          </svg>
+        </button>
+        <button
+          class="round glass"
           id="controls"
           aria-label="Open camera controls"
         >
           <svg viewBox="0 0 24 24">
             <path d="M5 6h14M5 12h14M5 18h14" />
             <path stroke-width="4" d="M10 5v2M16 11v2M8 17v2" />
-          </svg></button
-        ><button
-          class="matte format"
-          id="resolution"
-          aria-label="Switch photo resolution"
-        >
-          12 MP
+          </svg>
         </button>
       </div>
       <div class="scene" id="scene">
@@ -790,9 +967,9 @@
         />
         <div class="grid" id="grid"></div>
         <div class="shade"></div>
-        <span class="badge matte" id="badge"></span
+        <span class="badge glass" id="badge"></span
         ><button
-          class="round matte portrait"
+          class="round glass portrait"
           id="portrait"
           aria-label="Turn portrait effect on"
           aria-pressed="false"
@@ -805,13 +982,13 @@
           </svg>
         </button>
         <div class="focus" id="focus"></div>
-        <div class="zoom matte" aria-label="Lens selector">
+        <div class="zoom glass" aria-label="Lens selector">
           <button data-zoom="0.6" aria-label="Ultra wide lens">.6</button
           ><button data-zoom="1" class="selected" aria-label="Main lens">
             1×</button
           ><button data-zoom="2" aria-label="Two times zoom">2</button>
         </div>
-        <label class="zoom-adjust matte" id="zoomAdjust">
+        <label class="zoom-adjust glass" id="zoomAdjust">
           <input
             type="range"
             id="zoomRange"
@@ -841,10 +1018,10 @@
         >
       </div>
       <div class="dock">
-        <div class="modes matte" aria-label="Camera mode">
-          <button data-mode="Video" aria-pressed="false">VIDEO</button
+        <div class="modes glass" aria-label="Camera mode">
+          <button data-mode="Video" aria-pressed="false">Video</button
           ><button data-mode="Photo" class="selected" aria-pressed="true">
-            PHOTO
+            Photo
           </button>
         </div>
       </div>
@@ -879,7 +1056,8 @@
         </header>
         <p class="description">
           50 MP uses the main camera at 1×. The portrait effect switches to the
-          12 MP bokeh engine. Video recording is planned for a later update.
+          12 MP bokeh engine. The Android app records H.264/AAC video; this
+          browser shows only its controls.
         </p>
         <h3>CAPTURE</h3>
         <div class="switches">
@@ -899,6 +1077,13 @@
           id="ev"
           aria-label="Exposure compensation"
         />
+        <h3>VIEWFINDER / NATIVE APP TARGET</h3>
+        <p class="description">
+          1080-line full-field preview, up to 60 fps where the lens and session
+          support it. The Android app reports requested and rendered FPS and
+          preserves native still resolution. Browser handoffs demonstrate the
+          motion only; no camera FPS is measured here.
+        </p>
         <h3>ABOUT THIS PREVIEW</h3>
         <p class="description">
           All capture actions here are simulations. Real 50 MP availability is
@@ -908,6 +1093,68 @@
       </section>
       <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </main>
+    <dialog
+      id="viewer"
+      class="viewer"
+      aria-label="Built-in image viewer preview"
+    >
+      <header>
+        <button class="glass" id="viewerClose" aria-label="Back to camera">
+          ‹
+        </button>
+        <div class="viewer-heading">
+          <strong>Your captures</strong
+          ><span>Sample · Not a camera capture</span>
+        </div>
+        <span class="count">1 / 1</span>
+      </header>
+      <div class="viewer-image">
+        <img
+          id="viewerPhoto"
+          src="sample_portrait.jpg"
+          alt="Full sample photo, fit without cropping"
+        />
+      </div>
+      <div class="viewer-caption">
+        <h2>A moment, kept.</h2>
+        <span>Sample portrait · Original framing</span>
+      </div>
+      <img class="filmstrip" src="sample_portrait.jpg" alt="Sample thumbnail" />
+      <footer>
+        <button
+          class="glass"
+          id="viewerShare"
+          aria-label="Share sample preview"
+        >
+          <svg viewBox="0 0 24 24">
+            <path d="M8 10H4v11h16V10h-4M12 15V2m-4 4 4-4 4 4" />
+          </svg></button
+        ><button
+          class="glass"
+          id="viewerFavorite"
+          aria-label="Favorite sample"
+          aria-pressed="false"
+        >
+          <svg viewBox="0 0 24 24">
+            <path
+              d="M12 21C9 18 2 13 2 8C2 2 9 1 12 7C15 1 22 2 22 8C22 13 15 18 12 21Z"
+            />
+          </svg></button
+        ><button
+          class="glass"
+          id="viewerDelete"
+          aria-label="Delete sample preview"
+        >
+          <svg viewBox="0 0 24 24">
+            <path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7m4-7v7" />
+          </svg>
+        </button>
+      </footer>
+      <p id="viewerNote">
+        Design preview · Double-click to zoom. Real photo/video paging, sharing
+        and confirmed deletion are in the Android app.
+      </p>
+    </dialog>
     <script>
       const $ = (id) => document.getElementById(id);
       let mode = "Photo",
@@ -920,8 +1167,45 @@
         toastTimeout,
         focusTimeout,
         zoomTimeout,
-        capturing = false;
+        capturing = false,
+        recording = false,
+        videoStarted = 0,
+        videoInterval;
       const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+      function sampleAtmosphere() {
+        const image = $("photo");
+        if (!image.naturalWidth) return;
+        try {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 12;
+          const ctx = canvas.getContext("2d", { willReadFrequently: true });
+          ctx.drawImage(image, 0, 0, 12, 12);
+          const pixels = ctx.getImageData(0, 0, 12, 12).data;
+          let red = 0,
+            green = 0,
+            blue = 0,
+            total = 0;
+          for (let i = 0; i < pixels.length; i += 4) {
+            const [r, g, b, a] = pixels.slice(i, i + 4);
+            const light = (r + g + b) / (3 * 255);
+            if (a < 128 || light < 0.06 || light > 0.94) continue;
+            const weight = 0.08 + (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
+            red += r * weight;
+            green += g * weight;
+            blue += b * weight;
+            total += weight;
+          }
+          if (total)
+            document.documentElement.style.setProperty(
+              "--scene-tone",
+              [red, green, blue].map((c) => Math.round(c / total)).join(", "),
+            );
+        } catch {
+          /* Keep the warm fallback if browser pixel reads are unavailable. */
+        }
+      }
+      $("photo").addEventListener("load", sampleAtmosphere);
+      if ($("photo").complete) sampleAtmosphere();
       function fillRange(input) {
         input.style.setProperty(
           "--fill",
@@ -937,6 +1221,19 @@
           2200,
         );
       }
+      function videoTime() {
+        const seconds = Math.floor((Date.now() - videoStarted) / 1000);
+        return `${Math.floor(seconds / 60)
+          .toString()
+          .padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
+      }
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden && recording) {
+          recording = false;
+          clearInterval(videoInterval);
+          render();
+        }
+      });
       function toast(message) {
         $("toast").textContent = message;
         $("toast").classList.add("show");
@@ -947,17 +1244,19 @@
         );
       }
       function render() {
+        $("cameraSubtitle").textContent =
+          mode === "Photo" ? "Photo · 4:3" : "Video · 16:9";
         document.querySelectorAll("[data-mode]").forEach((b) => {
           let active = b.dataset.mode === mode;
           b.classList.toggle("selected", active);
           b.setAttribute("aria-pressed", active);
-          b.disabled = capturing;
+          b.disabled = capturing || recording;
         });
         document
           .querySelector(".modes")
           .style.setProperty("--mode-x", mode === "Photo" ? "104px" : "0px");
         $("portrait").hidden = mode === "Video";
-        $("portrait").disabled = capturing;
+        $("portrait").disabled = capturing || recording;
         $("portrait").classList.toggle("active", bokeh);
         $("portrait").setAttribute("aria-pressed", bokeh);
         $("portrait").setAttribute(
@@ -965,10 +1264,11 @@
           `Turn portrait effect ${bokeh ? "off" : "on"}`,
         );
         $("resolution").textContent =
-          mode === "Video" ? "SOON" : high ? "50 MP" : "12 MP";
+          mode === "Video" ? "1080p" : high ? "50 MP" : "12 MP";
         $("resolution").disabled = mode === "Video" || capturing;
-        $("resolution").style.color = high ? "var(--yellow)" : "";
-        $("shutter").disabled = mode === "Video" || capturing;
+        $("resolution").style.color = high ? "var(--accent)" : "";
+        $("shutter").disabled = capturing;
+        $("shutter").classList.toggle("recording", recording);
         $("shutter").classList.toggle("capturing", capturing);
         $("shutter").setAttribute("aria-busy", capturing);
         $("shutter").classList.toggle("video", mode === "Video");
@@ -977,18 +1277,23 @@
           capturing
             ? "Simulating capture — no photo is saved"
             : mode === "Video"
-              ? "Video recording is not available yet"
+              ? recording
+                ? "Stop video simulation"
+                : "Start video simulation"
               : "Preview shutter animation",
         );
         $("status").textContent = capturing
           ? "Previewing capture animation…"
           : mode === "Video"
-            ? "Video recording is coming later"
+            ? recording
+              ? `● ${videoTime()} · Preview simulation`
+              : "1080p · 30 fps · Video simulation"
             : `${high ? "50MP" : "12MP"} · 4:3 · JPEG`;
         $("status").style.display = bokeh && !capturing ? "none" : "";
         $("aperture").style.display = bokeh && !capturing ? "flex" : "none";
-        $("badge").classList.toggle("visible", bokeh || high);
-        if (bokeh || high)
+        $("badge").classList.toggle("visible", bokeh || high || recording);
+        if (recording) $("badge").textContent = `● ${videoTime()}`;
+        else if (bokeh || high)
           $("badge").textContent = bokeh
             ? `PORTRAIT  ƒ ${Number($("fstop").value).toFixed(1)}`
             : "50 MP · 1×";
@@ -1016,14 +1321,14 @@
           const selected = Math.abs(Math.log(zoom / +b.dataset.zoom)) < 0.08;
           b.classList.toggle("selected", selected);
           b.setAttribute("aria-pressed", selected);
-          b.disabled = capturing;
+          b.disabled = capturing || recording;
         });
         $("zoomRange").value = zoom;
         $("zoomValue").value = `${zoom.toFixed(1)}×`;
         $("photo").style.setProperty("--scene-zoom", Math.max(1, zoom));
         document.querySelectorAll('input[type="range"]').forEach((input) => {
           fillRange(input);
-          input.disabled = capturing;
+          input.disabled = capturing || recording;
         });
         $("grid").style.opacity = grid ? 1 : 0;
         $("gridToggle").classList.toggle("active", grid);
@@ -1034,6 +1339,7 @@
           (b.onclick = () => {
             mode = b.dataset.mode;
             bokeh = false;
+            if (mode === "Video") high = false;
             render();
           }),
       );
@@ -1054,7 +1360,46 @@
         }
         render();
       };
+      let zoomHandoff;
+      const lensForZoom = (value) =>
+        value < 1 ? "wide" : value >= 2 ? "tele" : "main";
+      function previewZoomHandoff(from, to) {
+        if (reducedMotion.matches || lensForZoom(from) === lensForZoom(to))
+          return;
+        // Visual demonstration only: Android freezes its actual outgoing SurfaceView.
+        const image = $("photo");
+        if (!image.complete || !image.naturalWidth) return;
+        const prior = document.querySelector(".zoom-freeze") || image;
+        const pose = getComputedStyle(prior).transform;
+        if (zoomHandoff) zoomHandoff.cancel();
+        const freeze = image.cloneNode(false);
+        freeze.removeAttribute("id");
+        freeze.alt = "";
+        freeze.setAttribute("aria-hidden", "true");
+        freeze.className = "zoom-freeze";
+        image.after(freeze);
+        const target = `scale(${Math.max(1, to)})`;
+        const animation = freeze.animate(
+          [
+            { transform: pose, opacity: 1 },
+            { transform: target, opacity: 1, offset: 0.45 },
+            { transform: target, opacity: 0 },
+          ],
+          {
+            duration: 620,
+            easing: "cubic-bezier(.2,.8,.2,1)",
+            fill: "forwards",
+          },
+        );
+        zoomHandoff = animation;
+        const clean = () => {
+          freeze.remove();
+          if (zoomHandoff === animation) zoomHandoff = null;
+        };
+        animation.finished.then(clean, clean);
+      }
       function setZoom(value) {
+        previewZoomHandoff(zoom, value);
         zoom = value;
         if (high && zoom !== 1) {
           high = false;
@@ -1116,7 +1461,7 @@
       $("flashMode").onclick = () => {
         flash = (flash + 1) % 3;
         $("flashSlash").style.display = flash === 0 ? "" : "none";
-        $("flashMode").style.color = flash ? "var(--yellow)" : "";
+        $("flashMode").classList.toggle("active", flash !== 0);
         toast(["Flash off", "Auto flash", "Flash on"][flash]);
       };
       function sheet(open) {
@@ -1164,7 +1509,20 @@
         );
       }
       $("shutter").onclick = () => {
-        if (mode !== "Photo" || capturing) return;
+        if (capturing) return;
+        if (mode === "Video") {
+          recording = !recording;
+          if (recording) {
+            videoStarted = Date.now();
+            videoInterval = setInterval(render, 500);
+            toast("Video simulation — the browser is not recording");
+          } else {
+            clearInterval(videoInterval);
+            toast("Video simulation ended — no file was recorded");
+          }
+          render();
+          return;
+        }
         capturing = true;
         render();
         $("flash").classList.remove("fire");
@@ -1177,8 +1535,24 @@
           flyToGallery();
         }, 800);
       };
-      $("gallery").onclick = () =>
-        toast("Sample image preview — device gallery is not connected");
+      $("gallery").onclick = () => {
+        if (!recording && !capturing) $("viewer").showModal();
+      };
+      $("viewerClose").onclick = () => $("viewer").close();
+      $("viewerFavorite").onclick = () => {
+        const selected =
+          $("viewerFavorite").getAttribute("aria-pressed") !== "true";
+        $("viewerFavorite").setAttribute("aria-pressed", selected);
+        $("viewerFavorite").classList.toggle("is-favorite", selected);
+      };
+      $("viewerPhoto").ondblclick = () =>
+        $("viewerPhoto").classList.toggle("enlarged");
+      $("viewerShare").onclick = () =>
+        ($("viewerNote").textContent =
+          "Sharing original captures is available in the Android app.");
+      $("viewerDelete").onclick = () =>
+        ($("viewerNote").textContent =
+          "Demo sample only — nothing was deleted. Android asks before deleting your capture.");
       $("scene").onclick = (e) => {
         if (e.target.closest("button,input,label")) return;
         let rect = $("scene").getBoundingClientRect();

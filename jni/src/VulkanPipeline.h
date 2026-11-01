@@ -64,6 +64,7 @@ public:
     void updateSurface(ANativeWindow* newWindow, uint32_t width, uint32_t height);
 
 private:
+    bool presentSharpPreview(VkImage importedImg, VkDeviceMemory importedMem, VkImageView importedView, uint32_t imageIndex);
     bool createInstance();
     bool selectPhysicalDevice();
     bool createLogicalDevice();

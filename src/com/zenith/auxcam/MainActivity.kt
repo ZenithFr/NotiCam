@@ -109,6 +109,12 @@ class MainActivity : ComponentActivity(), NativeBridge {
         }
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 201) controller.onMicrophonePermissionResult(
+            grantResults.firstOrNull() == android.content.pm.PackageManager.PERMISSION_GRANTED)
+    }
+
     override fun onStart() {
         super.onStart()
         controller.start()

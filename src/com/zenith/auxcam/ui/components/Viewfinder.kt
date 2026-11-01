@@ -2,6 +2,8 @@ package com.zenith.auxcam.ui.components
 
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.Surface
+import android.os.Build
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
@@ -131,10 +133,14 @@ fun Viewfinder(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
                 SurfaceView(context).apply {
+                    // 1080-line full-field buffer regardless of the chrome's dp footprint.
+                    holder.setFixedSize(DeviceProfile.COLOR_HEIGHT, DeviceProfile.COLOR_WIDTH)
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(holder: SurfaceHolder) = onSurfaceCreated(holder)
-                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) =
+                        override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                            if (Build.VERSION.SDK_INT >= 30) holder.surface.setFrameRate(60f, Surface.FRAME_RATE_COMPATIBILITY_DEFAULT)
                             onSurfaceChanged(holder)
+                        }
 
                         override fun surfaceDestroyed(holder: SurfaceHolder) = onSurfaceDestroyed(holder)
                     })

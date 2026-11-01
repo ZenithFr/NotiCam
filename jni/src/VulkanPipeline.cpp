@@ -897,6 +897,13 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         return false;
     }
 
+    // Sharp preview is one color composite + present. Do not upload/compute a
+    // depth, alpha, CoC or gather result that the bypass shader never samples.
+    // The full-resolution processStill() path is separate and unchanged.
+    if (targetFarFieldPx == 0.0f) {
+        return presentSharpPreview(importedImg, importedMem, importedView, imageIndex);
+    }
+
     // 3. Populate staging buffer with depth and alpha
     auto tStage0 = std::chrono::high_resolution_clock::now();
     const size_t alphaLowSize = 256 * 256;
@@ -2378,6 +2385,104 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     // 8. Release imported image
     mYuvConverter->releaseImportedImage(importedImg, importedMem, importedView);
     return true;
+}
+
+/** Low-latency viewfinder only. Keep the GPU completion wait: imported AHB/image
+ * lifetime must outlast GPU reads. Removing that wait needs per-flight ownership,
+ * not freeing a camera image while it is still being sampled.
+ */
+bool VulkanPipeline::presentSharpPreview(VkImage importedImg, VkDeviceMemory importedMem, VkImageView importedView, uint32_t imageIndex) {
+    VkDescriptorImageInfo images[4] = {
+        { VK_NULL_HANDLE, importedView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        { VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL },
+        { VK_NULL_HANDLE, mViewAlpha, VK_IMAGE_LAYOUT_GENERAL },
+        { VK_NULL_HANDLE, mViewPreviewOut, VK_IMAGE_LAYOUT_GENERAL },
+    };
+    VkWriteDescriptorSet writes[4]{};
+    for (uint32_t i = 0; i < 4; ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = mSetCompPreview;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = i == 3 ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &images[i];
+    }
+    vkUpdateDescriptorSets(mDevice, 4, writes, 0, nullptr);
+    VkCommandBuffer cmd = mPreviewCmds[mCurrentFrame];
+    vkResetCommandBuffer(cmd, 0);
+    VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    vkBeginCommandBuffer(cmd, &begin);
+    auto transition = [&](VkImage image, VkImageLayout oldLayout, VkImageLayout newLayout,
+                          VkAccessFlags src, VkAccessFlags dst, VkPipelineStageFlags from, VkPipelineStageFlags to) {
+        VkImageMemoryBarrier barrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+        barrier.oldLayout = oldLayout; barrier.newLayout = newLayout;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = image;
+        barrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        barrier.srcAccessMask = src; barrier.dstAccessMask = dst;
+        vkCmdPipelineBarrier(cmd, from, to, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    };
+    uint32_t qBase = mCurrentFrame * 6;
+    if (mPreviewQueryPool != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(cmd, mPreviewQueryPool, qBase, 6);
+        for (uint32_t i = 0; i < 4; ++i)
+            vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, mPreviewQueryPool, qBase + i);
+    }
+    transition(importedImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    // Valid layouts for all statically referenced descriptors, including the bypassed samplers.
+    for (VkImage image : { mImgBlurred, mImgAlpha, mImgPreviewOut })
+        transition(image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    CompositePushConstants pc{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90 | 2, 0 };
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetCompPreview, 0, nullptr);
+    vkCmdPushConstants(cmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+    vkCmdDispatch(cmd, (mSwapchainExtent.width + 15) / 16, (mSwapchainExtent.height + 15) / 16, 1);
+    if (mPreviewQueryPool != VK_NULL_HANDLE)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 4);
+    transition(mImgPreviewOut, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    transition(mSwapchainImages[imageIndex], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkImageCopy copy{};
+    copy.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copy.extent = { mSwapchainExtent.width, mSwapchainExtent.height, 1 };
+    vkCmdCopyImage(cmd, mImgPreviewOut, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        mSwapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    transition(mSwapchainImages[imageIndex], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+        VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+    if (mPreviewQueryPool != VK_NULL_HANDLE)
+        vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, mPreviewQueryPool, qBase + 5);
+    vkEndCommandBuffer(cmd);
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo submit{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    submit.waitSemaphoreCount = 1; submit.pWaitSemaphores = &mImageAvailableSemaphores[mCurrentFrame];
+    submit.pWaitDstStageMask = &waitStage;
+    submit.commandBufferCount = 1; submit.pCommandBuffers = &cmd;
+    submit.signalSemaphoreCount = 1; submit.pSignalSemaphores = &mRenderFinishedSemaphores[mCurrentFrame];
+    VkPresentInfoKHR present{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+    present.waitSemaphoreCount = 1; present.pWaitSemaphores = &mRenderFinishedSemaphores[mCurrentFrame];
+    present.swapchainCount = 1; present.pSwapchains = &mSwapchain; present.pImageIndices = &imageIndex;
+    VkResult result;
+    {
+        std::lock_guard<std::mutex> lock(mQueueMutex);
+        result = vkQueueSubmit(mComputeQueue, 1, &submit, mRenderFences[mCurrentFrame]);
+        mFrameSubmitted[mCurrentFrame] = result == VK_SUCCESS;
+        if (result == VK_SUCCESS) {
+            result = vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX);
+            if (result == VK_SUCCESS) result = vkQueuePresentKHR(mComputeQueue, &present);
+        }
+    }
+    // GPU reads are finished before releasing the imported view or returning the camera buffer.
+    mYuvConverter->releaseImportedImage(importedImg, importedMem, importedView);
+    mCurrentFrame = (mCurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_SURFACE_LOST_KHR)
+        recreateSwapchain();
+    if (result != VK_SUCCESS) LOGE("Sharp preview submit/present failed: %d", result);
+    return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 }
 
 uint32_t VulkanPipeline::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) {

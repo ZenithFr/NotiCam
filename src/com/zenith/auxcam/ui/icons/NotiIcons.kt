@@ -89,6 +89,38 @@ object NotiIcons {
         }
     }.build()
 
+    val Back: ImageVector = builder("Back").apply {
+        strokePath { moveTo(15f, 4f); lineTo(7f, 12f); lineTo(15f, 20f) }
+    }.build()
+
+    val Share: ImageVector = builder("Share").apply {
+        strokePath {
+            moveTo(8f, 10f); lineTo(4f, 10f); lineTo(4f, 21f); lineTo(20f, 21f); lineTo(20f, 10f); lineTo(16f, 10f)
+            moveTo(12f, 15f); lineTo(12f, 2f)
+            moveTo(8f, 6f); lineTo(12f, 2f); lineTo(16f, 6f)
+        }
+    }.build()
+
+    private fun PathBuilder.heart() {
+        moveTo(12f, 21f)
+        curveTo(9f, 18f, 2f, 13f, 2f, 8f)
+        curveTo(2f, 2f, 9f, 1f, 12f, 7f)
+        curveTo(15f, 1f, 22f, 2f, 22f, 8f)
+        curveTo(22f, 13f, 15f, 18f, 12f, 21f)
+        close()
+    }
+    val Heart: ImageVector = builder("Heart").apply { strokePath { heart() } }.build()
+    val HeartFilled: ImageVector = builder("HeartFilled").apply { fillPath { heart() } }.build()
+    val Trash: ImageVector = builder("Trash").apply {
+        strokePath {
+            moveTo(3f, 6f); lineTo(21f, 6f)
+            moveTo(9f, 6f); lineTo(9f, 3f); lineTo(15f, 3f); lineTo(15f, 6f)
+            moveTo(5f, 6f); lineTo(6f, 21f); lineTo(18f, 21f); lineTo(19f, 6f)
+            moveTo(10f, 10f); lineTo(10f, 17f)
+            moveTo(14f, 10f); lineTo(14f, 17f)
+        }
+    }.build()
+
     /** Filled bolt: flash on. */
     val FlashOn: ImageVector = builder("FlashOn").apply {
         fillPath { bolt() }
