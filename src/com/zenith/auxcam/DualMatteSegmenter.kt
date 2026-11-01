@@ -147,6 +147,7 @@ class DualMatteSegmenter(private val context: Context) {
     private var hasPrevHistogram = false
 
     private val isInitialized = AtomicBoolean(false)
+    val isAvailable: Boolean get() = isInitialized.get()
 
     fun initialize(): Boolean {
         if (isInitialized.get()) return true
@@ -478,10 +479,13 @@ class DualMatteSegmenter(private val context: Context) {
         }
     }
 
+    private var mFastPathTriggered = false
+
     /**
-     * Submits a camera YUV frame for 12 Hz async inference with fast-path scene detection.
+     * Fast CPU preprocess: resizes camera YUV planes directly into inBufL (and inBufG if DUAL).
+     * Takes ~0.6ms. Call on ImageReader callback thread before image is closed.
      */
-    fun processFrame(image: Image): Boolean {
+    fun preprocessFrame(image: Image): Boolean {
         if (!isInitialized.get()) return false
 
         val isDual = (currentMode == TierMode.DUAL)
@@ -507,14 +511,9 @@ class DualMatteSegmenter(private val context: Context) {
 
         // 1. Calculate 16-bin luma histogram total variation for fast-path trigger
         val histDelta = computeLumaHistDelta(yBuffer, width, height, yRowStride)
-        val fastPathTriggered = (hasPrevHistogram && histDelta > FAST_PATH_HIST_DELTA)
+        mFastPathTriggered = (hasPrevHistogram && histDelta > FAST_PATH_HIST_DELTA)
 
-        if (!fastPathTriggered && (nowMs - lastDispatchTimeMs < MIN_INTERVAL_MS)) {
-            // Cadence gate: reuse latest smoothed alpha on intermediate frames
-            return false
-        }
-
-        if (fastPathTriggered) {
+        if (mFastPathTriggered) {
             Log.i(
                 TAG,
                 "FAST-PATH FIRED: luma hist delta=%.4f > %.2f (resetting EMA to prevent smear)".format(
@@ -527,6 +526,20 @@ class DualMatteSegmenter(private val context: Context) {
 
         // 2. Preprocessing: Stretch resize camera frame directly to model shapes
         preprocessStretchYuv(image, 256, 144, inDtypeL, inScaleL, inZeroL, inBufL)
+        if (isDual) {
+            preprocessStretchYuv(image, 256, 256, inDtypeG, inScaleG, inZeroG, inBufG)
+        }
+        return true
+    }
+
+    /**
+     * Executes neural network inference (Landscape + General) and EMA temporal smoothing.
+     * Runs asynchronously on dedicated MatteWorkerThread (~15ms).
+     */
+    fun runInference(): Boolean {
+        if (!isInitialized.get()) return false
+        val isDual = (currentMode == TierMode.DUAL)
+        if (interpLandscape == null || (isDual && interpGeneral == null)) return false
 
         // 3. Inference on Landscape
         val t0L = SystemClock.elapsedRealtimeNanos()
@@ -590,8 +603,6 @@ class DualMatteSegmenter(private val context: Context) {
         var dtGMs = 0.0
 
         if (isDual) {
-            preprocessStretchYuv(image, 256, 256, inDtypeG, inScaleG, inZeroG, inBufG)
-
             val t0G = SystemClock.elapsedRealtimeNanos()
             var runOkG = false
             var invokeFailedG = false
@@ -686,7 +697,7 @@ class DualMatteSegmenter(private val context: Context) {
         val meanA = (sumA / (256.0 * 256.0)).toFloat()
 
         // 5. EMA Temporal Smoothing (alpha = 0.25)
-        if (!emaInitialized || fastPathTriggered) {
+        if (!emaInitialized || mFastPathTriggered) {
             System.arraycopy(probCombined, 0, emaMatte, 0, 256 * 256)
             emaInitialized = true
         } else {
@@ -722,6 +733,14 @@ class DualMatteSegmenter(private val context: Context) {
             )
         )
         return true
+    }
+
+    /**
+     * Submits a camera YUV frame for synchronous inference (still capture / fallback).
+     */
+    fun processFrame(image: Image): Boolean {
+        if (!preprocessFrame(image)) return false
+        return runInference()
     }
 
     /**

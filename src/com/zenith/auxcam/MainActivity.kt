@@ -162,6 +162,38 @@ class MainActivity : ComponentActivity(), NativeBridge {
         }
     }
 
+    override fun acquireHardwareBuffer(buffer: HardwareBuffer) {
+        try {
+            nativeAcquireHardwareBuffer(buffer)
+        } catch (t: Throwable) {
+            Log.w(TAG, "acquireHardwareBuffer error: ${t.message}")
+        }
+    }
+
+    override fun releaseHardwareBuffer(buffer: HardwareBuffer) {
+        try {
+            nativeReleaseHardwareBuffer(buffer)
+        } catch (t: Throwable) {
+            Log.w(TAG, "releaseHardwareBuffer error: ${t.message}")
+        }
+    }
+
+    override fun notifyMatteDrop() {
+        try {
+            nativeNotifyMatteDrop()
+        } catch (t: Throwable) {
+            Log.w(TAG, "notifyMatteDrop error: ${t.message}")
+        }
+    }
+
+    override fun getAhbRefcount(): Int {
+        return try {
+            nativeGetAhbRefcount()
+        } catch (t: Throwable) {
+            0
+        }
+    }
+
     private external fun nativeInitEngine(surface: Surface, width: Int, height: Int): Boolean
 
     private external fun nativeRenderFrame(
@@ -195,6 +227,11 @@ class MainActivity : ComponentActivity(), NativeBridge {
         outPath: String,
         timestampsOut: LongArray,
     ): Boolean
+
+    private external fun nativeAcquireHardwareBuffer(buffer: HardwareBuffer)
+    private external fun nativeReleaseHardwareBuffer(buffer: HardwareBuffer)
+    private external fun nativeNotifyMatteDrop()
+    private external fun nativeGetAhbRefcount(): Int
 
     private fun extractAssetsIfNeeded() {
         try {

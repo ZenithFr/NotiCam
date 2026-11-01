@@ -23,6 +23,10 @@ public:
 
     void setDisableGuided(bool disable);
     bool getDisableGuided();
+    void notifyMatteDrop();
+    void incrementAhbRef() { mAhbRefcount++; }
+    void decrementAhbRef() { mAhbRefcount--; }
+    int32_t getAhbRefcount() const { return mAhbRefcount.load(); }
 
     // Renders one full frame: Camera YUV AHB + DPE Disparity Y8 + Real Alpha Matte -> Native Window
     bool renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, const uint8_t* alphaMatte = nullptr, uint32_t alphaW = 0, uint32_t alphaH = 0, float fStop = 1.88f, float targetFarFieldPx = 15.0f);
@@ -118,6 +122,21 @@ private:
     VkImage mImgAlphaLow{VK_NULL_HANDLE};
     VkDeviceMemory mMemAlphaLow{VK_NULL_HANDLE};
     VkImageView mViewAlphaLow{VK_NULL_HANDLE};
+
+    // Double-buffered matte textures (Design a: worker writes unpublished, alpha reads published)
+    VkImage mImgAlphaA{VK_NULL_HANDLE}, mImgAlphaB{VK_NULL_HANDLE};
+    VkDeviceMemory mMemAlphaA{VK_NULL_HANDLE}, mMemAlphaB{VK_NULL_HANDLE};
+    VkImageView mViewAlphaA{VK_NULL_HANDLE}, mViewAlphaB{VK_NULL_HANDLE};
+    std::atomic<uint32_t> mPublishedAlphaIdx{0};
+    std::atomic<bool> mStagingReady{false};
+    bool mBothAlphaInitialized{false};
+
+    // Dedicated matte worker thread & drop tracking
+    std::thread mMatteWorker;
+    std::atomic<bool> mMatteWorkerRunning{false};
+    std::atomic<uint32_t> mMatteDropCount{0};
+    std::atomic<int32_t> mAhbRefcount{0};
+
     VkDescriptorSetLayout mDslAlpha{VK_NULL_HANDLE};
     VkPipelineLayout mPlAlpha{VK_NULL_HANDLE};
     VkPipeline mPipeAlpha{VK_NULL_HANDLE};
@@ -138,6 +157,7 @@ private:
 
     // Live Viewfinder Swapchain & Presentation Resources:
     bool mSwapchainInitialized{false};
+    bool mFrameSubmitted[2]{false, false};
     std::vector<VkImage> mSwapchainImages;
     VkFormat mSwapchainFormat{VK_FORMAT_UNDEFINED};
     VkExtent2D mSwapchainExtent{0, 0};

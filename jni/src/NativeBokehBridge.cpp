@@ -200,3 +200,35 @@ Java_com_zenith_auxcam_MainActivity_nativeDestroyEngine(JNIEnv* env, jobject thi
         gPipeline.reset();
     }
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeAcquireHardwareBuffer(JNIEnv* env, jobject thiz, jobject hbObj) {
+    if (!hbObj) return;
+    AHardwareBuffer* hb = AHardwareBuffer_fromHardwareBuffer(env, hbObj);
+    if (hb) {
+        AHardwareBuffer_acquire(hb);
+        if (gPipeline) gPipeline->incrementAhbRef();
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeReleaseHardwareBuffer(JNIEnv* env, jobject thiz, jobject hbObj) {
+    if (!hbObj) return;
+    AHardwareBuffer* hb = AHardwareBuffer_fromHardwareBuffer(env, hbObj);
+    if (hb) {
+        AHardwareBuffer_release(hb);
+        if (gPipeline) gPipeline->decrementAhbRef();
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeNotifyMatteDrop(JNIEnv* env, jobject thiz) {
+    if (gPipeline) {
+        gPipeline->notifyMatteDrop();
+    }
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeGetAhbRefcount(JNIEnv* env, jobject thiz) {
+    return gPipeline ? gPipeline->getAhbRefcount() : 0;
+}

@@ -85,6 +85,10 @@ interface NativeBridge {
     fun setThermalThrottled(throttled: Boolean)
     fun setDisableGuided(disable: Boolean) {}
     fun destroyEngine()
+    fun acquireHardwareBuffer(buffer: HardwareBuffer) {}
+    fun releaseHardwareBuffer(buffer: HardwareBuffer) {}
+    fun notifyMatteDrop() {}
+    fun getAhbRefcount(): Int = 0
 }
 
 /** Everything the Compose chrome can ask the camera to do. */
@@ -211,7 +215,15 @@ class CameraController(
     private val stillCaptureInProgress = AtomicBoolean(false)
     private var matteSegmenter: DualMatteSegmenter? = null
     private val latestMatte = ByteArray(256 * 256)
+    @Volatile
     private var hasRealMatte = false
+    private val matteExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "MatteWorkerThread").apply { priority = Thread.NORM_PRIORITY }
+    }
+    private val isMatteWorkerBusy = AtomicBoolean(false)
+    private var lastMatteDispatchMs = 0L
+    private var matteDropCount5s = 0
+    private var lastMatteDropLogMs = 0L
     private var stillThread: HandlerThread? = null
     private var stillHandler: Handler? = null
     private var lastShutterTriggerNs = 0L
@@ -321,6 +333,7 @@ class CameraController(
     fun dispose() {
         main.removeCallbacksAndMessages(null)
         io.shutdown()
+        matteExecutor.shutdown()
 
         captureReceiver?.let {
             try {
@@ -635,15 +648,54 @@ class CameraController(
         var engineSubmitMs = 0.0
 
         try {
-            try {
-                matteSegmenter?.let { seg ->
-                    if (seg.processFrame(image)) {
-                        seg.getLatestAlphaMatte(latestMatte)
-                        hasRealMatte = true
+            val seg = matteSegmenter
+            val nowMs = SystemClock.elapsedRealtime()
+            val cadenceAllow = (nowMs - lastMatteDispatchMs >= 83L) // <= 12 Hz ceiling
+
+            if (seg != null && seg.isAvailable && cadenceAllow) {
+                if (isMatteWorkerBusy.get()) {
+                    matteDropCount5s++
+                    native.notifyMatteDrop()
+                    if (nowMs - lastMatteDropLogMs >= 5000L) {
+                        Log.i(TAG, "MATTE_DROP: drops=$matteDropCount5s in 5s")
+                        matteDropCount5s = 0
+                        lastMatteDropLogMs = nowMs
+                    }
+                } else if (isMatteWorkerBusy.compareAndSet(false, true)) {
+                    lastMatteDispatchMs = nowMs
+                    val hwBuffer = try { image.hardwareBuffer } catch (t: Throwable) { null }
+                    if (hwBuffer != null) {
+                        native.acquireHardwareBuffer(hwBuffer)
+                        try {
+                            if (seg.preprocessFrame(image)) {
+                                matteExecutor.execute {
+                                    try {
+                                        if (seg.runInference()) {
+                                            seg.getLatestAlphaMatte(latestMatte)
+                                            hasRealMatte = true
+                                        }
+                                    } catch (t: Throwable) {
+                                        Log.w(TAG, "Worker inference error: ${t.message}")
+                                    } finally {
+                                        native.releaseHardwareBuffer(hwBuffer)
+                                        hwBuffer.close()
+                                        isMatteWorkerBusy.set(false)
+                                    }
+                                }
+                            } else {
+                                native.releaseHardwareBuffer(hwBuffer)
+                                hwBuffer.close()
+                                isMatteWorkerBusy.set(false)
+                            }
+                        } catch (t: Throwable) {
+                            native.releaseHardwareBuffer(hwBuffer)
+                            hwBuffer.close()
+                            isMatteWorkerBusy.set(false)
+                        }
+                    } else {
+                        isMatteWorkerBusy.set(false)
                     }
                 }
-            } catch (t: Throwable) {
-                Log.w(TAG, "segmenter processFrame caught: ${t.message}")
             }
 
             val triggerL8 = File(activity.getExternalFilesDir("diag"), "trigger_l8")
@@ -661,23 +713,26 @@ class CameraController(
             val tAhb1 = SystemClock.elapsedRealtimeNanos()
             ahbImportMs = (tAhb1 - tAhb0) / 1_000_000.0
 
+            val holder = surfaceHolder
             if (buffer != null) {
                 try {
-                    val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
-                    val tEng0 = SystemClock.elapsedRealtimeNanos()
-                    native.renderFrame(
-                        buffer,
-                        latestDepth,
-                        DeviceProfile.DEPTH_WIDTH,
-                        DeviceProfile.DEPTH_HEIGHT,
-                        if (hasRealMatte) latestMatte else null,
-                        256,
-                        256,
-                        state.fStop,
-                        targetFarFieldPx,
-                    )
-                    val tEng1 = SystemClock.elapsedRealtimeNanos()
-                    engineSubmitMs = (tEng1 - tEng0) / 1_000_000.0
+                    if (holder != null && holder.surface.isValid) {
+                        val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
+                        val tEng0 = SystemClock.elapsedRealtimeNanos()
+                        native.renderFrame(
+                            buffer,
+                            latestDepth,
+                            DeviceProfile.DEPTH_WIDTH,
+                            DeviceProfile.DEPTH_HEIGHT,
+                            if (hasRealMatte) latestMatte else null,
+                            256,
+                            256,
+                            state.fStop,
+                            targetFarFieldPx,
+                        )
+                        val tEng1 = SystemClock.elapsedRealtimeNanos()
+                        engineSubmitMs = (tEng1 - tEng0) / 1_000_000.0
+                    }
                 } catch (t: Throwable) {
                     Log.e(TAG, "renderFrame error: ${t.message}")
                 } finally {

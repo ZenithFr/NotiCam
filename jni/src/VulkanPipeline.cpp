@@ -480,6 +480,8 @@ bool VulkanPipeline::recreateSwapchain() {
         mSwapchain = VK_NULL_HANDLE;
     }
     mSwapchainInitialized = false;
+    mFrameSubmitted[0] = false;
+    mFrameSubmitted[1] = false;
     mCurrentFrame = 0;
 
     if (!createSwapchain(mWindow)) {
@@ -565,6 +567,8 @@ void VulkanPipeline::updateSurface(ANativeWindow* newWindow, uint32_t width, uin
     mWidth = width;
     mHeight = height;
     mSwapchainInitialized = false;
+    mFrameSubmitted[0] = false;
+    mFrameSubmitted[1] = false;
     mCurrentFrame = 0;
 
     if (mWindow) {
@@ -671,6 +675,26 @@ bool VulkanPipeline::initPreviewResources() {
 bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, const uint8_t* alphaMatte, uint32_t alphaW, uint32_t alphaH, float fStop, float targetFarFieldPx) {
     if (!mInitialized || !colorBuffer) return false;
 
+    // AHB Lifetime guard (Constraint 3: acquire on entry, release on every exit path)
+    struct AhbScopeGuard {
+        AHardwareBuffer* buf;
+        VulkanPipeline* pipe;
+        AhbScopeGuard(AHardwareBuffer* b, VulkanPipeline* p) : buf(b), pipe(p) {
+            if (buf) {
+                AHardwareBuffer_acquire(buf);
+                if (pipe) pipe->incrementAhbRef();
+            }
+        }
+        ~AhbScopeGuard() {
+            if (buf) {
+                AHardwareBuffer_release(buf);
+                if (pipe) pipe->decrementAhbRef();
+            }
+        }
+    } ahbGuard(colorBuffer, this);
+
+    auto tSubmitTotal0 = std::chrono::high_resolution_clock::now();
+
     // The SurfaceView can be re-measured at any time (Compose layout pass, inset
     // change, display mode switch). The swapchain extent captured at creation
     // time is what the composite shader squashes the sensor frame into, so a
@@ -707,6 +731,81 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     VkResult fRes = vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, 1000000000ULL);
     if (fRes == VK_SUCCESS) {
         vkResetFences(mDevice, 1, &mRenderFences[mCurrentFrame]);
+
+        static double sLastCoc = 0.0, sLastAlpha = 0.0, sLastGather = 0.0, sLastComp = 0.0, sLastCopy = 0.0, sLastTotalGpu = 0.0;
+        // Safely read GPU timestamps from the frame slot that just completed execution
+        if (mPreviewQueryPool != VK_NULL_HANDLE && mFrameSubmitted[mCurrentFrame]) {
+            uint64_t ts[6]{};
+            VkResult qRes = vkGetQueryPoolResults(mDevice, mPreviewQueryPool, mCurrentFrame * 6, 6, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
+            if (qRes == VK_SUCCESS && ts[5] > ts[0]) {
+                float timestampPeriod = 1.0f;
+                VkPhysicalDeviceProperties props;
+                vkGetPhysicalDeviceProperties(mPhysicalDevice, &props);
+                timestampPeriod = props.limits.timestampPeriod;
+
+                double dCoc = (ts[1] - ts[0]) * timestampPeriod / 1e6;
+                double dAlpha = (ts[2] - ts[1]) * timestampPeriod / 1e6;
+                double dGather = (ts[3] - ts[2]) * timestampPeriod / 1e6;
+                double dComp = (ts[4] - ts[3]) * timestampPeriod / 1e6;
+                double dCopy = (ts[5] - ts[4]) * timestampPeriod / 1e6;
+                double dTotalGpu = (ts[5] - ts[0]) * timestampPeriod / 1e6;
+
+                sLastCoc = dCoc;
+                sLastAlpha = dAlpha;
+                sLastGather = dGather;
+                sLastComp = dComp;
+                sLastCopy = dCopy;
+                sLastTotalGpu = dTotalGpu;
+
+                static std::vector<double> sCocSamples;
+                static std::vector<double> sGuidedSamples;
+                static std::vector<double> sGatherSamples;
+                static std::vector<double> sCompSamples;
+                static std::vector<double> sAlphaSamples;
+                static std::vector<double> sTotalSamples;
+
+                if (dCoc > 0.0) sCocSamples.push_back(dCoc);
+                if (dAlpha > 0.0) sGuidedSamples.push_back(dAlpha);
+                if (dGather > 0.0) sGatherSamples.push_back(dGather);
+                if (dComp > 0.0) sCompSamples.push_back(dComp);
+                if (dAlpha > 0.0) sAlphaSamples.push_back(dAlpha);
+                if (dTotalGpu > 0.0) sTotalSamples.push_back(dTotalGpu);
+
+                if (sCocSamples.size() >= 60) {
+                    auto calcMeanP95 = [](std::vector<double>& v) -> std::pair<double, double> {
+                        double sum = 0.0;
+                        for (double x : v) sum += x;
+                        double mean = sum / v.size();
+                        std::sort(v.begin(), v.end());
+                        double p95 = v[static_cast<size_t>(v.size() * 0.95)];
+                        return {mean, p95};
+                    };
+
+                    auto cocMP = calcMeanP95(sCocSamples);
+                    auto guidedMP = calcMeanP95(sGuidedSamples);
+                    auto gatherMP = calcMeanP95(sGatherSamples);
+                    auto compMP = calcMeanP95(sCompSamples);
+                    auto alphaMP = calcMeanP95(sAlphaSamples);
+                    auto totalMP = calcMeanP95(sTotalSamples);
+
+                    LOGI("GPU_PASS n=%zu coc=%.2f/%.2f guided=%.2f/%.2f gather=%.2f/%.2f composite=%.2f/%.2f alpha=%.2f/%.2f total=%.2f/%.2f",
+                         sCocSamples.size(),
+                         cocMP.first, cocMP.second,
+                         guidedMP.first, guidedMP.second,
+                         gatherMP.first, gatherMP.second,
+                         compMP.first, compMP.second,
+                         alphaMP.first, alphaMP.second,
+                         totalMP.first, totalMP.second);
+
+                    sCocSamples.clear();
+                    sGuidedSamples.clear();
+                    sGatherSamples.clear();
+                    sCompSamples.clear();
+                    sAlphaSamples.clear();
+                    sTotalSamples.clear();
+                }
+            }
+        }
     } else {
         LOGE("vkWaitForFences returned %d on frame %u", fRes, mCurrentFrame);
         return false;
@@ -735,6 +834,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     // 3. Populate staging buffer with depth and alpha
+    auto tStage0 = std::chrono::high_resolution_clock::now();
     const size_t alphaLowSize = 256 * 256;
     const size_t stagingSize = mStillW * mStillH * sizeof(float) + mStillW * mStillH + alphaLowSize;
     void* mappedStaging = nullptr;
@@ -1183,11 +1283,15 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     vkUnmapMemory(mDevice, mUploadStagingMem);
 
     // 4. Update descriptor sets
+    uint32_t currentPubIdx = mPublishedAlphaIdx.load(std::memory_order_acquire);
+    VkImageView curViewAlphaLow = (currentPubIdx == 0) ? mViewAlphaA : mViewAlphaB;
+    if (curViewAlphaLow == VK_NULL_HANDLE) curViewAlphaLow = mViewAlphaLow;
+
     VkDescriptorImageInfo descYuv{ VK_NULL_HANDLE, importedView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo descCoc{ VK_NULL_HANDLE, mViewCoc, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descAlphaSample{ VK_NULL_HANDLE, mViewAlpha, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descAlphaStorage{ VK_NULL_HANDLE, mViewAlpha, VK_IMAGE_LAYOUT_GENERAL };
-    VkDescriptorImageInfo descAlphaLowSample{ VK_NULL_HANDLE, mViewAlphaLow, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+    VkDescriptorImageInfo descAlphaLowSample{ VK_NULL_HANDLE, curViewAlphaLow, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkDescriptorImageInfo descDepthSample{ VK_NULL_HANDLE, mViewDepth, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descBlurredStore{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descBlurredSample{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
@@ -1329,6 +1433,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     vkUpdateDescriptorSets(mDevice, numWrites, writes, 0, nullptr);
 
     // 5. Record command buffer
+    auto tRec0 = std::chrono::high_resolution_clock::now();
+    double barrierMs = 0.0;
     VkCommandBuffer curCmd = mPreviewCmds[mCurrentFrame];
     vkResetCommandBuffer(curCmd, 0);
     VkCommandBufferBeginInfo bInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
@@ -1341,6 +1447,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     auto transition = [&](VkImage img, VkImageLayout oldLayout, VkImageLayout newLayout, VkAccessFlags srcAcc, VkAccessFlags dstAcc, VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+        auto tBar0 = std::chrono::high_resolution_clock::now();
         VkImageMemoryBarrier b{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b.oldLayout = oldLayout;
@@ -1354,12 +1461,17 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         b.srcAccessMask = srcAcc;
         b.dstAccessMask = dstAcc;
         vkCmdPipelineBarrier(curCmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &b);
+        auto tBar1 = std::chrono::high_resolution_clock::now();
+        barrierMs += std::chrono::duration<double, std::milli>(tBar1 - tBar0).count();
     };
+
+    uint32_t uploadIdx = 1 - currentPubIdx;
+    VkImage uploadAlphaImg = (uploadIdx == 0) ? mImgAlphaA : mImgAlphaB;
+    if (uploadAlphaImg == VK_NULL_HANDLE) uploadAlphaImg = mImgAlphaLow;
 
     transition(importedImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     transition(mImgDepth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     transition(mImgAlpha, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgAlphaLow, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     transition(mImgCoc, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     transition(mImgBlurred, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
     transition(mImgPreviewOut, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -1374,10 +1486,27 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     copyAlphaLowRegion.bufferOffset = mStillW * mStillH * sizeof(float) + mStillW * mStillH;
     copyAlphaLowRegion.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
     copyAlphaLowRegion.imageExtent = { 256, 256, 1 };
-    vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgAlphaLow, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaLowRegion);
+
+    if (!mBothAlphaInitialized && mImgAlphaA != VK_NULL_HANDLE && mImgAlphaB != VK_NULL_HANDLE) {
+        // Initialize both double-buffered alpha textures on first frame so neither is in UNDEFINED layout when sampled
+        transition(mImgAlphaA, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgAlphaA, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaLowRegion);
+        transition(mImgAlphaA, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        transition(mImgAlphaB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgAlphaB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaLowRegion);
+        transition(mImgAlphaB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        mBothAlphaInitialized = true;
+    } else {
+        transition(uploadAlphaImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, uploadAlphaImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaLowRegion);
+        transition(uploadAlphaImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
 
     transition(mImgDepth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    transition(mImgAlphaLow, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+    // Publish newly uploaded alpha texture (double-buffer publish index swap)
+    mPublishedAlphaIdx.store(uploadIdx, std::memory_order_release);
 
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
@@ -1747,10 +1876,12 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         case BisectConfig::CONFIG_A:
             curRecordStats = 0u;
             curGateBypass = 0u;
+            shouldRecordStats = false;
             break;
         case BisectConfig::CONFIG_B:
             curRecordStats = 0u;
             curGateBypass = 1u;
+            shouldRecordStats = false;
             break;
         case BisectConfig::CONFIG_C:
             curRecordStats = 1u;
@@ -1762,8 +1893,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             break;
         case BisectConfig::DONE:
         default:
-            curRecordStats = shouldRecordStats ? 1u : 0u;
+            curRecordStats = 0u;
             curGateBypass = 0u;
+            shouldRecordStats = false;
             break;
     }
 
@@ -1779,7 +1911,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         LOGI("CONFIG %c START: thermal=%d matteDelegate=mtk-mdla_shim", cfgChar, thermal);
     }
 
-    if ((curRecordStats != 0u || shouldRecordStats) && mGateStatsMapped != nullptr) {
+    if (curRecordStats != 0u && mGateStatsMapped != nullptr) {
         memset(mGateStatsMapped, 0, sizeof(GateStatsData));
     }
 
@@ -1837,6 +1969,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     vkEndCommandBuffer(curCmd);
+    auto tRec1 = std::chrono::high_resolution_clock::now();
+    double recordMs = std::chrono::duration<double, std::milli>(tRec1 - tRec0).count();
+    double stageMs = std::chrono::duration<double, std::milli>(tRec0 - tStage0).count();
 
     // 6. Submit with Semaphore
     VkPipelineStageFlags waitDstStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
@@ -1855,15 +1990,20 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     auto tSubmit = std::chrono::high_resolution_clock::now();
     uint64_t tSubNs = std::chrono::duration_cast<std::chrono::nanoseconds>(tSubmit.time_since_epoch()).count();
     __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "preview_submitted: %llu ns", (unsigned long long)tSubNs);
+
+    auto tSub0 = std::chrono::high_resolution_clock::now();
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
         vkQueueSubmit(mComputeQueue, 1, &submitInfo, mRenderFences[mCurrentFrame]);
+        mFrameSubmitted[mCurrentFrame] = true;
 
-        // Synchronous wait on fence: guarantees GPU has completely rendered before present
+        // Synchronous wait on fence: guarantees GPU has completely rendered before present (eliminates SurfaceView QUEUE_BUFFER_TIMEOUT)
         vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX);
 
         // Read back gate stats if recorded
-        if (shouldRecordStats && mGateStatsMapped != nullptr) {
+        if (shouldRecordStats && curRecordStats != 0u && mGateStatsMapped != nullptr) {
+
+            // Read back gate stats if recorded
             sLastGateStatsLog = nowGateStats;
             auto* stats = reinterpret_cast<const GateStatsData*>(mGateStatsMapped);
             if (stats->totalCount > 0) {
@@ -1882,16 +2022,67 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                      stats->postHist[5], stats->postHist[6], stats->postHist[7], stats->postHist[8], stats->postHist[9]);
             }
         }
+    }
+    auto tSub1 = std::chrono::high_resolution_clock::now();
+    double submitMs = std::chrono::duration<double, std::milli>(tSub1 - tSub0).count();
 
-        // 7. Present to Android SurfaceView
-        VkPresentInfoKHR presentInfo{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
-        presentInfo.waitSemaphoreCount = 1;
-        presentInfo.pWaitSemaphores = &mRenderFinishedSemaphores[mCurrentFrame];
-        presentInfo.swapchainCount = 1;
-        presentInfo.pSwapchains = &mSwapchain;
-        presentInfo.pImageIndices = &imageIndex;
+    // 7. Present to Android SurfaceView
+    VkPresentInfoKHR presentInfo{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+    presentInfo.waitSemaphoreCount = 1;
+    presentInfo.pWaitSemaphores = &mRenderFinishedSemaphores[mCurrentFrame];
+    presentInfo.swapchainCount = 1;
+    presentInfo.pSwapchains = &mSwapchain;
+    presentInfo.pImageIndices = &imageIndex;
 
+    auto tPres0 = std::chrono::high_resolution_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(mQueueMutex);
         vkQueuePresentKHR(mComputeQueue, &presentInfo);
+    }
+    auto tPres1 = std::chrono::high_resolution_clock::now();
+    double presentMs = std::chrono::duration<double, std::milli>(tPres1 - tPres0).count();
+    double totalHostSubmitMs = std::chrono::duration<double, std::milli>(tPres1 - tSubmitTotal0).count();
+
+    // Rolling 60-frame host-side submit breakdown telemetry
+    static std::vector<double> sRecordSamples;
+    static std::vector<double> sStageSamples;
+    static std::vector<double> sBarrierSamples;
+    static std::vector<double> sSubmitSamples;
+    static std::vector<double> sPresentSamples;
+    static std::vector<double> sTotalHostSamples;
+
+    sRecordSamples.push_back(recordMs);
+    sStageSamples.push_back(stageMs);
+    sBarrierSamples.push_back(barrierMs);
+    sSubmitSamples.push_back(submitMs);
+    sPresentSamples.push_back(presentMs);
+    sTotalHostSamples.push_back(totalHostSubmitMs);
+
+    if (sRecordSamples.size() >= 60) {
+        auto calcStats = [](std::vector<double>& v, double& mean, double& p95) {
+            double sum = 0.0;
+            for (double x : v) sum += x;
+            mean = sum / v.size();
+            std::sort(v.begin(), v.end());
+            p95 = v[static_cast<size_t>(v.size() * 0.95)];
+        };
+        double mRec, pRec, mStg, pStg, mBar, pBar, mSub, pSub, mPres, pPres, mTot, pTot;
+        calcStats(sRecordSamples, mRec, pRec);
+        calcStats(sStageSamples, mStg, pStg);
+        calcStats(sBarrierSamples, mBar, pBar);
+        calcStats(sSubmitSamples, mSub, pSub);
+        calcStats(sPresentSamples, mPres, pPres);
+        calcStats(sTotalHostSamples, mTot, pTot);
+
+        LOGI("SUBMIT_BREAK: record=%.2f/%.2f stage=%.2f/%.2f barrier=%.2f/%.2f submit=%.2f/%.2f present=%.2f/%.2f total=%.2f/%.2f n=60",
+             mRec, pRec, mStg, pStg, mBar, pBar, mSub, pSub, mPres, pPres, mTot, pTot);
+
+        sRecordSamples.clear();
+        sStageSamples.clear();
+        sBarrierSamples.clear();
+        sSubmitSamples.clear();
+        sPresentSamples.clear();
+        sTotalHostSamples.clear();
     }
     auto tPresent = std::chrono::high_resolution_clock::now();
     auto tPresentSteady = std::chrono::steady_clock::now();
@@ -1916,73 +2107,6 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         LOGI("FPS_1HZ: fps=%.2f (frames=%u in %.2fms)", fps1Hz, s1HzFrameCount, elapsed1HzSec * 1000.0);
         s1HzFrameCount = 0;
         sLast1HzTime = tPresentSteady;
-    }
-
-    // Read hardware timestamps
-    float timestampPeriod = 1.0f;
-    VkPhysicalDeviceProperties props;
-    vkGetPhysicalDeviceProperties(mPhysicalDevice, &props);
-    timestampPeriod = props.limits.timestampPeriod;
-
-    uint64_t ts[6]{};
-    double dCoc = 0.0, dAlpha = 0.0, dGather = 0.0, dComp = 0.0, dCopy = 0.0, dTotalGpu = 0.0;
-    if (mPreviewQueryPool != VK_NULL_HANDLE) {
-        vkGetQueryPoolResults(mDevice, mPreviewQueryPool, qBase, 6, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT);
-        dCoc = (ts[1] - ts[0]) * timestampPeriod / 1e6;
-        dAlpha = (ts[2] - ts[1]) * timestampPeriod / 1e6;
-        dGather = (ts[3] - ts[2]) * timestampPeriod / 1e6;
-        dComp = (ts[4] - ts[3]) * timestampPeriod / 1e6;
-        dCopy = (ts[5] - ts[4]) * timestampPeriod / 1e6;
-        dTotalGpu = (ts[5] - ts[0]) * timestampPeriod / 1e6;
-    }
-
-    // Rolling 60-frame GPU pass instrumentation (mean and p95 over 60 frames)
-    static std::vector<double> sCocSamples;
-    static std::vector<double> sGuidedSamples;
-    static std::vector<double> sGatherSamples;
-    static std::vector<double> sCompSamples;
-    static std::vector<double> sAlphaSamples;
-    static std::vector<double> sTotalSamples;
-
-    if (dCoc > 0.0) sCocSamples.push_back(dCoc);
-    if (dAlpha > 0.0) sGuidedSamples.push_back(dAlpha);
-    if (dGather > 0.0) sGatherSamples.push_back(dGather);
-    if (dComp > 0.0) sCompSamples.push_back(dComp);
-    if (dAlpha > 0.0) sAlphaSamples.push_back(dAlpha);
-    if (dTotalGpu > 0.0) sTotalSamples.push_back(dTotalGpu);
-
-    if (sCocSamples.size() >= 60) {
-        auto calcMeanP95 = [](std::vector<double>& v) -> std::pair<double, double> {
-            double sum = 0.0;
-            for (double x : v) sum += x;
-            double mean = sum / v.size();
-            std::sort(v.begin(), v.end());
-            double p95 = v[static_cast<size_t>(v.size() * 0.95)];
-            return {mean, p95};
-        };
-
-        auto cocMP = calcMeanP95(sCocSamples);
-        auto guidedMP = calcMeanP95(sGuidedSamples);
-        auto gatherMP = calcMeanP95(sGatherSamples);
-        auto compMP = calcMeanP95(sCompSamples);
-        auto alphaMP = calcMeanP95(sAlphaSamples);
-        auto totalMP = calcMeanP95(sTotalSamples);
-
-        LOGI("GPU_PASS n=%zu coc=%.2f/%.2f guided=%.2f/%.2f gather=%.2f/%.2f composite=%.2f/%.2f alpha=%.2f/%.2f total=%.2f/%.2f",
-             sCocSamples.size(),
-             cocMP.first, cocMP.second,
-             guidedMP.first, guidedMP.second,
-             gatherMP.first, gatherMP.second,
-             compMP.first, compMP.second,
-             alphaMP.first, alphaMP.second,
-             totalMP.first, totalMP.second);
-
-        sCocSamples.clear();
-        sGuidedSamples.clear();
-        sGatherSamples.clear();
-        sCompSamples.clear();
-        sAlphaSamples.clear();
-        sTotalSamples.clear();
     }
 
     // Config A and B FPS_PROBE evaluation
@@ -2016,15 +2140,11 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     static std::vector<double> sSubmitWindow;
-    static std::vector<double> sGpuWindow;
     sSubmitWindow.push_back(submitToPresentMs);
-    sGpuWindow.push_back(dTotalGpu);
 
     if (sSubmitWindow.size() >= 60) {
         std::vector<double> sortedSubmit = sSubmitWindow;
-        std::vector<double> sortedGpu = sGpuWindow;
         std::sort(sortedSubmit.begin(), sortedSubmit.end());
-        std::sort(sortedGpu.begin(), sortedGpu.end());
 
         size_t n = sortedSubmit.size();
         double p50_submit = sortedSubmit[n * 50 / 100];
@@ -2032,13 +2152,11 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         double p95_submit = sortedSubmit[n * 95 / 100];
         double min_submit = sortedSubmit.front();
         double max_submit = sortedSubmit.back();
-        double p50_gpu = sortedGpu[n * 50 / 100];
         double effFps = 1000.0 / (p50_submit > 0.1 ? p50_submit : 33.3);
 
-        LOGI("PREVIEW TELEMETRY (N=%zu): Submit->Present p50=%.2f ms, p90=%.2f ms, p95=%.2f ms [min=%.2f, max=%.2f] | Effective FPS=%.1f | GPU: CoC=%.2f ms, GuidedFilter=%.2f ms, 32-tap Gather=%.2f ms, Comp=%.2f ms, Copy=%.2f ms | Total GPU p50=%.2f ms",
-             n, p50_submit, p90_submit, p95_submit, min_submit, max_submit, effFps, dCoc, dAlpha, dGather, dComp, dCopy, p50_gpu);
+        LOGI("PREVIEW TELEMETRY (N=%zu): Submit->Present p50=%.2f ms, p90=%.2f ms, p95=%.2f ms [min=%.2f, max=%.2f] | Effective FPS=%.1f",
+             n, p50_submit, p90_submit, p95_submit, min_submit, max_submit, effFps);
         sSubmitWindow.clear();
-        sGpuWindow.clear();
     }
 
     mCurrentFrame = (mCurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
@@ -2139,8 +2257,10 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     createImage(mFullW, mFullH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgOutFull, &mMemOutFull);
     createImage(mStillW, mStillH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgComp527, &mMemComp527);
 
-    // Alpha low-res input image (256x256 from NPU)
+    // Alpha low-res input image (256x256 from NPU) - double-buffered (mViewAlphaA, mViewAlphaB)
     createImage(256, 256, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgAlphaLow, &mMemAlphaLow);
+    createImage(256, 256, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgAlphaA, &mMemAlphaA);
+    createImage(256, 256, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgAlphaB, &mMemAlphaB);
 
     mViewDepth = createView(mImgDepth, VK_FORMAT_R32_SFLOAT);
     mViewCoc = createView(mImgCoc, VK_FORMAT_R16_SFLOAT);
@@ -2148,6 +2268,8 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     mViewBlurred = createView(mImgBlurred, VK_FORMAT_R8G8B8A8_UNORM);
     mViewOutFull = createView(mImgOutFull, VK_FORMAT_R8G8B8A8_UNORM);
     mViewAlphaLow = createView(mImgAlphaLow, VK_FORMAT_R8_UNORM);
+    mViewAlphaA = createView(mImgAlphaA, VK_FORMAT_R8_UNORM);
+    mViewAlphaB = createView(mImgAlphaB, VK_FORMAT_R8_UNORM);
     mViewComp527 = createView(mImgComp527, VK_FORMAT_R8G8B8A8_UNORM);
 
     // Still Bokeh dedicated resources (eliminates preview contention & freeze)
@@ -3117,6 +3239,20 @@ void VulkanPipeline::destroy() {
         if (mImgAlphaLow != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgAlphaLow, nullptr);
         if (mMemAlphaLow != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemAlphaLow, nullptr);
 
+        if (mViewAlphaA != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewAlphaA, nullptr);
+        if (mViewAlphaB != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewAlphaB, nullptr);
+        if (mImgAlphaA != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgAlphaA, nullptr);
+        if (mImgAlphaB != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgAlphaB, nullptr);
+        if (mMemAlphaA != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemAlphaA, nullptr);
+        if (mMemAlphaB != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemAlphaB, nullptr);
+        mViewAlphaA = VK_NULL_HANDLE;
+        mViewAlphaB = VK_NULL_HANDLE;
+        mImgAlphaA = VK_NULL_HANDLE;
+        mImgAlphaB = VK_NULL_HANDLE;
+        mMemAlphaA = VK_NULL_HANDLE;
+        mMemAlphaB = VK_NULL_HANDLE;
+        mBothAlphaInitialized = false;
+
         if (mViewDepthStill != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewDepthStill, nullptr);
         if (mViewCocStill != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewCocStill, nullptr);
         if (mViewAlphaStill != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewAlphaStill, nullptr);
@@ -3207,10 +3343,29 @@ void VulkanPipeline::destroy() {
         vkDestroyInstance(mInstance, nullptr);
         mInstance = VK_NULL_HANDLE;
     }
+    if (mMatteWorkerRunning.load()) {
+        mMatteWorkerRunning.store(false);
+        if (mMatteWorker.joinable()) {
+            mMatteWorker.join();
+        }
+    }
+    LOGI("AHB refcount on shutdown: %d", mAhbRefcount.load());
+
     if (mWindow) {
         ANativeWindow_release(mWindow);
         mWindow = nullptr;
     }
     mInitialized = false;
     LOGI("VulkanPipeline destroyed");
+}
+
+void VulkanPipeline::notifyMatteDrop() {
+    uint32_t drops = ++mMatteDropCount;
+    static auto sLastDropLog = std::chrono::steady_clock::now();
+    auto now = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - sLastDropLog).count() >= 5) {
+        sLastDropLog = now;
+        LOGI("MATTE_DROP: drops=%u in 5s", drops);
+        mMatteDropCount.store(0);
+    }
 }
