@@ -255,30 +255,34 @@ class CameraController(
             update { it.copy(bokehChecksRunning = false, bokehCheckStatus = "No fresh camera frame received. Reopen Photo and retry.") }
         }
     }
-    @Volatile private var latestMatte = ByteArray(256 * 256)
-    @Volatile
-    private var hasRealMatte = false
+    private val publishedMatte = AtomicReference<BokehLivePolicy.Matte?>(null)
+    @Volatile private var liveBokehSuspended = false
+    @Volatile private var liveBokehIntervalMs = BokehLivePolicy.MIN_INTERVAL_MS
+    private var liveBokehWarm = false // Main thread only.
+    private var liveBokehSlowCycles = 0
+    private var lastBokehStatusMs = 0L
     private val matteExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-        Thread(r, "MatteWorkerThread").apply { priority = Thread.NORM_PRIORITY }
+        Thread({
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+            r.run()
+        }, "MatteWorkerThread")
     }
     private val isMatteWorkerBusy = AtomicBoolean(false)
     private var lastMatteDispatchMs = 0L
     private var stillThread: HandlerThread? = null
     private var stillHandler: Handler? = null
-    private var lastShutterTriggerNs = 0L
 
     @Volatile
     private var latestDepth: ByteArray? = null
     private val depthFrames = java.util.ArrayDeque<FrameData.DepthFrame>()
     @Volatile private var frameGeneration = 0
-    @Volatile private var matteTimestampNs = 0L
 
     private fun depthFor(timestamp: Long): ByteArray? = synchronized(depthFrames) {
         if (currentLens == "0") FrameData.closestDepth(depthFrames, timestamp) else null
     }
 
     private fun matteFor(timestamp: Long): ByteArray? =
-        if (hasRealMatte && kotlin.math.abs(timestamp - matteTimestampNs) <= FrameData.MATTE_MAX_AGE_NS) latestMatte else null
+        publishedMatte.get()?.forFrame(timestamp, frameGeneration, bokehModelGeneration)
 
     private var shutterClickNs = 0L
     private var shutterDispatchNs = 0L
@@ -833,7 +837,7 @@ class CameraController(
         main.removeCallbacks(previewFrameTimeout)
         main.postDelayed(previewFrameTimeout, 4000)
         blendFreshFrames = 0
-        val actualLens = cameraId ?: "0"
+        val actualLens = CameraZoom.lensForSession(cameraId)
         if (actualLens != currentLens) {
             currentLens = actualLens
             invalidateAuxiliaryFrames()
@@ -912,6 +916,12 @@ class CameraController(
     }
 
     private fun onSessionError(msg: String?) {
+        if (msg?.startsWith("Still capture failed:") == true && state.mode == CaptureMode.Photo &&
+            state.resolution == Resolution.Standard && state.sessionReady) {
+            finishCapture("Still capture failed — tap to retry")
+            Toast.makeText(activity, msg, Toast.LENGTH_LONG).show()
+            return // A failed request does not mean the repeating session died.
+        }
         main.removeCallbacks(previewFrameTimeout)
         // Never make a 60 fps retry shrink the JPEG or switch to a preview screenshot.
         if (!state.captureBusy && state.previewTargetFps > 30 && preview30Fallbacks.add(previewKey())) {
@@ -1149,6 +1159,37 @@ class CameraController(
         }
     }
 
+    /** Process the RECEIVED still, not a preview matte that may expire while the
+     * HAL exposes the photo. Same selected engine, worker ownership and input
+     * quality; slow comparison models remain useful for photos, not live preview.
+     */
+    private fun portraitMatteForStill(image: android.media.Image, frozen: CameraUiState): ByteArray? {
+        val generation = frameGeneration
+        val pending = try {
+            val input = BokehInput.copy(image)
+            matteExecutor.submit<ByteArray> {
+                try {
+                    bokehProcessor.process(input.rgb(), frozen.bokehModel, generation, bokehThermal, bokehSensorFps).first
+                } finally {
+                    if (!foreground || disposed) bokehProcessor.close()
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Cannot schedule portrait still", e)
+            return null
+        }
+        return try {
+            pending.get(3000, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            // Native inference may not be interruptible. Don't interrupt the owner
+            // or run another engine concurrently; cancel queued work, then save sharp.
+            pending.cancel(false)
+            if (e is InterruptedException) Thread.currentThread().interrupt()
+            Log.w(TAG, "Portrait still unavailable; saving sharp photo", e)
+            null
+        }
+    }
+
     private fun onStillImage(reader: ImageReader) {
         val t2 = SystemClock.elapsedRealtimeNanos()
         Log.i("TIMING_FREEZE", "capture_buffer_received: $t2 ns")
@@ -1168,8 +1209,14 @@ class CameraController(
         var outPath: String? = null
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         var t4 = 0L
+        var portraitApplied = false
         val shutterNs = shutterClickNs
         try {
+            val stillMatte = if (frozen.bokehActive) {
+                post { if (state.captureBusy) update { it.copy(status = "Processing portrait…") } }
+                portraitMatteForStill(image, frozen)
+            } else null
+            portraitApplied = stillMatte != null
             val t3 = SystemClock.elapsedRealtimeNanos()
             val buffer = try {
                 image.hardwareBuffer
@@ -1188,14 +1235,14 @@ class CameraController(
                 // builds; log the intent here so a mismatch is visible.
                 Log.i(TAG, "capture resolution=${state.resolution.label}")
 
-                val targetFarFieldPx = if (frozen.bokehActive) fStopToTargetFarFieldPx(frozen.fStop, currentLens) else 0f
+                val targetFarFieldPx = if (frozen.bokehActive && portraitApplied) fStopToTargetFarFieldPx(frozen.fStop, currentLens) else 0f
                 val timestamps = LongArray(4)
                 val processed = try { native.processStill(
                     buffer,
                     depthFor(image.timestamp),
                     DeviceProfile.DEPTH_WIDTH,
                     DeviceProfile.DEPTH_HEIGHT,
-                    if (frozen.bokehActive) matteFor(image.timestamp) else null,
+                    stillMatte,
                     256,
                     256,
                     frozen.fStop,
@@ -1269,7 +1316,8 @@ class CameraController(
             finishCapture("Capture failed — try again")
         } else {
             io.execute {
-                saveStillToMediaStore(path, stamp, shutterNs, t4, frozenW, frozenH, expectedBytes)
+                saveStillToMediaStore(path, stamp, shutterNs, t4, frozenW, frozenH, expectedBytes,
+                    if (frozen.bokehActive && !portraitApplied) "Saved sharp photo · portrait processing unavailable" else "Saved to Photos")
             }
         }
     }
@@ -1369,6 +1417,7 @@ class CameraController(
         frozenW: Int,
         frozenH: Int,
         expectedBytes: Long,
+        savedMessage: String,
     ) {
         val rgbaFile = File(rgbaPath)
         if (!rgbaFile.exists()) {
@@ -1476,7 +1525,10 @@ class CameraController(
                 try { activity.contentResolver.delete(uri, null, null) }
                 catch (t: Throwable) { Log.e(TAG, "Failed to remove incomplete photo", t) }
             }
-            finishCapture(if (saved) "Saved to Photos" else "Could not save photo — check storage")
+            finishCapture(if (saved) savedMessage else "Could not save photo — check storage")
+            if (saved && savedMessage.contains("sharp photo")) post {
+                Toast.makeText(activity, savedMessage, Toast.LENGTH_LONG).show()
+            }
             if (!DEBUG_DUMP_RGBA) {
                 try {
                     rgbaFile.delete()
@@ -1564,16 +1616,10 @@ class CameraController(
             update { it.copy(status = "Camera not ready") }
             return
         }
-        val nowNs = SystemClock.elapsedRealtimeNanos()
-        if (nowNs - lastShutterTriggerNs < 1_500_000_000L) {
-            Log.w(TAG, "triggerCapture: dropped, 1.5s shutter debounce active (queue depth 1 enforced)")
-            return
-        }
         if (!stillCaptureInProgress.compareAndSet(false, true)) {
             Log.w(TAG, "triggerCapture: dropped, capture already in flight (queue depth 1 enforced)")
             return
         }
-        lastShutterTriggerNs = nowNs
         Log.i(TAG, "triggerCapture: highQuality=$highQuality, enableZsl=$enableZsl, raw=${state.raw}")
         captureState = state
         main.postDelayed(captureTimeout, if (state.resolution == Resolution.High || state.raw) 25_000L else 10_000L)
@@ -1601,10 +1647,11 @@ class CameraController(
                 }
                 val dngUri = checkNotNull(activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
                 latestPendingDngUri = dngUri
-                val pfd = checkNotNull(activity.contentResolver.openFileDescriptor(dngUri, "w"))
-                svc.triggerStill(shutterClickNs, pfd)
+                checkNotNull(activity.contentResolver.openFileDescriptor(dngUri, "w")).use { pfd ->
+                    svc.triggerStill(shutterClickNs, pfd)
+                }
             } else {
-                svc.triggerStillWithZsl(shutterClickNs, false, enableZsl && state.resolution == Resolution.Standard)
+                svc.triggerStillWithZsl(shutterClickNs, false, enableZsl && !state.bokehActive && state.resolution == Resolution.Standard)
             }
             shutterDispatchNs = SystemClock.elapsedRealtimeNanos()
             Log.i("TIMING_FREEZE", "shutter_dispatched: $shutterDispatchNs ns")
@@ -1669,8 +1716,9 @@ class CameraController(
     override fun onBokehModelSelected(model: BokehModel) {
         if (disposed || state.captureBusy || timerRunning || state.bokehChecksRunning || state.videoStarting || state.videoRecording || state.previewTransitioning) return
         selectedBokehModel = model
+        resetLiveBokehPolicy()
         ++bokehModelGeneration
-        hasRealMatte = false
+        publishedMatte.set(null)
         bokehPreferences.edit().putString("model", model.id).apply()
         matteExecutor.execute { bokehProcessor.close() }
         update { it.copy(bokehModel = model, bokehModelReady = false, bokehModelError = null,
@@ -1689,6 +1737,7 @@ class CameraController(
             return
         }
         ++bokehCheckGeneration
+        resetLiveBokehPolicy()
         bokehCheckCancelled = false
         update { it.copy(bokehChecksRunning = true, bokehCheckResults = emptyList(),
             bokehCheckStatus = "Waiting for one fresh camera frame…", bokehModelError = null) }
@@ -1727,6 +1776,14 @@ class CameraController(
         Toast.makeText(activity, "Model report copied", Toast.LENGTH_SHORT).show()
     }
 
+    private fun resetLiveBokehPolicy() {
+        liveBokehSuspended = false
+        liveBokehIntervalMs = BokehLivePolicy.MIN_INTERVAL_MS
+        liveBokehWarm = false
+        liveBokehSlowCycles = 0
+        update { it.copy(bokehLiveSuspended = false) }
+    }
+
     /** Copy only bounded samples on the reader; all model resources belong to the worker. */
     private fun dispatchBokeh(image: android.media.Image) {
         val request = pendingBokehChecks.get()
@@ -1734,8 +1791,8 @@ class CameraController(
         val current = state
         bokehLatestSensorTimestamp = image.timestamp
         val now = SystemClock.elapsedRealtime()
-        val live = current.bokehActive && !current.bokehChecksRunning && current.bokehModelError == null
-        if (checks == null && (!live || now - lastMatteDispatchMs < 83L)) return
+        val live = current.bokehActive && !current.captureBusy && !current.bokehChecksRunning && !liveBokehSuspended && current.bokehModelError == null
+        if (checks == null && (!live || now - lastMatteDispatchMs < liveBokehIntervalMs)) return
         if (!isMatteWorkerBusy.compareAndSet(false, true)) {
             if (live) native.notifyMatteDrop()
             return
@@ -1759,6 +1816,7 @@ class CameraController(
                 try {
                     if (disposed || !foreground || generation != frameGeneration ||
                         (checks == null && modelGeneration != bokehModelGeneration)) return@execute
+                    val cycleStart = SystemClock.elapsedRealtimeNanos()
                     val frame = input.rgb()
                     if (checks != null) {
                         val cancelled = { disposed || !foreground || checkGeneration != bokehCheckGeneration ||
@@ -1775,20 +1833,32 @@ class CameraController(
                             post { if (checkGeneration == bokehCheckGeneration) update { it.copy(bokehCheckStatus = "Checks cancelled/interrupted; completed results retained") } }
                         }
                     } else {
-                        val start = SystemClock.elapsedRealtimeNanos()
                         val (mask, description) = bokehProcessor.process(frame, model, generation, bokehThermal, bokehSensorFps)
-                        val ms = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000.0
+                        val ms = (SystemClock.elapsedRealtimeNanos() - cycleStart) / 1_000_000.0
+                        // Publish atomically off the UI thread. A generation-tagged
+                        // snapshot is rejected even if a close/switch races this store.
+                        if (generation == frameGeneration && modelGeneration == bokehModelGeneration && foreground) {
+                            publishedMatte.set(BokehLivePolicy.Matte(mask, frame.timestampNs, generation, modelGeneration))
+                        }
                         post {
                             if (generation == frameGeneration && modelGeneration == bokehModelGeneration && foreground &&
                                 state.bokehActive && !state.bokehChecksRunning) {
-                                val fresh = kotlin.math.abs(bokehLatestSensorTimestamp - frame.timestampNs) <= FrameData.MATTE_MAX_AGE_NS
-                                latestMatte = mask
-                                matteTimestampNs = frame.timestampNs
-                                hasRealMatte = fresh
-                                update { it.copy(bokehModelReady = fresh, bokehModelError = null,
-                                    status = if (it.status.startsWith("Bokeh model failed")) "Ready" else it.status,
-                                    bokehModelStatus = String.format(Locale.US, "%s · last cycle %.1f ms%s", description, ms,
-                                        if (fresh) "" else " · stale matte; try a lighter model")) }
+                                val fresh = FrameData.isFresh(frame.timestampNs, bokehLatestSensorTimestamp, FrameData.MATTE_MAX_AGE_NS)
+                                liveBokehSlowCycles = BokehLivePolicy.nextSlowCount(liveBokehSlowCycles, liveBokehWarm, ms)
+                                liveBokehWarm = true
+                                liveBokehIntervalMs = BokehLivePolicy.intervalMs(ms)
+                                liveBokehSuspended = liveBokehSlowCycles >= 2
+                                if (liveBokehSuspended) publishedMatte.set(null)
+                                val reportDue = SystemClock.elapsedRealtime() - lastBokehStatusMs >= 1000L
+                                if (reportDue || fresh != state.bokehModelReady || liveBokehSuspended) {
+                                    lastBokehStatusMs = SystemClock.elapsedRealtime()
+                                    update { it.copy(bokehModelReady = fresh && !liveBokehSuspended,
+                                        bokehLiveSuspended = liveBokehSuspended, bokehModelError = null,
+                                        bokehModelStatus = if (liveBokehSuspended)
+                                            "${model.label} too slow for live preview · still applied on capture. Choose MediaPipe for live."
+                                        else String.format(Locale.US, "%s · last cycle %.1f ms%s", description, ms,
+                                            if (fresh) "" else " · waiting for a fresh portrait mask")) }
+                                }
                             }
                         }
                     }
@@ -1796,7 +1866,7 @@ class CameraController(
                     Log.w(TAG, "Selected bokeh engine failed", t)
                     post {
                         if (modelGeneration == bokehModelGeneration && generation == frameGeneration) {
-                            hasRealMatte = false
+                            publishedMatte.set(null)
                             update { it.copy(bokehModelReady = false, bokehModelError = t.message?.take(200) ?: t.javaClass.simpleName,
                                 bokehModelStatus = "Model failed; select again or run checks to retry",
                                 status = "Bokeh model failed — open Settings to retry or change model") }
@@ -1807,7 +1877,7 @@ class CameraController(
                 } finally {
                     isMatteWorkerBusy.set(false)
                     if (checks != null) post { if (checkGeneration == bokehCheckGeneration) {
-                        hasRealMatte = false
+                        publishedMatte.set(null)
                         update { it.copy(bokehChecksRunning = false, bokehModelReady = false) }
                     } }
                 }
@@ -1877,7 +1947,8 @@ class CameraController(
     }
 
     private fun invalidateAuxiliaryFrames() {
-        hasRealMatte = false
+        resetLiveBokehPolicy()
+        publishedMatte.set(null)
         update { it.copy(bokehModelReady = false) }
         frameGeneration++
         synchronized(depthFrames) { depthFrames.clear() }
@@ -2463,8 +2534,9 @@ class CameraController(
             val alphaPixels = IntArray(256 * 256)
             var fg045RawCount = 0
             var fg065StretchedCount = 0
+            val diagnosticMatte = publishedMatte.get()?.bytes
             for (i in 0 until 256 * 256) {
-                val aVal = latestMatte[i].toInt() and 0xFF
+                val aVal = (diagnosticMatte?.get(i)?.toInt() ?: 0) and 0xFF
                 val pStretched = aVal / 255.0f
                 val pRaw = pStretched * 0.5f
                 if (pRaw >= 0.45f) fg045RawCount++

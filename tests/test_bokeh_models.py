@@ -34,7 +34,7 @@ class BokehModels(unittest.TestCase):
         select = controller.split('override fun onBokehModelSelected', 1)[1].split('override fun onRunBokehChecks', 1)[0]
         self.assertIn('putString("model", model.id).apply()', select)
         self.assertIn('++bokehModelGeneration', select)
-        self.assertIn('hasRealMatte = false', select)
+        self.assertIn('publishedMatte.set(null)', select)
         for forbidden in ('rebuildStillSession', 'resolution =', 'stillReader', 'setZoom('):
             self.assertNotIn(forbidden, select)
 
@@ -79,7 +79,10 @@ class BokehModels(unittest.TestCase):
         self.assertIn('CancellationException', processor)
         state = (SRC / 'CameraUiState.kt').read_text()
         self.assertIn('!bokehChecksRunning', state)
-        self.assertIn('bokehModelReady && bokehModelError == null', state)
+        gate = state.split('val canTakePhoto:', 1)[1].split('val canUseShutter:', 1)[0]
+        self.assertNotIn('bokehModelReady', gate)
+        self.assertNotIn('bokehModelError', gate)
+        self.assertNotIn('bokehLiveSuspended', gate)
 
     def test_all_assets_have_licenses_and_checksums_and_are_bundled_at_build(self):
         manifest = json.loads((ROOT / 'assets/models/bokeh-models.json').read_text())

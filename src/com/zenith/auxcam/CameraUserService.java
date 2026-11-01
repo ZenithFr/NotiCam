@@ -1308,9 +1308,11 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     static class StillCaptureCallback extends CameraCaptureSession.CaptureCallback {
         private final CameraUserService mService;
+        private final int mGeneration;
 
         StillCaptureCallback(CameraUserService service) {
             mService = service;
+            mGeneration = service.mSessionGeneration;
         }
 
         @Override
@@ -1323,6 +1325,7 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         @Override
         public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
+            if (mGeneration != mService.mSessionGeneration || session != mService.mCaptureSession) return;
             long t_hal = SystemClock.elapsedRealtimeNanos();
             long dt = (t_hal - mService.mShutterCommandNs) / 1_000_000;
             Long sensorTs = result.get(CaptureResult.SENSOR_TIMESTAMP);
@@ -1337,8 +1340,15 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         @Override
         public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) {
+            if (mGeneration != mService.mSessionGeneration || session != mService.mCaptureSession) return;
             Log.e(TAG, "TIMING Still onCaptureFailed: reason=" + failure.getReason() + ", frameNumber=" + failure.getFrameNumber());
-            mService.onStillCompleted();
+            mService.notifyError("Still capture failed: HAL reason=" + failure.getReason());
+        }
+
+        @Override
+        public void onCaptureSequenceAborted(CameraCaptureSession session, int sequenceId) {
+            if (mGeneration != mService.mSessionGeneration || session != mService.mCaptureSession) return;
+            mService.notifyError("Still capture failed: request aborted");
         }
     }
 }

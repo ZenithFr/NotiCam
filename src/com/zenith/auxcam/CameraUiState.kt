@@ -45,6 +45,7 @@ data class CameraUiState(
     val bokehEnabled: Boolean = false,
     val bokehModel: BokehModel = BokehModel.MediaPipeAuto,
     val bokehModelReady: Boolean = false,
+    val bokehLiveSuspended: Boolean = false,
     val bokehModelError: String? = null,
     val bokehModelStatus: String = "Model loads on first portrait frame or when checks run",
     val bokehChecksRunning: Boolean = false,
@@ -134,8 +135,7 @@ data class CameraUiState(
         get() = zoomBlendPending || zoomBlendImage != null
 
     val canTakePhoto: Boolean
-        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy && !previewTransitioning && !bokehChecksRunning &&
-            (!bokehActive || (bokehModelReady && bokehModelError == null))
+        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy && !previewTransitioning && !bokehChecksRunning
 
     val canUseShutter: Boolean
         get() = if (mode == CaptureMode.Photo) canTakePhoto

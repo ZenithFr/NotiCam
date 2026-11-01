@@ -3,6 +3,10 @@ package com.zenith.auxcam;
 /** One global zoom ladder, one physical-lens-relative crop. No Android dependencies. */
 public final class CameraZoom {
     private CameraZoom() {}
+    /** Stereo session 5 uses the main lens, not a new UI/zoom lens. */
+    public static String lensForSession(String cameraId) {
+        return cameraId == null || "5".equals(cameraId) ? "0" : cameraId;
+    }
     public static String lensForZoom(float zoom) {
         if (!Float.isFinite(zoom)) return "0";
         if (zoom < 1f) return "2";

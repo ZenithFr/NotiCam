@@ -265,8 +265,9 @@ Java_com_zenith_auxcam_MainActivity_nativeReleaseHardwareBuffer(JNIEnv* env, job
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeNotifyMatteDrop(JNIEnv* env, jobject thiz) {
-    std::lock_guard<std::mutex> lock(gPipelineMutex);
-    if (gPipeline) {
+    // Telemetry must never stall the reader behind a full-resolution still.
+    std::unique_lock<std::mutex> lock(gPipelineMutex, std::try_to_lock);
+    if (lock.owns_lock() && gPipeline) {
         gPipeline->notifyMatteDrop();
     }
 }
