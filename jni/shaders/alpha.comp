@@ -33,6 +33,9 @@ layout(push_constant) uniform AlphaPushConstants {
     uint gateBypass; // 1 = bypass depth gate, 0 = depth gate active
     uint recordStats; // 1 = record gate stats, 0 = skip
     uint alphaDiag; // 1 = record subject depth discriminator, 0 = skip
+    uint edgeRefine; // 0 = off, 1 = bilateral only, 2 = bilateral + contrast, 3 = contrast only
+    uint depthW;
+    uint depthH;
 } pc;
 
 void main() {
@@ -82,6 +85,49 @@ void main() {
     }
 
     if (pc.stubAlphaMode == 0) {
+        vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
+
+        // --- Edge refinement: joint bilateral in transition band ---
+        if ((pc.edgeRefine == 1 || pc.edgeRefine == 2) && alpha > 0.02 && alpha < 0.98) {
+            vec2 texel = 1.0 / vec2(pc.width, pc.height);
+            vec2 dtexel = 1.0 / vec2(pc.depthW, pc.depthH);
+
+            float dC = texture(uDepth, depthUv).r;
+            float lC = dot(texture(uLuma, uv).rgb, vec3(0.299, 0.587, 0.114));
+
+            // sigma_d scales with focus distance so the filter adapts to framing.
+            float sigmaD = max(0.05, s1 * 0.10);
+            float sigmaL = 0.08;
+            float sigmaS = 1.5;
+
+            float wsum = 0.0;
+            float asum = 0.0;
+
+            for (int dy = -2; dy <= 2; ++dy) {
+                for (int dx = -2; dx <= 2; ++dx) {
+                    vec2 q = uv + vec2(dx, dy) * (texel * 2.0 / 2.0);
+                    float ws = exp(-float(dx*dx + dy*dy) / (2.0*sigmaS*sigmaS));
+
+                    float aQ = texture(uAlphaIn, q).r;
+                    float lQ = dot(texture(uLuma, q).rgb, vec3(0.299,0.587,0.114));
+                    float dQ = texture(uDepth, vec2(q.x, (q.y - 0.5) * 1.1667 + 0.5)).r;
+
+                    float wl = exp(-(lQ - lC)*(lQ - lC) / (2.0*sigmaL*sigmaL));
+
+                    // Invalid depth (0 or ~10m) -> neutral weight, fall back to luma.
+                    float dValid = step(0.05, dQ) * step(dQ, 9.95)
+                                 * step(0.05, dC) * step(dC, 9.95);
+                    float wd = mix(1.0, exp(-(dQ - dC)*(dQ - dC) /
+                                          (2.0*sigmaD*sigmaD)), dValid);
+
+                    float w = ws * wl * wd;
+                    wsum += w;
+                    asum += w * aQ;
+                }
+            }
+            if (wsum > 1e-5) alpha = asum / wsum;
+        }
+
         // Lift-only low-light recovery (unchanged)
         float lift = max(0.0, (alpha - 0.5) * 2.0);
         alpha = clamp(alpha + (1.0 - alpha) * lift * lift, 0.0, 1.0);
@@ -93,7 +139,6 @@ void main() {
             // Depth becomes the tie-breaker on subject/background.
             // Rescue: inside s1, force sharp (low-light AI confidence collapse).
             // Veto:   beyond 1.5*s1, kill AI over-claim (blur bleed, wires).
-            vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
             float d = texture(uDepth, depthUv).r;
 
             // y8=0 -> 0.0m and y8=255 -> ~10.0m both mean "no measurement".
@@ -106,6 +151,11 @@ void main() {
 
             float veto = smoothstep(s1 * 1.5, s1 * 3.0, d) * validDepth;
             alpha = alpha * (1.0 - veto);
+        }
+
+        // --- Contrast narrowing: symmetric around true boundary ---
+        if (pc.edgeRefine == 2 || pc.edgeRefine == 3) {
+            alpha = clamp((alpha - 0.5) * 2.0 + 0.5, 0.0, 1.0);
         }
 
         if (pc.recordStats != 0) {

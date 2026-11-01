@@ -193,6 +193,11 @@ Java_com_zenith_auxcam_MainActivity_nativeSetDisableGuided(JNIEnv* env, jclass c
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeSetEdgeRefineOverride(JNIEnv* env, jclass clazz, jint edgeRefine) {
+    VulkanPipeline::setEdgeRefineOverride(edgeRefine);
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeDestroyEngine(JNIEnv* env, jobject thiz) {
     LOGI("nativeDestroyEngine called");
     if (gPipeline) {

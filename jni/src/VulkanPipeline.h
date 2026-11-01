@@ -23,6 +23,8 @@ public:
 
     void setDisableGuided(bool disable);
     bool getDisableGuided();
+    static void setEdgeRefineOverride(int edgeRefine);
+    static int getEdgeRefineOverride();
     void notifyMatteDrop();
     void incrementAhbRef() { mAhbRefcount++; }
     void decrementAhbRef() { mAhbRefcount--; }

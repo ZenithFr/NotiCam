@@ -81,6 +81,8 @@ class DualMatteSegmenter(private val context: Context) {
         const val THR_DUAL = 0.65f
         const val THR_FAST = 0.45f
         const val EMA_ALPHA = 0.25f
+        @Volatile
+        var sEmaAlpha: Float = EMA_ALPHA
         const val MIN_INTERVAL_MS = 83L // 12 Hz
         const val FAST_PATH_HIST_DELTA = 0.20f // 20% total variation shift
 
@@ -701,7 +703,7 @@ class DualMatteSegmenter(private val context: Context) {
             System.arraycopy(probCombined, 0, emaMatte, 0, 256 * 256)
             emaInitialized = true
         } else {
-            val alpha = EMA_ALPHA
+            val alpha = sEmaAlpha
             val oneMinusAlpha = 1.0f - alpha
             for (i in 0 until 256 * 256) {
                 emaMatte[i] = oneMinusAlpha * emaMatte[i] + alpha * probCombined[i]

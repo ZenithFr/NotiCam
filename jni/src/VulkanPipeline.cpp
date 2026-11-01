@@ -133,6 +133,9 @@ struct AlphaPushConstants {
     uint32_t gateBypass;
     uint32_t recordStats;
     uint32_t alphaDiag;
+    uint32_t edgeRefine;
+    uint32_t depthW;
+    uint32_t depthH;
 };
 
 struct GateStatsData {
@@ -151,6 +154,66 @@ void VulkanPipeline::setDisableGuided(bool disable) {
 
 bool VulkanPipeline::getDisableGuided() {
     return sDisableGuided;
+}
+
+static int sEdgeRefineOverride = -1;
+static bool sEdgeRefineOverrideChanged = false;
+static std::vector<double> sEdgeAlphaPassMs;
+
+void VulkanPipeline::setEdgeRefineOverride(int edgeRefine) {
+    sEdgeRefineOverride = edgeRefine;
+    sEdgeRefineOverrideChanged = true;
+    LOGI("Edge refine override set to: %d", edgeRefine);
+}
+
+int VulkanPipeline::getEdgeRefineOverride() {
+    return sEdgeRefineOverride;
+}
+
+struct AlphaBandMetrics {
+    int median;
+    int p90;
+    int max;
+    size_t runs;
+};
+
+static AlphaBandMetrics computeAlphaBandMetrics(const uint8_t* alphaData, uint32_t width, uint32_t height) {
+    std::vector<int> runs;
+    runs.reserve(2048);
+    int maxRun = 0;
+
+    for (uint32_t y = 0; y < height; ++y) {
+        const uint8_t* row = alphaData + y * width;
+        int curRun = 0;
+        for (uint32_t x = 0; x < width; ++x) {
+            float a = (float)row[x] / 255.0f;
+            if (a > 0.05f && a < 0.95f) {
+                curRun++;
+            } else {
+                if (curRun > 0) {
+                    runs.push_back(curRun);
+                    if (curRun > maxRun) maxRun = curRun;
+                    curRun = 0;
+                }
+            }
+        }
+        if (curRun > 0) {
+            runs.push_back(curRun);
+            if (curRun > maxRun) maxRun = curRun;
+        }
+    }
+
+    if (runs.empty()) {
+        return {0, 0, 0, 0};
+    }
+
+    std::sort(runs.begin(), runs.end());
+    int median = runs[runs.size() / 2];
+    size_t p90Idx = static_cast<size_t>(runs.size() * 0.90);
+    if (p90Idx >= runs.size()) p90Idx = runs.size() - 1;
+    int p90 = runs[p90Idx];
+
+    return {median, p90, maxRun, runs.size()};
 }
 
 struct CompositePushConstants {
@@ -756,6 +819,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                 sLastComp = dComp;
                 sLastCopy = dCopy;
                 sLastTotalGpu = dTotalGpu;
+                if (dAlpha > 0.0) sEdgeAlphaPassMs.push_back(dAlpha);
 
                 static std::vector<double> sCocSamples;
                 static std::vector<double> sGuidedSamples;
@@ -1526,8 +1590,10 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         }
     }
 
+    uint32_t dW = (depthW > 0) ? depthW : 448u;
+    uint32_t dH = (depthH > 0) ? depthH : 288u;
     CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, (float)mStillW };
-    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u), 0u, 0u, 0u };
+    AlphaPushConstants pcAlpha{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u), 0u, 0u, 0u, 2u, dW, dH };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f, 0 };
     CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90, 0 };
 
@@ -1560,7 +1626,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
         // Alpha (guided ON)
-        AlphaPushConstants pcAlphaOn{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 0u, 0u, 0u };
+        AlphaPushConstants pcAlphaOn{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 0u, 0u, 0u, 0u, dW, dH };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOn);
@@ -1744,7 +1810,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         transition(mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
         // s1 at real focus, DISABLE_GUIDED = 0, gateBypass = 1, recordStats = 0, alphaDiag = 0
-        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 1u, 0u, 0u };
+        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 1u, 0u, 0u, 0u, dW, dH };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOff);
@@ -1915,9 +1981,58 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         memset(mGateStatsMapped, 0, sizeof(GateStatsData));
     }
 
+    enum class EdgeRefineState {
+        SEQ_0 = 0,
+        SEQ_1 = 1,
+        SEQ_2 = 2,
+        SEQ_3 = 3,
+        HOLD_2 = 4
+    };
+
+    static EdgeRefineState sEdgeState = EdgeRefineState::SEQ_0;
+    static auto sEdgePhaseStart = std::chrono::steady_clock::time_point{};
+    static bool sEdgePhaseStarted = false;
+    static std::vector<AlphaBandMetrics> sEdgeBandMetrics;
+
+    uint32_t curEdgeRefine = 2u;
+    if (sEdgeRefineOverride >= 0) {
+        curEdgeRefine = static_cast<uint32_t>(sEdgeRefineOverride);
+        if (sEdgeRefineOverrideChanged) {
+            sEdgeRefineOverrideChanged = false;
+            sEdgePhaseStarted = true;
+            sEdgePhaseStart = std::chrono::steady_clock::now();
+            sEdgeAlphaPassMs.clear();
+            sEdgeBandMetrics.clear();
+            LOGI("EDGE_REFINE OVERRIDE APPLIED: %d (resetting 5s timer)", sEdgeRefineOverride);
+        }
+    } else {
+        auto nowEdge = std::chrono::steady_clock::now();
+        if (!sEdgePhaseStarted) {
+            sEdgePhaseStarted = true;
+            sEdgePhaseStart = nowEdge;
+            sEdgeAlphaPassMs.clear();
+            sEdgeBandMetrics.clear();
+            LOGI("EDGE_REFINE SEQUENCE START: phase=%d (edgeRefine=%d)", (int)sEdgeState, (int)sEdgeState);
+        }
+
+        switch (sEdgeState) {
+            case EdgeRefineState::SEQ_0: curEdgeRefine = 0u; break;
+            case EdgeRefineState::SEQ_1: curEdgeRefine = 1u; break;
+            case EdgeRefineState::SEQ_2: curEdgeRefine = 2u; break;
+            case EdgeRefineState::SEQ_3: curEdgeRefine = 3u; break;
+            case EdgeRefineState::HOLD_2:
+            default:
+                curEdgeRefine = 2u;
+                break;
+        }
+    }
+
     pcAlpha.gateBypass = curGateBypass;
     pcAlpha.recordStats = curRecordStats;
     pcAlpha.alphaDiag = curRecordStats;
+    pcAlpha.edgeRefine = curEdgeRefine;
+    pcAlpha.depthW = (depthW > 0) ? depthW : 448u;
+    pcAlpha.depthH = (depthH > 0) ? depthH : 288u;
 
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
     vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
@@ -1950,6 +2065,40 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     if (mPreviewQueryPool != VK_NULL_HANDLE) {
         vkCmdWriteTimestamp(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mPreviewQueryPool, qBase + 4);
+    }
+
+    // 1Hz Preview Alpha Readback to mReadbackBuffer
+    static auto sLastAlphaReadbackTime = std::chrono::steady_clock::time_point{};
+    auto nowTime = std::chrono::steady_clock::now();
+    bool doAlphaReadback = false;
+    if (sLastAlphaReadbackTime.time_since_epoch().count() == 0 ||
+        std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - sLastAlphaReadbackTime).count() >= 1000) {
+        doAlphaReadback = true;
+    }
+
+    if (doAlphaReadback) {
+        transition(mImgAlpha, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        VkBufferImageCopy copyAlpha{};
+        copyAlpha.bufferOffset = 0;
+        copyAlpha.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copyAlpha.imageExtent = { mPreviewW, mPreviewH, 1 };
+        vkCmdCopyImageToBuffer(curCmd, mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyAlpha);
+
+        transition(mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL,
+                   VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        VkBufferMemoryBarrier bufBarrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+        bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bufBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bufBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        bufBarrier.buffer = mReadbackBuffer;
+        bufBarrier.offset = 0;
+        bufBarrier.size = (VkDeviceSize)mPreviewW * mPreviewH;
+        vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &bufBarrier, 0, nullptr);
     }
 
     // Copy composite to swapchain image
@@ -1999,6 +2148,30 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
         // Synchronous wait on fence: guarantees GPU has completely rendered before present (eliminates SurfaceView QUEUE_BUFFER_TIMEOUT)
         vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX);
+
+        // 1Hz Alpha Transition Band readback & metrics
+        if (doAlphaReadback) {
+            sLastAlphaReadbackTime = nowTime;
+            void* pMap = nullptr;
+            VkResult res = vkMapMemory(mDevice, mReadbackMem, 0, (VkDeviceSize)(mPreviewW * mPreviewH), 0, &pMap);
+            if (res == VK_SUCCESS && pMap != nullptr) {
+                VkMappedMemoryRange range{ VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, nullptr, mReadbackMem, 0, (VkDeviceSize)(mPreviewW * mPreviewH) };
+                vkInvalidateMappedMemoryRanges(mDevice, 1, &range);
+
+                const uint8_t* pAlpha = static_cast<const uint8_t*>(pMap);
+                AlphaBandMetrics m = computeAlphaBandMetrics(pAlpha, mPreviewW, mPreviewH);
+                sEdgeBandMetrics.push_back(m);
+
+                if (curEdgeRefine == 0) {
+                    LOGI("ALPHA_BAND_BEFORE: median=%d p90=%d max=%d runs=%zu", m.median, m.p90, m.max, m.runs);
+                } else {
+                    LOGI("ALPHA_BAND_AFTER: median=%d p90=%d max=%d runs=%zu edgeRefine=%u", m.median, m.p90, m.max, m.runs, curEdgeRefine);
+                }
+                LOGI("ALPHA_BAND: edgeRefine=%u median=%d p90=%d max=%d runs=%zu", curEdgeRefine, m.median, m.p90, m.max, m.runs);
+
+                vkUnmapMemory(mDevice, mReadbackMem);
+            }
+        }
 
         // Read back gate stats if recorded
         if (shouldRecordStats && curRecordStats != 0u && mGateStatsMapped != nullptr) {
@@ -2136,6 +2309,53 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                 LOGI("=== FPS_PROBE CONFIG A/B COMPLETE ===");
             }
             sBisectPhaseStarted = false;
+        }
+    }
+
+    // Edge Refinement Sequence Evaluation (0 -> 1 -> 2 -> 3, 5s each)
+    if (sEdgeRefineOverride < 0 && sEdgeState != EdgeRefineState::HOLD_2 && sEdgePhaseStarted) {
+        double elapsedPhaseSec = std::chrono::duration<double>(tPresentSteady - sEdgePhaseStart).count();
+        if (elapsedPhaseSec >= 5.0) {
+            double meanAlphaMs = 0.0;
+            if (!sEdgeAlphaPassMs.empty()) {
+                double sum = 0.0;
+                for (double mVal : sEdgeAlphaPassMs) sum += mVal;
+                meanAlphaMs = sum / sEdgeAlphaPassMs.size();
+            }
+
+            int medVal = 0, p90Val = 0, maxVal = 0;
+            size_t runCount = 0;
+            if (!sEdgeBandMetrics.empty()) {
+                const auto& lastM = sEdgeBandMetrics.back();
+                medVal = lastM.median;
+                p90Val = lastM.p90;
+                maxVal = lastM.max;
+                runCount = lastM.runs;
+            }
+
+            uint32_t finishedRefine = curEdgeRefine;
+            LOGI("ALPHA_STAGE: edgeRefine=%u median=%d p90=%d max=%d runs=%zu alphaMs=%.2f",
+                 finishedRefine, medVal, p90Val, maxVal, runCount, meanAlphaMs);
+
+            if (sEdgeRefineOverride >= 0) {
+                sEdgePhaseStarted = false;
+            } else {
+                if (finishedRefine == 0) {
+                    LOGI("ALPHA_BAND_BEFORE: median=%d p90=%d max=%d runs=%zu", medVal, p90Val, maxVal, runCount);
+                    sEdgeState = EdgeRefineState::SEQ_1;
+                } else if (finishedRefine == 1) {
+                    LOGI("ALPHA_BAND_AFTER: median=%d p90=%d max=%d runs=%zu edgeRefine=1", medVal, p90Val, maxVal, runCount);
+                    sEdgeState = EdgeRefineState::SEQ_2;
+                } else if (finishedRefine == 2) {
+                    LOGI("ALPHA_BAND_AFTER: median=%d p90=%d max=%d runs=%zu edgeRefine=2", medVal, p90Val, maxVal, runCount);
+                    sEdgeState = EdgeRefineState::SEQ_3;
+                } else if (finishedRefine == 3) {
+                    LOGI("ALPHA_BAND_AFTER: median=%d p90=%d max=%d runs=%zu edgeRefine=3", medVal, p90Val, maxVal, runCount);
+                    sEdgeState = EdgeRefineState::HOLD_2;
+                    LOGI("=== EDGE_REFINE SEQUENCE COMPLETE (preview held at edgeRefine=2) ===");
+                }
+                sEdgePhaseStarted = false;
+            }
         }
     }
 
@@ -3086,8 +3306,8 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
             vkCmdWriteTimestamp(cCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, mStillQueryPool, 3);
         }
 
-        // 1. Guided Filter Alpha Pass on this tile
-        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u), 0u, 0u, 0u };
+        // 1. Guided Filter Alpha Pass on this tile (edgeRefine = 0 for still)
+        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u), 0u, 0u, 0u, 0u, (depthW > 0 ? depthW : 448u), (depthH > 0 ? depthH : 288u) };
         vkCmdBindPipeline(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaStill, 0, nullptr);
         vkCmdPushConstants(cCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaSlice);

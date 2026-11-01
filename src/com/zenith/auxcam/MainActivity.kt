@@ -1,5 +1,6 @@
 package com.zenith.auxcam
 
+import android.content.Intent
 import android.graphics.Color
 import android.hardware.HardwareBuffer
 import android.os.Build
@@ -61,6 +62,26 @@ class MainActivity : ComponentActivity(), NativeBridge {
             CameraUserService.sForceFps30 = true
         }
 
+        val edgeRefineIntent = intent?.let {
+            if (it.hasExtra("edge_refine")) {
+                try { it.getIntExtra("edge_refine", -1) } catch (e: Exception) { it.getStringExtra("edge_refine")?.toIntOrNull() ?: -1 }
+            } else null
+        }
+        if (edgeRefineIntent != null && edgeRefineIntent >= 0) {
+            setEdgeRefineOverride(edgeRefineIntent)
+            Log.i("MainActivity", "Edge refine override set from intent: $edgeRefineIntent")
+        }
+
+        val emaIntent = intent?.let {
+            if (it.hasExtra("ema_alpha")) {
+                try { it.getFloatExtra("ema_alpha", 0.25f) } catch (e: Exception) { it.getStringExtra("ema_alpha")?.toFloatOrNull() ?: 0.25f }
+            } else null
+        }
+        if (emaIntent != null) {
+            DualMatteSegmenter.sEmaAlpha = emaIntent
+            Log.i("MainActivity", "EMA alpha set from intent: $emaIntent")
+        }
+
         controller = CameraController(this, this)
 
         setContent {
@@ -68,6 +89,23 @@ class MainActivity : ComponentActivity(), NativeBridge {
                 val state by controller.uiState
                 CameraScreen(state = state, actions = controller)
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.hasExtra("edge_refine")) {
+            val er = try { intent.getIntExtra("edge_refine", -1) } catch (e: Exception) { intent.getStringExtra("edge_refine")?.toIntOrNull() ?: -1 }
+            if (er >= 0) {
+                setEdgeRefineOverride(er)
+                Log.i("MainActivity", "onNewIntent: Edge refine override set to $er")
+            }
+        }
+        if (intent.hasExtra("ema_alpha")) {
+            val ema = try { intent.getFloatExtra("ema_alpha", 0.25f) } catch (e: Exception) { intent.getStringExtra("ema_alpha")?.toFloatOrNull() ?: 0.25f }
+            DualMatteSegmenter.sEmaAlpha = ema
+            Log.i("MainActivity", "onNewIntent: EMA alpha set to $ema")
         }
     }
 
@@ -302,5 +340,17 @@ class MainActivity : ComponentActivity(), NativeBridge {
 
         @JvmStatic
         private external fun nativeSetDisableGuided(disable: Boolean)
+
+        @JvmStatic
+        fun setEdgeRefineOverride(edgeRefine: Int) {
+            try {
+                nativeSetEdgeRefineOverride(edgeRefine)
+            } catch (t: Throwable) {
+                Log.w(TAG, "nativeSetEdgeRefineOverride failed: ${t.message}")
+            }
+        }
+
+        @JvmStatic
+        private external fun nativeSetEdgeRefineOverride(edgeRefine: Int)
     }
 }
