@@ -1,5 +1,6 @@
 #include "VulkanPipeline.h"
 #include <android/log.h>
+#include <android/thermal.h>
 #include <vector>
 #include <cstring>
 #include <fstream>
@@ -14,6 +15,19 @@
 #define LOG_TAG "VulkanPipeline"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+static int getThermalStatus() {
+    static AThermalManager* sThermalManager = nullptr;
+    static bool sInitAttempted = false;
+    if (!sInitAttempted) {
+        sInitAttempted = true;
+        sThermalManager = AThermal_acquireManager();
+    }
+    if (sThermalManager != nullptr) {
+        return static_cast<int>(AThermal_getCurrentThermalStatus(sThermalManager));
+    }
+    return 0;
+}
 
 static bool sDisableGuided = false;
 
@@ -742,23 +756,11 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab";
     } else if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_wire_ab", F_OK) == 0) {
         matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_wire_ab";
-    } else if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
-        matchedTrigger = "/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab";
-    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab", F_OK) == 0) {
-        matchedTrigger = "/sdcard/Pictures/NotiCam/trigger_guided_ab";
-    } else if (access("/sdcard/Pictures/NotiCam/trigger_wire_ab", F_OK) == 0) {
-        matchedTrigger = "/sdcard/Pictures/NotiCam/trigger_wire_ab";
     }
 
     bool forceTrigger = false;
     if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
         unlink("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
-        forceTrigger = true;
-    } else if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
-        unlink("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
-        forceTrigger = true;
-    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab_force", F_OK) == 0) {
-        unlink("/sdcard/Pictures/NotiCam/trigger_guided_ab_force");
         forceTrigger = true;
     }
 
@@ -1619,17 +1621,83 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     // 2. Guided Filter Alpha Pass
+    enum class BisectConfig {
+        CONFIG_A = 0,
+        CONFIG_B = 1,
+        CONFIG_C = 2,
+        CONFIG_D = 3,
+        DONE = 4
+    };
+
+    static BisectConfig sBisectConfig = BisectConfig::CONFIG_A;
+    static auto sBisectPhaseStart = std::chrono::steady_clock::time_point{};
+    static bool sBisectPhaseStarted = false;
+    static std::vector<double> sBisectFrameIntervalsMs;
+    static bool sBisectLoggedGpuPass = false;
+
+    // Continuous 1Hz FPS tracking
+    static auto sLast1HzTime = std::chrono::steady_clock::time_point{};
+    static uint32_t s1HzFrameCount = 0;
+    static auto sLastPresentSteady = std::chrono::steady_clock::time_point{};
+
+    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_fps_probe", F_OK) == 0) {
+        unlink("/data/user/0/com.zenith.auxcam/files/diag/trigger_fps_probe");
+        sBisectConfig = BisectConfig::CONFIG_A;
+        sBisectPhaseStarted = false;
+    }
+
+    uint32_t curRecordStats = 0u;
+    uint32_t curGateBypass = 0u;
     static auto sLastGateStatsLog = std::chrono::steady_clock::now();
     bool shouldRecordStats = false;
     auto nowGateStats = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::milliseconds>(nowGateStats - sLastGateStatsLog).count() >= 1000) {
         shouldRecordStats = true;
-        if (mGateStatsMapped) {
-            memset(mGateStatsMapped, 0, sizeof(GateStatsData));
-        }
     }
-    pcAlpha.recordStats = shouldRecordStats ? 1u : 0u;
-    pcAlpha.alphaDiag = shouldRecordStats ? 1u : 0u;
+
+    switch (sBisectConfig) {
+        case BisectConfig::CONFIG_A:
+            curRecordStats = 0u;
+            curGateBypass = 0u;
+            break;
+        case BisectConfig::CONFIG_B:
+            curRecordStats = 0u;
+            curGateBypass = 1u;
+            break;
+        case BisectConfig::CONFIG_C:
+            curRecordStats = 1u;
+            curGateBypass = 0u;
+            break;
+        case BisectConfig::CONFIG_D:
+            curRecordStats = 1u;
+            curGateBypass = 1u;
+            break;
+        case BisectConfig::DONE:
+        default:
+            curRecordStats = shouldRecordStats ? 1u : 0u;
+            curGateBypass = 0u;
+            break;
+    }
+
+    if (sBisectConfig != BisectConfig::DONE && !sBisectPhaseStarted) {
+        sBisectPhaseStarted = true;
+        sBisectPhaseStart = nowGateStats;
+        sBisectFrameIntervalsMs.clear();
+        sBisectLoggedGpuPass = false;
+        char cfgChar = (sBisectConfig == BisectConfig::CONFIG_A) ? 'A' :
+                       (sBisectConfig == BisectConfig::CONFIG_B) ? 'B' :
+                       (sBisectConfig == BisectConfig::CONFIG_C) ? 'C' : 'D';
+        int thermal = getThermalStatus();
+        LOGI("CONFIG %c START: thermal=%d matteDelegate=mtk-mdla_shim", cfgChar, thermal);
+    }
+
+    if ((curRecordStats != 0u || shouldRecordStats) && mGateStatsMapped != nullptr) {
+        memset(mGateStatsMapped, 0, sizeof(GateStatsData));
+    }
+
+    pcAlpha.gateBypass = curGateBypass;
+    pcAlpha.recordStats = curRecordStats;
+    pcAlpha.alphaDiag = curRecordStats;
 
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
     vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
@@ -1738,9 +1806,29 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkQueuePresentKHR(mComputeQueue, &presentInfo);
     }
     auto tPresent = std::chrono::high_resolution_clock::now();
+    auto tPresentSteady = std::chrono::steady_clock::now();
     uint64_t tPresNs = std::chrono::duration_cast<std::chrono::nanoseconds>(tPresent.time_since_epoch()).count();
     __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "preview_presented: %llu ns", (unsigned long long)tPresNs);
     double submitToPresentMs = std::chrono::duration<double, std::milli>(tPresent - tSubmit).count();
+
+    if (sLastPresentSteady.time_since_epoch().count() != 0) {
+        double frameIntervalMs = std::chrono::duration<double, std::milli>(tPresentSteady - sLastPresentSteady).count();
+        if (sBisectConfig != BisectConfig::DONE && sBisectPhaseStarted) {
+            sBisectFrameIntervalsMs.push_back(frameIntervalMs);
+        }
+    }
+    sLastPresentSteady = tPresentSteady;
+
+    // 1Hz FPS Counter (direct count, un-inferred)
+    s1HzFrameCount++;
+    if (sLast1HzTime.time_since_epoch().count() == 0) sLast1HzTime = tPresentSteady;
+    double elapsed1HzSec = std::chrono::duration<double>(tPresentSteady - sLast1HzTime).count();
+    if (elapsed1HzSec >= 1.0) {
+        double fps1Hz = (double)s1HzFrameCount / elapsed1HzSec;
+        LOGI("FPS_1HZ: fps=%.2f (frames=%u in %.2fms)", fps1Hz, s1HzFrameCount, elapsed1HzSec * 1000.0);
+        s1HzFrameCount = 0;
+        sLast1HzTime = tPresentSteady;
+    }
 
     // Read hardware timestamps
     float timestampPeriod = 1.0f;
@@ -1758,6 +1846,47 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         dComp = (ts[4] - ts[3]) * timestampPeriod / 1e6;
         dCopy = (ts[5] - ts[4]) * timestampPeriod / 1e6;
         dTotalGpu = (ts[5] - ts[0]) * timestampPeriod / 1e6;
+    }
+
+    // Bisect Phase GPU pass logging and FPS_PROBE evaluation
+    if (sBisectConfig != BisectConfig::DONE && sBisectPhaseStarted) {
+        double elapsedPhaseSec = std::chrono::duration<double>(tPresentSteady - sBisectPhaseStart).count();
+        if (!sBisectLoggedGpuPass && elapsedPhaseSec >= 1.0) {
+            sBisectLoggedGpuPass = true;
+            LOGI("GPU_PASS: coc=%.2fms guided=%.2fms gather=%.2fms composite=%.2fms alpha=%.2fms total=%.2fms",
+                 dCoc, dAlpha, dGather, dComp, dAlpha, dTotalGpu);
+        }
+
+        if (elapsedPhaseSec >= 5.0) {
+            char cfgChar = (sBisectConfig == BisectConfig::CONFIG_A) ? 'A' :
+                           (sBisectConfig == BisectConfig::CONFIG_B) ? 'B' :
+                           (sBisectConfig == BisectConfig::CONFIG_C) ? 'C' : 'D';
+            double meanFps = 0.0;
+            double p50Ms = 0.0;
+            double maxMs = 0.0;
+            if (!sBisectFrameIntervalsMs.empty() && elapsedPhaseSec > 0.0) {
+                meanFps = (double)sBisectFrameIntervalsMs.size() / elapsedPhaseSec;
+                std::vector<double> sorted = sBisectFrameIntervalsMs;
+                std::sort(sorted.begin(), sorted.end());
+                p50Ms = sorted[sorted.size() / 2];
+                maxMs = sorted.back();
+            }
+            int thermal = getThermalStatus();
+            LOGI("FPS_PROBE: config=%c fps=%.2f p50FrameMs=%.2f maxFrameMs=%.2f thermal=%d matteDelegate=mtk-mdla_shim",
+                 cfgChar, meanFps, p50Ms, maxMs, thermal);
+
+            if (sBisectConfig == BisectConfig::CONFIG_A) {
+                sBisectConfig = BisectConfig::CONFIG_B;
+            } else if (sBisectConfig == BisectConfig::CONFIG_B) {
+                sBisectConfig = BisectConfig::CONFIG_C;
+            } else if (sBisectConfig == BisectConfig::CONFIG_C) {
+                sBisectConfig = BisectConfig::CONFIG_D;
+            } else {
+                sBisectConfig = BisectConfig::DONE;
+                LOGI("=== FPS_PROBE COMPLETE ===");
+            }
+            sBisectPhaseStarted = false;
+        }
     }
 
     static std::vector<double> sSubmitWindow;
