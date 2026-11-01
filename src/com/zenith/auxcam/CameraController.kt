@@ -83,6 +83,7 @@ interface NativeBridge {
     ): Boolean
 
     fun setThermalThrottled(throttled: Boolean)
+    fun setDisableGuided(disable: Boolean) {}
     fun destroyEngine()
 }
 

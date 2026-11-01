@@ -18,6 +18,7 @@ layout(push_constant) uniform AlphaPushConstants {
     float s1_focus_m;
     uint stubAlphaMode; // 1 = depth-derived alpha (stub), 0 = guided filter real alpha
     uint yOffset;
+    uint DISABLE_GUIDED; // 1 = bypass guided filter, read pre-guided baseAlpha directly
 } pc;
 
 void main() {
@@ -40,25 +41,30 @@ void main() {
         // 1. Bilinear sample of the 256x256 soft semantic probability matte
         float baseAlpha = texture(uAlphaIn, uv).r;
 
-        // 2. High-resolution luma guidance
-        vec4 sharpColor = texture(uLuma, uv);
-        float centerLuma = dot(sharpColor.rgb, vec3(0.299, 0.587, 0.114));
+        // If DISABLE_GUIDED is active, bypass luma edge refinement and use base matte directly
+        if (pc.DISABLE_GUIDED != 0) {
+            alpha = baseAlpha;
+        } else {
+            // 2. High-resolution luma guidance
+            vec4 sharpColor = texture(uLuma, uv);
+            float centerLuma = dot(sharpColor.rgb, vec3(0.299, 0.587, 0.114));
 
-        // 3. Fast 5-tap cross window for local luma mean & variance
-        vec2 texel = 1.0 / vec2(pc.width, pc.height);
-        float lumaT = dot(texture(uLuma, uv + vec2(0.0, -texel.y)).rgb, vec3(0.299, 0.587, 0.114));
-        float lumaB = dot(texture(uLuma, uv + vec2(0.0,  texel.y)).rgb, vec3(0.299, 0.587, 0.114));
-        float lumaL = dot(texture(uLuma, uv + vec2(-texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
-        float lumaR = dot(texture(uLuma, uv + vec2( texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+            // 3. Fast 5-tap cross window for local luma mean & variance
+            vec2 texel = 1.0 / vec2(pc.width, pc.height);
+            float lumaT = dot(texture(uLuma, uv + vec2(0.0, -texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+            float lumaB = dot(texture(uLuma, uv + vec2(0.0,  texel.y)).rgb, vec3(0.299, 0.587, 0.114));
+            float lumaL = dot(texture(uLuma, uv + vec2(-texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
+            float lumaR = dot(texture(uLuma, uv + vec2( texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
 
-        float meanLuma = (centerLuma + lumaT + lumaB + lumaL + lumaR) * 0.2;
-        float diff = centerLuma - meanLuma;
+            float meanLuma = (centerLuma + lumaT + lumaB + lumaL + lumaR) * 0.2;
+            float diff = centerLuma - meanLuma;
 
-        // Near soft segmentation boundaries (baseAlpha in [0.08, 0.92]), refine edges with luma contrast
-        float edgeGate = smoothstep(0.0, 0.35, baseAlpha) * (1.0 - smoothstep(0.65, 1.0, baseAlpha));
-        float refined = baseAlpha + diff * 1.2 * edgeGate;
+            // Near soft segmentation boundaries (baseAlpha in [0.08, 0.92]), refine edges with luma contrast
+            float edgeGate = smoothstep(0.0, 0.35, baseAlpha) * (1.0 - smoothstep(0.65, 1.0, baseAlpha));
+            float refined = baseAlpha + diff * 1.2 * edgeGate;
 
-        alpha = clamp(refined, 0.0, 1.0);
+            alpha = clamp(refined, 0.0, 1.0);
+        }
     }
 
     imageStore(uOutAlpha, coord, vec4(alpha, 0.0, 0.0, 1.0));

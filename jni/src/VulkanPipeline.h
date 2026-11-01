@@ -21,6 +21,9 @@ public:
         if (mNpuWorker) mNpuWorker->setThermalThrottled(throttled);
     }
 
+    void setDisableGuided(bool disable);
+    bool getDisableGuided();
+
     // Renders one full frame: Camera YUV AHB + DPE Disparity Y8 + Real Alpha Matte -> Native Window
     bool renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* depthY8Buffer, uint32_t depthW, uint32_t depthH, const uint8_t* alphaMatte = nullptr, uint32_t alphaW = 0, uint32_t alphaH = 0, float fStop = 1.88f, float targetFarFieldPx = 15.0f);
 
@@ -131,6 +134,10 @@ private:
     VkDeviceMemory mMemPreviewOut{VK_NULL_HANDLE};
     VkImageView mViewPreviewOut{VK_NULL_HANDLE};
     VkDescriptorSet mSetCompPreview{VK_NULL_HANDLE};
+    VkImage mImgComp527{VK_NULL_HANDLE};
+    VkDeviceMemory mMemComp527{VK_NULL_HANDLE};
+    VkImageView mViewComp527{VK_NULL_HANDLE};
+    VkDescriptorSet mSetComp527{VK_NULL_HANDLE};
     VkCommandPool mPreviewCmdPool{VK_NULL_HANDLE};
     VkCommandBuffer mPreviewCmds[MAX_FRAMES_IN_FLIGHT]{VK_NULL_HANDLE, VK_NULL_HANDLE};
     VkQueryPool mPreviewQueryPool{VK_NULL_HANDLE};

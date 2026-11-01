@@ -8,10 +8,93 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
+#include <algorithm>
+#include <zlib.h>
 
 #define LOG_TAG "VulkanPipeline"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
+
+static bool sDisableGuided = false;
+
+static inline float halfToFloat(uint16_t h) {
+    uint32_t sign = (h & 0x8000) << 16;
+    uint32_t exp = (h & 0x7C00) >> 10;
+    uint32_t mant = (h & 0x03FF);
+    if (exp == 0) {
+        if (mant == 0) {
+            uint32_t u = sign; float f; memcpy(&f, &u, 4); return f;
+        }
+        while (!(mant & 0x0400)) { mant <<= 1; exp--; }
+        exp++;
+        mant &= ~0x0400;
+    } else if (exp == 31) {
+        uint32_t u = sign | 0x7F800000 | (mant << 13);
+        float f; memcpy(&f, &u, 4); return f;
+    }
+    exp = exp + (127 - 15);
+    uint32_t u = sign | (exp << 23) | (mant << 13);
+    float f; memcpy(&f, &u, 4);
+    return f;
+}
+
+static void writeU32Be(FILE* f, uint32_t val) {
+    uint8_t b[4] = { (uint8_t)(val >> 24), (uint8_t)(val >> 16), (uint8_t)(val >> 8), (uint8_t)val };
+    fwrite(b, 1, 4, f);
+}
+
+static void writePngChunk(FILE* f, const char* tag, const uint8_t* data, uint32_t len) {
+    writeU32Be(f, len);
+    fwrite(tag, 1, 4, f);
+    if (len > 0 && data) fwrite(data, 1, len, f);
+    uint32_t crc = crc32(0L, Z_NULL, 0);
+    crc = crc32(crc, (const Bytef*)tag, 4);
+    if (len > 0 && data) crc = crc32(crc, (const Bytef*)data, len);
+    writeU32Be(f, crc);
+}
+
+static bool savePngRgba(const char* path, uint32_t width, uint32_t height, const uint8_t* rgba) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+
+    const uint8_t sig[8] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    fwrite(sig, 1, 8, f);
+
+    uint8_t ihdr[13];
+    ihdr[0] = (uint8_t)(width >> 24);
+    ihdr[1] = (uint8_t)(width >> 16);
+    ihdr[2] = (uint8_t)(width >> 8);
+    ihdr[3] = (uint8_t)width;
+    ihdr[4] = (uint8_t)(height >> 24);
+    ihdr[5] = (uint8_t)(height >> 16);
+    ihdr[6] = (uint8_t)(height >> 8);
+    ihdr[7] = (uint8_t)height;
+    ihdr[8] = 8;  // bit depth
+    ihdr[9] = 6;  // RGBA
+    ihdr[10] = 0; // compression
+    ihdr[11] = 0; // filter
+    ihdr[12] = 0; // interlace
+    writePngChunk(f, "IHDR", ihdr, 13);
+
+    size_t rawSize = (width * 4 + 1) * height;
+    std::vector<uint8_t> raw(rawSize);
+    for (uint32_t y = 0; y < height; ++y) {
+        raw[y * (width * 4 + 1)] = 0; // filter None
+        memcpy(&raw[y * (width * 4 + 1) + 1], &rgba[y * width * 4], width * 4);
+    }
+
+    uLongf destLen = compressBound(rawSize);
+    std::vector<uint8_t> compressed(destLen);
+    if (compress(compressed.data(), &destLen, raw.data(), rawSize) != Z_OK) {
+        fclose(f);
+        return false;
+    }
+
+    writePngChunk(f, "IDAT", compressed.data(), destLen);
+    writePngChunk(f, "IEND", nullptr, 0);
+    fclose(f);
+    return true;
+}
 
 struct CocPushConstants {
     uint32_t width;
@@ -47,7 +130,16 @@ struct AlphaPushConstants {
     float s1_focus_m;
     uint32_t stubAlphaMode;
     uint32_t yOffset;
+    uint32_t DISABLE_GUIDED;
 };
+
+void VulkanPipeline::setDisableGuided(bool disable) {
+    sDisableGuided = disable;
+}
+
+bool VulkanPipeline::getDisableGuided() {
+    return sDisableGuided;
+}
 
 struct CompositePushConstants {
     uint32_t outWidth;
@@ -332,6 +424,10 @@ bool VulkanPipeline::recreateSwapchain() {
         vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetCompPreview);
         mSetCompPreview = VK_NULL_HANDLE;
     }
+    if (mSetComp527 != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetComp527);
+        mSetComp527 = VK_NULL_HANDLE;
+    }
     if (mSetAlphaPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
         vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetAlphaPreview);
         mSetAlphaPreview = VK_NULL_HANDLE;
@@ -396,6 +492,10 @@ void VulkanPipeline::updateSurface(ANativeWindow* newWindow, uint32_t width, uin
     if (mSetCompPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
         vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetCompPreview);
         mSetCompPreview = VK_NULL_HANDLE;
+    }
+    if (mSetComp527 != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetComp527);
+        mSetComp527 = VK_NULL_HANDLE;
     }
     if (mSetAlphaPreview != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
         vkFreeDescriptorSets(mDevice, mStillDescPool, 1, &mSetAlphaPreview);
@@ -534,6 +634,14 @@ bool VulkanPipeline::initPreviewResources() {
     dsAllocInfo.descriptorSetCount = 1;
     dsAllocInfo.pSetLayouts = &mDslComp;
     vkAllocateDescriptorSets(mDevice, &dsAllocInfo, &mSetCompPreview);
+
+    if (mSetComp527 == VK_NULL_HANDLE && mDslComp != VK_NULL_HANDLE && mStillDescPool != VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo dsAlloc527{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+        dsAlloc527.descriptorPool = mStillDescPool;
+        dsAlloc527.descriptorSetCount = 1;
+        dsAlloc527.pSetLayouts = &mDslComp;
+        vkAllocateDescriptorSets(mDevice, &dsAlloc527, &mSetComp527);
+    }
 
     // Allocate preview alpha descriptor set
     if (mSetAlphaPreview == VK_NULL_HANDLE && mDslAlpha != VK_NULL_HANDLE) {
@@ -821,8 +929,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     VkDescriptorImageInfo descBlurredStore{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descBlurredSample{ VK_NULL_HANDLE, mViewBlurred, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descPreviewStore{ VK_NULL_HANDLE, mViewPreviewOut, VK_IMAGE_LAYOUT_GENERAL };
+    VkDescriptorImageInfo descComp527Store{ VK_NULL_HANDLE, mViewComp527, VK_IMAGE_LAYOUT_GENERAL };
 
-    VkWriteDescriptorSet writes[12]{};
+    VkWriteDescriptorSet writes[16]{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = mSetGather;
     writes[0].dstBinding = 0;
@@ -907,7 +1016,39 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     writes[11].descriptorCount = 1;
     writes[11].pImageInfo = &descDepthSample;
 
-    vkUpdateDescriptorSets(mDevice, 12, writes, 0, nullptr);
+    uint32_t numWrites = 12;
+    if (mSetComp527 != VK_NULL_HANDLE) {
+        writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[12].dstSet = mSetComp527;
+        writes[12].dstBinding = 0;
+        writes[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[12].descriptorCount = 1;
+        writes[12].pImageInfo = &descYuv;
+
+        writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[13].dstSet = mSetComp527;
+        writes[13].dstBinding = 1;
+        writes[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[13].descriptorCount = 1;
+        writes[13].pImageInfo = &descBlurredSample;
+
+        writes[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[14].dstSet = mSetComp527;
+        writes[14].dstBinding = 2;
+        writes[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[14].descriptorCount = 1;
+        writes[14].pImageInfo = &descAlphaSample;
+
+        writes[15].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[15].dstSet = mSetComp527;
+        writes[15].dstBinding = 3;
+        writes[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[15].descriptorCount = 1;
+        writes[15].pImageInfo = &descComp527Store;
+        numWrites = 16;
+    }
+
+    vkUpdateDescriptorSets(mDevice, numWrites, writes, 0, nullptr);
 
     // 5. Record command buffer
     VkCommandBuffer curCmd = mPreviewCmds[mCurrentFrame];
@@ -963,12 +1104,280 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     uint32_t gxWork = (mStillW + 15) / 16;
     uint32_t gyWork = (mStillH + 15) / 16;
 
+    bool isDisableGuided = sDisableGuided;
+    if (access("/data/user/0/com.zenith.auxcam/files/diag/disable_guided", F_OK) == 0 ||
+        access("/sdcard/Android/data/com.zenith.auxcam/files/diag/disable_guided", F_OK) == 0 ||
+        access("/sdcard/Pictures/NotiCam/disable_guided", F_OK) == 0) {
+        isDisableGuided = true;
+    }
+
+    static int sLastGuidedLogged = -1;
+    if (isDisableGuided) {
+        if (sLastGuidedLogged != 1) {
+            sLastGuidedLogged = 1;
+            LOGI("COMPOSITE guided=off");
+        }
+    } else {
+        if (sLastGuidedLogged != 0) {
+            sLastGuidedLogged = 0;
+            LOGI("COMPOSITE guided=on");
+        }
+    }
+
+    bool doTriggerAb = false;
+    const char* matchedTrigger = nullptr;
+    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
+        matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab";
+    } else if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
+        matchedTrigger = "/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab";
+    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab", F_OK) == 0) {
+        matchedTrigger = "/sdcard/Pictures/NotiCam/trigger_guided_ab";
+    }
+
+    bool forceTrigger = false;
+    if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
+        unlink("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
+        forceTrigger = true;
+    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab_force", F_OK) == 0) {
+        unlink("/sdcard/Pictures/NotiCam/trigger_guided_ab_force");
+        forceTrigger = true;
+    }
+
+    if (forceTrigger) {
+        if (matchedTrigger) unlink(matchedTrigger);
+        doTriggerAb = true;
+    } else if (matchedTrigger != nullptr) {
+        bool hasSubjectMatte = false;
+        if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
+            uint32_t fgCount = 0;
+            for (uint32_t i = 0; i < alphaW * alphaH; ++i) {
+                if (alphaMatte[i] > 100) {
+                    fgCount++;
+                }
+            }
+            if (fgCount > 500) {
+                hasSubjectMatte = true;
+            }
+        }
+        if (hasSubjectMatte) {
+            unlink(matchedTrigger);
+            doTriggerAb = true;
+        } else {
+            static int sWaitLogCount = 0;
+            if ((sWaitLogCount++ % 60) == 0) {
+                LOGI("trigger_guided_ab pending: waiting for subject in viewfinder (hasRealAlpha=%d)...", hasRealAlpha ? 1 : 0);
+            }
+        }
+    }
+
     CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, (float)mStillW };
-    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0 };
+    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u) };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f, 0 };
     CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90, 0 };
 
     VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
+
+    if (doTriggerAb) {
+        LOGI("=== EXECUTING GUIDED A/B DIAGNOSTIC ===");
+        LOGI("COMPOSITE guided=on");
+
+        transition(importedImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, 0, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgDepth, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        transition(mImgAlpha, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgAlphaLow, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        transition(mImgCoc, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgBlurred, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgComp527, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgPreviewOut, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgDepth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyDepthRegion);
+        vkCmdCopyBufferToImage(curCmd, mUploadStagingBuffer, mImgAlphaLow, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyAlphaLowRegion);
+
+        transition(mImgDepth, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgAlphaLow, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        // CoC
+        vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeCoc);
+        vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlCoc, 0, 1, &mSetCoc, 0, nullptr);
+        vkCmdPushConstants(curCmd, mPlCoc, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CocPushConstants), &pcCoc);
+        vkCmdDispatch(curCmd, gxWork, gyWork, 1);
+        vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+        // Alpha (guided ON)
+        AlphaPushConstants pcAlphaOn{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u };
+        vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
+        vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
+        vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOn);
+        vkCmdDispatch(curCmd, gxWork, gyWork, 1);
+        vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+        // Gather
+        vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
+        vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGather, 0, nullptr);
+        vkCmdPushConstants(curCmd, mPlGather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GatherPushConstants), &pcGather);
+        vkCmdDispatch(curCmd, gxWork, gyWork, 1);
+        vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+        // Composite 527x703
+        CompositePushConstants pcComp527{ mStillW, mStillH, kPreviewRotate90, 0 };
+        uint32_t gx527 = (mStillW + 15) / 16;
+        uint32_t gy527 = (mStillH + 15) / 16;
+        vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
+        vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetComp527, 0, nullptr);
+        vkCmdPushConstants(curCmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CompositePushConstants), &pcComp527);
+        vkCmdDispatch(curCmd, gx527, gy527, 1);
+
+        // Copy images to mReadbackBuffer
+        transition(mImgComp527, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        transition(mImgCoc, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        transition(mImgAlpha, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        VkBufferImageCopy copyComp{};
+        copyComp.bufferOffset = 0;
+        copyComp.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copyComp.imageExtent = { mStillW, mStillH, 1 };
+        vkCmdCopyImageToBuffer(curCmd, mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyComp);
+
+        VkBufferImageCopy copyCoc{};
+        copyCoc.bufferOffset = 2000000;
+        copyCoc.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copyCoc.imageExtent = { mStillW, mStillH, 1 };
+        vkCmdCopyImageToBuffer(curCmd, mImgCoc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyCoc);
+
+        VkBufferImageCopy copyAlpha{};
+        copyAlpha.bufferOffset = 3000000;
+        copyAlpha.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+        copyAlpha.imageExtent = { mStillW, mStillH, 1 };
+        vkCmdCopyImageToBuffer(curCmd, mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyAlpha);
+
+        vkEndCommandBuffer(curCmd);
+
+        // Submit Pass 1
+        VkSubmitInfo sInfo1{ VK_STRUCTURE_TYPE_SUBMIT_INFO };
+        sInfo1.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        sInfo1.commandBufferCount = 1;
+        sInfo1.pCommandBuffers = &curCmd;
+        vkQueueSubmit(mComputeQueue, 1, &sInfo1, VK_NULL_HANDLE);
+        vkQueueWaitIdle(mComputeQueue);
+
+        // Process Pass 1
+        void* pMap = nullptr;
+        vkMapMemory(mDevice, mReadbackMem, 0, 4000000, 0, &pMap);
+        if (pMap) {
+            uint8_t* pBytes = (uint8_t*)pMap;
+            savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_on.png", mStillW, mStillH, pBytes);
+            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_on.png", mStillW, mStillH, pBytes);
+
+            // CoC histogram
+            uint16_t* pCocHalf = (uint16_t*)(pBytes + 2000000);
+            size_t totalPx = mStillW * mStillH;
+            std::vector<float> cocVals(totalPx);
+            size_t countOver8 = 0;
+            for (size_t i = 0; i < totalPx; ++i) {
+                float c = halfToFloat(pCocHalf[i]) * (float)mStillW;
+                cocVals[i] = c;
+                if (c > 8.0f) countOver8++;
+            }
+            std::sort(cocVals.begin(), cocVals.end());
+            float p50Coc = cocVals[totalPx / 2];
+            float p95Coc = cocVals[(size_t)(totalPx * 0.95f)];
+            float maxCoc = cocVals.back();
+            float fracOver8 = (float)countOver8 / (float)totalPx;
+            LOGI("COC p50=%.4f p95=%.4f max=%.4f frac_over_8=%.4f", p50Coc, p95Coc, maxCoc, fracOver8);
+
+            // Alpha distribution by luma band
+            uint8_t* pAlphaBytes = pBytes + 3000000;
+            std::vector<float> darkAlphas, midAlphas, brightAlphas;
+            darkAlphas.reserve(totalPx / 4);
+            midAlphas.reserve(totalPx / 2);
+            brightAlphas.reserve(totalPx / 4);
+
+            double sumDark = 0, sumMid = 0, sumBright = 0;
+            for (size_t i = 0; i < totalPx; ++i) {
+                float r = pBytes[i * 4 + 0];
+                float g = pBytes[i * 4 + 1];
+                float b = pBytes[i * 4 + 2];
+                float luma = 0.299f * r + 0.587f * g + 0.114f * b;
+                float a = pAlphaBytes[i] / 255.0f;
+                if (luma < 40.0f) {
+                    darkAlphas.push_back(a);
+                    sumDark += a;
+                } else if (luma <= 200.0f) {
+                    midAlphas.push_back(a);
+                    sumMid += a;
+                } else {
+                    brightAlphas.push_back(a);
+                    sumBright += a;
+                }
+            }
+
+            std::sort(darkAlphas.begin(), darkAlphas.end());
+            std::sort(midAlphas.begin(), midAlphas.end());
+            std::sort(brightAlphas.begin(), brightAlphas.end());
+
+            float p50Dark = darkAlphas.empty() ? 0.0f : darkAlphas[darkAlphas.size() / 2];
+            float meanDark = darkAlphas.empty() ? 0.0f : (float)(sumDark / darkAlphas.size());
+
+            float p50Mid = midAlphas.empty() ? 0.0f : midAlphas[midAlphas.size() / 2];
+            float meanMid = midAlphas.empty() ? 0.0f : (float)(sumMid / midAlphas.size());
+
+            float p50Bright = brightAlphas.empty() ? 0.0f : brightAlphas[brightAlphas.size() / 2];
+            float meanBright = brightAlphas.empty() ? 0.0f : (float)(sumBright / brightAlphas.size());
+
+            LOGI("dark band:  luma < 40   -> alpha p50=%.4f, mean=%.4f", p50Dark, meanDark);
+            LOGI("mid band:   luma 40-200 -> alpha p50=%.4f, mean=%.4f", p50Mid, meanMid);
+            LOGI("bright band:luma > 200  -> alpha p50=%.4f, mean=%.4f", p50Bright, meanBright);
+
+            vkUnmapMemory(mDevice, mReadbackMem);
+        }
+
+        // PASS 2: Guided OFF (same frame!)
+        LOGI("COMPOSITE guided=off");
+        vkResetCommandBuffer(curCmd, 0);
+        vkBeginCommandBuffer(curCmd, &bInfo);
+
+        transition(mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgBlurred, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        transition(mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
+        AlphaPushConstants pcAlphaOff{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, 1u };
+        vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
+        vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
+        vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOff);
+        vkCmdDispatch(curCmd, gxWork, gyWork, 1);
+        vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeGather);
+        vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlGather, 0, 1, &mSetGather, 0, nullptr);
+        vkCmdPushConstants(curCmd, mPlGather, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(GatherPushConstants), &pcGather);
+        vkCmdDispatch(curCmd, gxWork, gyWork, 1);
+        vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
+
+        vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
+        vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetComp527, 0, nullptr);
+        vkCmdPushConstants(curCmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CompositePushConstants), &pcComp527);
+        vkCmdDispatch(curCmd, gx527, gy527, 1);
+
+        transition(mImgComp527, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdCopyImageToBuffer(curCmd, mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyComp);
+        vkEndCommandBuffer(curCmd);
+
+        vkQueueSubmit(mComputeQueue, 1, &sInfo1, VK_NULL_HANDLE);
+        vkQueueWaitIdle(mComputeQueue);
+
+        pMap = nullptr;
+        vkMapMemory(mDevice, mReadbackMem, 0, 2000000, 0, &pMap);
+        if (pMap) {
+            uint8_t* pBytes = (uint8_t*)pMap;
+            savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_off.png", mStillW, mStillH, pBytes);
+            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_off.png", mStillW, mStillH, pBytes);
+            vkUnmapMemory(mDevice, mReadbackMem);
+        }
+        LOGI("=== GUIDED A/B DIAGNOSTIC COMPLETE ===");
+
+        vkResetCommandBuffer(curCmd, 0);
+        vkBeginCommandBuffer(curCmd, &bInfo);
+    }
 
     // 1. CoC Pass
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeCoc);
@@ -1203,10 +1612,11 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     };
 
     createImage(mStillW, mStillH, VK_FORMAT_R32_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgDepth, &mMemDepth);
-    createImage(mStillW, mStillH, VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgCoc, &mMemCoc);
-    createImage(mStillW, mStillH, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgAlpha, &mMemAlpha);
-    createImage(mStillW, mStillH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT, &mImgBlurred, &mMemBlurred);
+    createImage(mStillW, mStillH, VK_FORMAT_R16_SFLOAT, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgCoc, &mMemCoc);
+    createImage(mStillW, mStillH, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgAlpha, &mMemAlpha);
+    createImage(mStillW, mStillH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgBlurred, &mMemBlurred);
     createImage(mFullW, mFullH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgOutFull, &mMemOutFull);
+    createImage(mStillW, mStillH, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &mImgComp527, &mMemComp527);
 
     // Alpha low-res input image (256x256 from NPU)
     createImage(256, 256, VK_FORMAT_R8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &mImgAlphaLow, &mMemAlphaLow);
@@ -1217,6 +1627,7 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     mViewBlurred = createView(mImgBlurred, VK_FORMAT_R8G8B8A8_UNORM);
     mViewOutFull = createView(mImgOutFull, VK_FORMAT_R8G8B8A8_UNORM);
     mViewAlphaLow = createView(mImgAlphaLow, VK_FORMAT_R8_UNORM);
+    mViewComp527 = createView(mImgComp527, VK_FORMAT_R8G8B8A8_UNORM);
 
     // Still Bokeh dedicated resources (eliminates preview contention & freeze)
     mStillGatherW = 1020;
@@ -1995,7 +2406,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         }
 
         // 1. Guided Filter Alpha Pass on this tile
-        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH };
+        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u) };
         vkCmdBindPipeline(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaStill, 0, nullptr);
         vkCmdPushConstants(cCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaSlice);
@@ -2169,16 +2580,19 @@ void VulkanPipeline::destroy() {
         vkDestroyImageView(mDevice, mViewAlpha, nullptr);
         vkDestroyImageView(mDevice, mViewBlurred, nullptr);
         vkDestroyImageView(mDevice, mViewOutFull, nullptr);
+        if (mViewComp527 != VK_NULL_HANDLE) vkDestroyImageView(mDevice, mViewComp527, nullptr);
         vkDestroyImage(mDevice, mImgDepth, nullptr);
         vkDestroyImage(mDevice, mImgCoc, nullptr);
         vkDestroyImage(mDevice, mImgAlpha, nullptr);
         vkDestroyImage(mDevice, mImgBlurred, nullptr);
         vkDestroyImage(mDevice, mImgOutFull, nullptr);
+        if (mImgComp527 != VK_NULL_HANDLE) vkDestroyImage(mDevice, mImgComp527, nullptr);
         vkFreeMemory(mDevice, mMemDepth, nullptr);
         vkFreeMemory(mDevice, mMemCoc, nullptr);
         vkFreeMemory(mDevice, mMemAlpha, nullptr);
         vkFreeMemory(mDevice, mMemBlurred, nullptr);
         vkFreeMemory(mDevice, mMemOutFull, nullptr);
+        if (mMemComp527 != VK_NULL_HANDLE) vkFreeMemory(mDevice, mMemComp527, nullptr);
         if (mUploadStagingBuffer != VK_NULL_HANDLE) vkDestroyBuffer(mDevice, mUploadStagingBuffer, nullptr);
         if (mUploadStagingMem != VK_NULL_HANDLE) vkFreeMemory(mDevice, mUploadStagingMem, nullptr);
         if (mReadbackBuffer != VK_NULL_HANDLE) vkDestroyBuffer(mDevice, mReadbackBuffer, nullptr);

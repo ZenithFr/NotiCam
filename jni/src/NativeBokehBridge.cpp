@@ -169,6 +169,13 @@ Java_com_zenith_auxcam_MainActivity_nativeSetThermalThrottled(JNIEnv* env, jclas
 }
 
 extern "C" JNIEXPORT void JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeSetDisableGuided(JNIEnv* env, jclass clazz, jboolean disable) {
+    if (gPipeline) {
+        gPipeline->setDisableGuided(disable == JNI_TRUE);
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeDestroyEngine(JNIEnv* env, jobject thiz) {
     LOGI("nativeDestroyEngine called");
     if (gPipeline) {

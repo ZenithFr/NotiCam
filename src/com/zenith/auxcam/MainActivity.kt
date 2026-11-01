@@ -51,6 +51,11 @@ class MainActivity : ComponentActivity(), NativeBridge {
 
         extractAssetsIfNeeded()
 
+        val disableGuidedIntent = intent?.getBooleanExtra("disable_guided", false) ?: false
+        if (disableGuidedIntent) {
+            DISABLE_GUIDED = true
+        }
+
         controller = CameraController(this, this)
 
         setContent {
@@ -140,6 +145,10 @@ class MainActivity : ComponentActivity(), NativeBridge {
         }
     }
 
+    override fun setDisableGuided(disable: Boolean) {
+        DISABLE_GUIDED = disable
+    }
+
     override fun destroyEngine() {
         try {
             nativeDestroyEngine()
@@ -189,7 +198,8 @@ class MainActivity : ComponentActivity(), NativeBridge {
             val shaderList = assets.list("shaders") ?: return
             for (name in shaderList) {
                 val outFile = java.io.File(shaderDir, name)
-                if (!outFile.exists() || outFile.length() == 0L) {
+                val assetLen = try { assets.open("shaders/$name").use { it.available().toLong() } } catch (_: Throwable) { -1L }
+                if (!outFile.exists() || outFile.length() == 0L || (assetLen > 0 && outFile.length() != assetLen)) {
                     assets.open("shaders/$name").use { input ->
                         outFile.outputStream().use { output ->
                             input.copyTo(output)
@@ -234,5 +244,18 @@ class MainActivity : ComponentActivity(), NativeBridge {
         /** Static on the Java side (`jclass`), so it must stay in the companion. */
         @JvmStatic
         private external fun nativeSetThermalThrottled(throttled: Boolean)
+
+        var DISABLE_GUIDED: Boolean = false
+            set(value) {
+                field = value
+                try {
+                    nativeSetDisableGuided(value)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "nativeSetDisableGuided failed: ${t.message}")
+                }
+            }
+
+        @JvmStatic
+        private external fun nativeSetDisableGuided(disable: Boolean)
     }
 }
