@@ -116,6 +116,18 @@ struct AlphaPushConstants {
     uint32_t stubAlphaMode;
     uint32_t yOffset;
     uint32_t DISABLE_GUIDED;
+    uint32_t gateBypass;
+    uint32_t recordStats;
+};
+
+struct GateStatsData {
+    uint32_t gatedCount;
+    uint32_t totalCount;
+    uint32_t gateSum;
+    uint32_t alphaBeforeSum;
+    uint32_t alphaAfterSum;
+    uint32_t preHist[10];
+    uint32_t postHist[10];
 };
 
 void VulkanPipeline::setDisableGuided(bool disable) {
@@ -1086,7 +1098,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     VkDescriptorImageInfo descPreviewStore{ VK_NULL_HANDLE, mViewPreviewOut, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descComp527Store{ VK_NULL_HANDLE, mViewComp527, VK_IMAGE_LAYOUT_GENERAL };
 
-    VkWriteDescriptorSet writes[16]{};
+    VkDescriptorBufferInfo descStatsBuffer{ mGateStatsBuffer, 0, sizeof(GateStatsData) };
+
+    VkWriteDescriptorSet writes[20]{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = mSetGather;
     writes[0].dstBinding = 0;
@@ -1171,42 +1185,49 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     writes[11].descriptorCount = 1;
     writes[11].pImageInfo = &descDepthSample;
 
+    writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[12].dstSet = mSetAlphaPreview;
+    writes[12].dstBinding = 4;
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[12].descriptorCount = 1;
+    writes[12].pBufferInfo = &descStatsBuffer;
+
     static bool sDepthBoundLogged = false;
     if (!sDepthBoundLogged) {
         LOGI("ALPHA_DEPTH_BOUND unconditional=1");
         sDepthBoundLogged = true;
     }
 
-    uint32_t numWrites = 12;
+    uint32_t numWrites = 13;
     if (mSetComp527 != VK_NULL_HANDLE) {
-        writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[12].dstSet = mSetComp527;
-        writes[12].dstBinding = 0;
-        writes[12].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[12].descriptorCount = 1;
-        writes[12].pImageInfo = &descYuv;
-
         writes[13].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[13].dstSet = mSetComp527;
-        writes[13].dstBinding = 1;
+        writes[13].dstBinding = 0;
         writes[13].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[13].descriptorCount = 1;
-        writes[13].pImageInfo = &descBlurredSample;
+        writes[13].pImageInfo = &descYuv;
 
         writes[14].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[14].dstSet = mSetComp527;
-        writes[14].dstBinding = 2;
+        writes[14].dstBinding = 1;
         writes[14].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[14].descriptorCount = 1;
-        writes[14].pImageInfo = &descAlphaSample;
+        writes[14].pImageInfo = &descBlurredSample;
 
         writes[15].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[15].dstSet = mSetComp527;
-        writes[15].dstBinding = 3;
-        writes[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[15].dstBinding = 2;
+        writes[15].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         writes[15].descriptorCount = 1;
-        writes[15].pImageInfo = &descComp527Store;
-        numWrites = 16;
+        writes[15].pImageInfo = &descAlphaSample;
+
+        writes[16].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[16].dstSet = mSetComp527;
+        writes[16].dstBinding = 3;
+        writes[16].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[16].descriptorCount = 1;
+        writes[16].pImageInfo = &descComp527Store;
+        numWrites = 17;
     }
 
     vkUpdateDescriptorSets(mDevice, numWrites, writes, 0, nullptr);
@@ -1286,7 +1307,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, (float)mStillW };
-    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u) };
+    AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u), 0u, 0u };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f, 0 };
     CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90, 0 };
 
@@ -1398,6 +1419,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkQueueWaitIdle(mComputeQueue);
 
         // Process Pass 1
+        std::vector<uint8_t> pass1Rgba;
         void* pMap = nullptr;
         vkMapMemory(mDevice, mReadbackMem, 0, totalMapBytes, 0, &pMap);
         if (pMap) {
@@ -1405,8 +1427,12 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             vkInvalidateMappedMemoryRanges(mDevice, 1, &range);
 
             uint8_t* pBytes = (uint8_t*)pMap;
+            pass1Rgba.assign(pBytes + compOffset, pBytes + compOffset + compBytes);
             savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
             savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
+            savePngRgba("/data/user/0/com.zenith.auxcam/files/diag/wire_gate_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
+            savePngRgba("/sdcard/Pictures/NotiCam/wire_gate_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
+            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/wire_gate_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
             savePngRgba("/sdcard/Pictures/NotiCam/wire_gate_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
             savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/wire_gate_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
 
@@ -1488,8 +1514,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             vkUnmapMemory(mDevice, mReadbackMem);
         }
 
-        // PASS 2: Guided OFF / Gate OFF (same frame!)
-        LOGI("COMPOSITE guided=off / wire_gate_off");
+        // PASS 2: Gate OFF (gateBypass = 1, same real s1)
+        LOGI("COMPOSITE wire_gate_off: gateBypass=1 s1=%.2fm", s1);
         vkResetCommandBuffer(curCmd, 0);
         vkBeginCommandBuffer(curCmd, &bInfo);
 
@@ -1497,8 +1523,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         transition(mImgBlurred, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         transition(mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-        // s1 = 100.0m disables the depth gate in alpha.comp
-        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, 100.0f, (hasRealAlpha ? 0u : 1u), 0, 1u };
+        // s1 at real focus, DISABLE_GUIDED = 0, gateBypass = 1, recordStats = 0
+        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u, 1u, 0u };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOff);
@@ -1527,13 +1553,50 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkMapMemory(mDevice, mReadbackMem, 0, compBytes, 0, &pMap);
         if (pMap) {
             uint8_t* pBytes = (uint8_t*)pMap;
-            savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_off.png", mPreviewW, mPreviewH, pBytes);
-            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_off.png", mPreviewW, mPreviewH, pBytes);
+            savePngRgba("/data/user/0/com.zenith.auxcam/files/diag/wire_gate_off.png", mPreviewW, mPreviewH, pBytes);
             savePngRgba("/sdcard/Pictures/NotiCam/wire_gate_off.png", mPreviewW, mPreviewH, pBytes);
             savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/wire_gate_off.png", mPreviewW, mPreviewH, pBytes);
+
+            // Compute diff metrics between Pass 1 (gate ON) and Pass 2 (gate OFF)
+            uint32_t totalPixels = mPreviewW * mPreviewH;
+            uint32_t changedPixels = 0;
+            uint32_t changedOver4 = 0;
+            int maxDiff = 0;
+            int minX = (int)mPreviewW, minY = (int)mPreviewH, maxX = -1, maxY = -1;
+            uint32_t lumaBands[4] = {0, 0, 0, 0};
+
+            for (uint32_t y = 0; y < mPreviewH; ++y) {
+                for (uint32_t x = 0; x < mPreviewW; ++x) {
+                    size_t idx = (y * mPreviewW + x) * 4;
+                    int dr = std::abs((int)pass1Rgba[idx] - (int)pBytes[idx]);
+                    int dg = std::abs((int)pass1Rgba[idx + 1] - (int)pBytes[idx + 1]);
+                    int db = std::abs((int)pass1Rgba[idx + 2] - (int)pBytes[idx + 2]);
+                    int dMax = std::max({dr, dg, db});
+                    if (dMax > 0) {
+                        changedPixels++;
+                        if (dMax > maxDiff) maxDiff = dMax;
+                        if (dMax > 4) changedOver4++;
+                        if ((int)x < minX) minX = (int)x;
+                        if ((int)x > maxX) maxX = (int)x;
+                        if ((int)y < minY) minY = (int)y;
+                        if ((int)y > maxY) maxY = (int)y;
+
+                        float luma = 0.299f * pass1Rgba[idx] + 0.587f * pass1Rgba[idx + 1] + 0.114f * pass1Rgba[idx + 2];
+                        int band = std::clamp((int)(luma / 64.0f), 0, 3);
+                        lumaBands[band]++;
+                    }
+                }
+            }
+
+            double pctChanged = 100.0 * (double)changedPixels / (double)totalPixels;
+            LOGI("WIRE_GATE_DIFF: pixelsChanged=%u/%u (%.2f%%) maxDiff=%d/255 countOver4=%u bbox=[%d,%d,%d,%d] lumaBands=[0-63:%u, 64-127:%u, 128-191:%u, 192-255:%u]",
+                 changedPixels, totalPixels, pctChanged, maxDiff, changedOver4,
+                 (minX <= maxX ? minX : 0), (minY <= maxY ? minY : 0), (minX <= maxX ? maxX : 0), (minY <= maxY ? maxY : 0),
+                 lumaBands[0], lumaBands[1], lumaBands[2], lumaBands[3]);
+
             vkUnmapMemory(mDevice, mReadbackMem);
         }
-        LOGI("=== GUIDED A/B DIAGNOSTIC COMPLETE ===");
+        LOGI("=== WIRE GATE A/B DIAGNOSTIC COMPLETE ===");
 
         vkResetCommandBuffer(curCmd, 0);
         vkBeginCommandBuffer(curCmd, &bInfo);
@@ -1551,6 +1614,17 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     // 2. Guided Filter Alpha Pass
+    static auto sLastGateStatsLog = std::chrono::steady_clock::now();
+    bool shouldRecordStats = false;
+    auto nowGateStats = std::chrono::steady_clock::now();
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(nowGateStats - sLastGateStatsLog).count() >= 1000) {
+        shouldRecordStats = true;
+        if (mGateStatsMapped) {
+            memset(mGateStatsMapped, 0, sizeof(GateStatsData));
+        }
+    }
+    pcAlpha.recordStats = shouldRecordStats ? 1u : 0u;
+
     vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
     vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
     vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlpha);
@@ -1613,6 +1687,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     submitInfo.signalSemaphoreCount = 1;
     submitInfo.pSignalSemaphores = &mRenderFinishedSemaphores[mCurrentFrame];
 
+    struct timespec tsBootSubmit{};
+    clock_gettime(CLOCK_BOOTTIME, &tsBootSubmit);
+    int64_t bootNsSubmit = (int64_t)tsBootSubmit.tv_sec * 1000000000LL + tsBootSubmit.tv_nsec;
     auto tSubmit = std::chrono::high_resolution_clock::now();
     uint64_t tSubNs = std::chrono::duration_cast<std::chrono::nanoseconds>(tSubmit.time_since_epoch()).count();
     __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "preview_submitted: %llu ns", (unsigned long long)tSubNs);
@@ -1622,6 +1699,27 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
         // Synchronous wait on fence: guarantees GPU has completely rendered before present
         vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX);
+
+        // Read back gate stats if recorded
+        if (shouldRecordStats && mGateStatsMapped != nullptr) {
+            sLastGateStatsLog = nowGateStats;
+            auto* stats = reinterpret_cast<const GateStatsData*>(mGateStatsMapped);
+            if (stats->totalCount > 0) {
+                double gatedPct = (double)stats->gatedCount / (double)stats->totalCount;
+                double meanGate = ((double)stats->gateSum / 1000.0) / (double)stats->totalCount;
+                double alphaMassBefore = (double)stats->alphaBeforeSum / 1000.0;
+                double alphaMassAfter = (double)stats->alphaAfterSum / 1000.0;
+                double ratio = (alphaMassBefore > 0.0001) ? (alphaMassAfter / alphaMassBefore) : 1.0;
+                LOGI("ALPHA_GATE_STATS: gatedPct=%.4f meanGate=%.4f alphaMassBefore=%.2f alphaMassAfter=%.2f ratio=%.4f",
+                     gatedPct, meanGate, alphaMassBefore, alphaMassAfter, ratio);
+                LOGI("ALPHA_PRE_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
+                     stats->preHist[0], stats->preHist[1], stats->preHist[2], stats->preHist[3], stats->preHist[4],
+                     stats->preHist[5], stats->preHist[6], stats->preHist[7], stats->preHist[8], stats->preHist[9]);
+                LOGI("ALPHA_POST_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
+                     stats->postHist[0], stats->postHist[1], stats->postHist[2], stats->postHist[3], stats->postHist[4],
+                     stats->postHist[5], stats->postHist[6], stats->postHist[7], stats->postHist[8], stats->postHist[9]);
+            }
+        }
 
         // 7. Present to Android SurfaceView
         VkPresentInfoKHR presentInfo{ VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
@@ -1857,6 +1955,26 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
         vkBindBufferMemory(mDevice, mReadbackBuffer, mReadbackMem, 0);
     }
 
+    // SSBO for depth gate statistics (Task 2)
+    {
+        VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = 256;
+        bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        vkCreateBuffer(mDevice, &bi, nullptr, &mGateStatsBuffer);
+
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(mDevice, mGateStatsBuffer, &mr);
+        VkMemoryAllocateInfo ai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        ai.allocationSize = mr.size;
+        ai.memoryTypeIndex = findMemoryType(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        vkAllocateMemory(mDevice, &ai, nullptr, &mGateStatsMem);
+        vkBindBufferMemory(mDevice, mGateStatsBuffer, mGateStatsMem, 0);
+        vkMapMemory(mDevice, mGateStatsMem, 0, mr.size, 0, &mGateStatsMapped);
+        if (mGateStatsMapped) {
+            memset(mGateStatsMapped, 0, sizeof(GateStatsData));
+        }
+    }
+
     // Still completion fence & slice fence for non-blocking tiled interleaving
     VkFenceCreateInfo fInfo{ VK_STRUCTURE_TYPE_FENCE_CREATE_INFO, nullptr, 0 };
     vkCreateFence(mDevice, &fInfo, nullptr, &mStillFence);
@@ -1891,16 +2009,18 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     mStillCmd = mStillCmdSlices[0];
 
     // Descriptor Pool
-    VkDescriptorPoolSize poolSizes[2]{};
+    VkDescriptorPoolSize poolSizes[3]{};
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     poolSizes[0].descriptorCount = 50;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[1].descriptorCount = 30;
+    poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    poolSizes[2].descriptorCount = 10;
 
     VkDescriptorPoolCreateInfo dpInfo{};
     dpInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpInfo.maxSets = 30;
-    dpInfo.poolSizeCount = 2;
+    dpInfo.poolSizeCount = 3;
     dpInfo.pPoolSizes = poolSizes;
     vkCreateDescriptorPool(mDevice, &dpInfo, nullptr, &mStillDescPool);
 
@@ -2027,7 +2147,7 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     vkCreateComputePipelines(mDevice, VK_NULL_HANDLE, 1, &pipeInfoComp, nullptr, &mPipeComp);
 
     // 4. Guided Filter Pipeline (alpha.comp)
-    VkDescriptorSetLayoutBinding alphaBindings[4]{};
+    VkDescriptorSetLayoutBinding alphaBindings[5]{};
     alphaBindings[0].binding = 0;
     alphaBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     alphaBindings[0].descriptorCount = 1;
@@ -2051,7 +2171,12 @@ bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     alphaBindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     alphaBindings[3].pImmutableSamplers = &mStillSampler;
 
-    dslInfo.bindingCount = 4;
+    alphaBindings[4].binding = 4;
+    alphaBindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    alphaBindings[4].descriptorCount = 1;
+    alphaBindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    dslInfo.bindingCount = 5;
     dslInfo.pBindings = alphaBindings;
     vkCreateDescriptorSetLayout(mDevice, &dslInfo, nullptr, &mDslAlpha);
 
@@ -2347,7 +2472,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     VkDescriptorImageInfo descDepthSample{ VK_NULL_HANDLE, mViewDepthStill, VK_IMAGE_LAYOUT_GENERAL };
     VkDescriptorImageInfo descOutStoreFull{ VK_NULL_HANDLE, mViewOutFull, VK_IMAGE_LAYOUT_GENERAL };
 
-    VkWriteDescriptorSet writes[12]{};
+    VkWriteDescriptorSet writes[13]{};
     // Gather writes
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[0].dstSet = mSetGatherStill;
@@ -2406,6 +2531,14 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     writes[7].descriptorCount = 1;
     writes[7].pImageInfo = &descDepthSample;
 
+    VkDescriptorBufferInfo descStatsBuffer{ mGateStatsBuffer, 0, sizeof(GateStatsData) };
+    writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[12].dstSet = mSetAlphaStill;
+    writes[12].dstBinding = 4;
+    writes[12].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[12].descriptorCount = 1;
+    writes[12].pBufferInfo = &descStatsBuffer;
+
     // Composite writes
     writes[8].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[8].dstSet = mSetCompStill;
@@ -2435,7 +2568,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     writes[11].descriptorCount = 1;
     writes[11].pImageInfo = &descOutStoreFull;
 
-    vkUpdateDescriptorSets(mDevice, 12, writes, 0, nullptr);
+    vkUpdateDescriptorSets(mDevice, 13, writes, 0, nullptr);
 
     uint32_t gxWork = (mStillGatherW + 15) / 16;
     uint32_t gyWork = (mStillGatherH + 15) / 16;
@@ -2505,6 +2638,9 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     vkCmdPipelineBarrier(cmd0, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
     vkEndCommandBuffer(cmd0);
 
+    struct timespec tsBootSubmit{};
+    clock_gettime(CLOCK_BOOTTIME, &tsBootSubmit);
+    int64_t bootNsSubmit = (int64_t)tsBootSubmit.tv_sec * 1000000000LL + tsBootSubmit.tv_nsec;
     auto tSubmit = std::chrono::high_resolution_clock::now();
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
@@ -2568,7 +2704,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         }
 
         // 1. Guided Filter Alpha Pass on this tile
-        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u) };
+        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u), 0u, 0u };
         vkCmdBindPipeline(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaStill, 0, nullptr);
         vkCmdPushConstants(cCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaSlice);
@@ -2685,6 +2821,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         outTimestamps[0] = std::chrono::duration_cast<std::chrono::nanoseconds>(tBufferComplete - tSubmit).count();
         outTimestamps[1] = bootNsBufferComplete; // t4: GPU Composite Complete
         outTimestamps[2] = bootNsFileClosed;     // t5: File Closed
+        outTimestamps[3] = bootNsSubmit;         // t3: GPU Command Buffer Submitted
     }
 
     return true;
@@ -2759,6 +2896,18 @@ void VulkanPipeline::destroy() {
         if (mUploadStagingMem != VK_NULL_HANDLE) vkFreeMemory(mDevice, mUploadStagingMem, nullptr);
         if (mReadbackBuffer != VK_NULL_HANDLE) vkDestroyBuffer(mDevice, mReadbackBuffer, nullptr);
         if (mReadbackMem != VK_NULL_HANDLE) vkFreeMemory(mDevice, mReadbackMem, nullptr);
+        if (mGateStatsBuffer != VK_NULL_HANDLE) {
+            if (mGateStatsMapped != nullptr) {
+                vkUnmapMemory(mDevice, mGateStatsMem);
+                mGateStatsMapped = nullptr;
+            }
+            vkDestroyBuffer(mDevice, mGateStatsBuffer, nullptr);
+            mGateStatsBuffer = VK_NULL_HANDLE;
+        }
+        if (mGateStatsMem != VK_NULL_HANDLE) {
+            vkFreeMemory(mDevice, mGateStatsMem, nullptr);
+            mGateStatsMem = VK_NULL_HANDLE;
+        }
         if (mStillFence != VK_NULL_HANDLE) vkDestroyFence(mDevice, mStillFence, nullptr);
         if (mStillSliceFence != VK_NULL_HANDLE) vkDestroyFence(mDevice, mStillSliceFence, nullptr);
         if (mStillQueryPool != VK_NULL_HANDLE) vkDestroyQueryPool(mDevice, mStillQueryPool, nullptr);

@@ -6,11 +6,22 @@ layout(local_size_x = 16, local_size_y = 16) in;
 // 1: Sampled Low-Res Alpha Matte (256x256 soft probability from NPU)
 // 2: Output Refined Alpha Matte (R8)
 // 3: Metric Depth texture (R32F in meters)
+// 4: SSBO for Depth Gate statistics
 
 layout(binding = 0) uniform sampler2D uLuma;
 layout(binding = 1) uniform sampler2D uAlphaIn;
 layout(binding = 2, r8) writeonly uniform image2D uOutAlpha;
 layout(binding = 3) uniform sampler2D uDepth;
+
+layout(std430, binding = 4) buffer GateStats {
+    uint gatedCount;
+    uint totalCount;
+    uint gateSum;
+    uint alphaBeforeSum;
+    uint alphaAfterSum;
+    uint preHist[10];
+    uint postHist[10];
+} stats;
 
 layout(push_constant) uniform AlphaPushConstants {
     uint width;
@@ -19,6 +30,8 @@ layout(push_constant) uniform AlphaPushConstants {
     uint stubAlphaMode; // 1 = depth-derived alpha (stub), 0 = guided filter real alpha
     uint yOffset;
     uint DISABLE_GUIDED; // 1 = bypass guided filter, read pre-guided baseAlpha directly
+    uint gateBypass; // 1 = bypass depth gate, 0 = depth gate active
+    uint recordStats; // 1 = record gate stats, 0 = skip
 } pc;
 
 void main() {
@@ -70,13 +83,32 @@ void main() {
     if (pc.stubAlphaMode == 0) {
         // Low-light amplitude recovery. In good light this is a no-op.
         alpha = smoothstep(0.35, 0.85, alpha);
+        float alphaBefore = alpha;
 
         // Depth gate: anything clearly beyond subject depth is
         // background regardless of the AI's confidence.
-        vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
-        float depth_m = texture(uDepth, depthUv).r;
-        float gate = 1.0 - smoothstep(s1 * 1.2, s1 * 2.5, depth_m);
-        alpha *= gate;
+        float gate = 1.0;
+        if (pc.gateBypass == 0) {
+            vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
+            float depth_m = texture(uDepth, depthUv).r;
+            gate = 1.0 - smoothstep(s1 * 1.2, s1 * 2.5, depth_m);
+            alpha *= gate;
+        }
+
+        if (pc.recordStats != 0) {
+            atomicAdd(stats.totalCount, 1);
+            if (gate < 0.999) {
+                atomicAdd(stats.gatedCount, 1);
+            }
+            atomicAdd(stats.gateSum, uint(gate * 1000.0));
+            atomicAdd(stats.alphaBeforeSum, uint(alphaBefore * 1000.0));
+            atomicAdd(stats.alphaAfterSum, uint(alpha * 1000.0));
+
+            int bPre = clamp(int(alphaBefore * 10.0), 0, 9);
+            atomicAdd(stats.preHist[bPre], 1);
+            int bPost = clamp(int(alpha * 10.0), 0, 9);
+            atomicAdd(stats.postHist[bPost], 1);
+        }
     }
 
     imageStore(uOutAlpha, coord, vec4(alpha, 0.0, 0.0, 1.0));

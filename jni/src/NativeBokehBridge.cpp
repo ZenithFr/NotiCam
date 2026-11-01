@@ -134,7 +134,7 @@ Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
         outPath = env->GetStringUTFChars(outPathStr, nullptr);
     }
 
-    int64_t ts[3] = {0, 0, 0};
+    int64_t ts[4] = {0, 0, 0, 0};
     LOGI("nativeProcessStillBokeh: calling processStillBokeh with outPath=%s, alphaMatte=%p (%dx%d)", outPath ? outPath : "null", alphaBytes, alphaW, alphaH);
     bool ok = gPipeline->processStillBokeh(
             hb,
@@ -161,9 +161,11 @@ Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
         env->ReleaseStringUTFChars(outPathStr, outPath);
     }
 
-    if (timestampsOut != nullptr && env->GetArrayLength(timestampsOut) >= 3) {
-        jlong jts[3] = { static_cast<jlong>(ts[0]), static_cast<jlong>(ts[1]), static_cast<jlong>(ts[2]) };
-        env->SetLongArrayRegion(timestampsOut, 0, 3, jts);
+    if (timestampsOut != nullptr) {
+        jsize len = env->GetArrayLength(timestampsOut);
+        jlong jts[4] = { static_cast<jlong>(ts[0]), static_cast<jlong>(ts[1]), static_cast<jlong>(ts[2]), static_cast<jlong>(ts[3]) };
+        jsize toCopy = len < 4 ? len : 4;
+        env->SetLongArrayRegion(timestampsOut, 0, toCopy, jts);
     }
 
     return ok ? JNI_TRUE : JNI_FALSE;

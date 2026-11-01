@@ -220,6 +220,10 @@ class CameraController(
     private var latestDepth: ByteArray? = null
 
     private var shutterClickNs = 0L
+    private var shutterDispatchNs = 0L
+    private var lastPreviewTimestampNs = 0L
+    private var maxPreviewGapNsDuringCapture = 0L
+    private var capturePreviewFrames = 0
     private var latestPhotoUri: Uri? = null
     private var lensSwitching = false
 
@@ -602,6 +606,17 @@ class CameraController(
 
     private fun onColorImage(reader: ImageReader) {
         val t0 = SystemClock.elapsedRealtimeNanos()
+        val nowPreviewNs = t0
+        if (lastPreviewTimestampNs > 0L) {
+            val gapNs = nowPreviewNs - lastPreviewTimestampNs
+            if (stillCaptureInProgress.get()) {
+                capturePreviewFrames++
+                if (gapNs > maxPreviewGapNsDuringCapture) {
+                    maxPreviewGapNsDuringCapture = gapNs
+                }
+            }
+        }
+        lastPreviewTimestampNs = nowPreviewNs
         val image = reader.acquireLatestImage() ?: return
         try {
             try {
@@ -695,7 +710,7 @@ class CameraController(
                 Log.i(TAG, "capture resolution=${state.resolution.label}")
 
                 val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
-                val timestamps = LongArray(3)
+                val timestamps = LongArray(4)
                 native.processStill(
                     buffer,
                     latestDepth,
@@ -711,9 +726,35 @@ class CameraController(
                 )
                 val fenceCompleteNs = timestamps[1]
                 t4 = if (fenceCompleteNs > 0L) fenceCompleteNs else SystemClock.elapsedRealtimeNanos()
+                val t3Gpu = if (timestamps[3] > 0L) timestamps[3] else t3
                 Log.i("TIMING_FREEZE", "composite_complete: $t4 ns")
                 gpuElapsedNs = timestamps[0]
                 buffer.close()
+
+                val dispatchNs = shutterDispatchNs
+                val dT1 = (dispatchNs - shutterNs) / 1_000_000
+                val dT2 = (t2 - dispatchNs) / 1_000_000
+                val dT3 = (t3Gpu - t2) / 1_000_000
+                val dT4 = (t4 - t3Gpu) / 1_000_000
+                val dTotal = (t4 - shutterNs) / 1_000_000
+
+                Log.i(
+                    TAG,
+                    String.format(
+                        Locale.US,
+                        "STILL_RAW_TIMINGS: t0=%d t1=%d t2=%d t3=%d t4=%d | t1-t0=%dms t2-t1=%dms t3-t2=%dms t4-t3=%dms total=%dms",
+                        shutterNs,
+                        dispatchNs,
+                        t2,
+                        t3Gpu,
+                        t4,
+                        dT1,
+                        dT2,
+                        dT3,
+                        dT4,
+                        dTotal,
+                    ),
+                )
 
                 Log.i(
                     TAG,
@@ -728,6 +769,10 @@ class CameraController(
                         outPath,
                     ),
                 )
+
+                val capFrames = capturePreviewFrames
+                val maxGapMs = maxPreviewGapNsDuringCapture / 1_000_000
+                Log.i(TAG, "PREVIEW_DURING_STILL: framesPresent=$capFrames maxGapMs=${maxGapMs}ms")
             }
         } catch (t: Throwable) {
             Log.e(TAG, "still processing failed", t)
@@ -969,6 +1014,8 @@ class CameraController(
         lastShutterTriggerNs = nowNs
         Log.i(TAG, "triggerCapture: highQuality=$highQuality, enableZsl=$enableZsl")
         main.postDelayed({ stillCaptureInProgress.set(false) }, 4000L) // Safety watchdog
+        maxPreviewGapNsDuringCapture = 0L
+        capturePreviewFrames = 0
         shutterClickNs = SystemClock.elapsedRealtimeNanos()
         Log.i("TIMING_FREEZE", "shutter_press: $shutterClickNs ns")
         update {
@@ -979,6 +1026,8 @@ class CameraController(
         }
         try {
             svc.triggerStillWithZsl(shutterClickNs, highQuality, enableZsl)
+            shutterDispatchNs = SystemClock.elapsedRealtimeNanos()
+            Log.i("TIMING_FREEZE", "shutter_dispatched: $shutterDispatchNs ns")
         } catch (e: RemoteException) {
             stillCaptureInProgress.set(false)
             Log.e(TAG, "triggerStill failed", e)

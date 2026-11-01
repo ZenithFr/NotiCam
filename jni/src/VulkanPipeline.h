@@ -98,8 +98,9 @@ private:
     VkImage mImgDepth{VK_NULL_HANDLE}, mImgCoc{VK_NULL_HANDLE}, mImgAlpha{VK_NULL_HANDLE}, mImgBlurred{VK_NULL_HANDLE}, mImgOutFull{VK_NULL_HANDLE};
     VkDeviceMemory mMemDepth{VK_NULL_HANDLE}, mMemCoc{VK_NULL_HANDLE}, mMemAlpha{VK_NULL_HANDLE}, mMemBlurred{VK_NULL_HANDLE}, mMemOutFull{VK_NULL_HANDLE};
     VkImageView mViewDepth{VK_NULL_HANDLE}, mViewCoc{VK_NULL_HANDLE}, mViewAlpha{VK_NULL_HANDLE}, mViewBlurred{VK_NULL_HANDLE}, mViewOutFull{VK_NULL_HANDLE};
-    VkBuffer mUploadStagingBuffer{VK_NULL_HANDLE}, mReadbackBuffer{VK_NULL_HANDLE};
-    VkDeviceMemory mUploadStagingMem{VK_NULL_HANDLE}, mReadbackMem{VK_NULL_HANDLE};
+    VkBuffer mUploadStagingBuffer{VK_NULL_HANDLE}, mReadbackBuffer{VK_NULL_HANDLE}, mGateStatsBuffer{VK_NULL_HANDLE};
+    VkDeviceMemory mUploadStagingMem{VK_NULL_HANDLE}, mReadbackMem{VK_NULL_HANDLE}, mGateStatsMem{VK_NULL_HANDLE};
+    void* mGateStatsMapped{nullptr};
     VkQueryPool mStillQueryPool{VK_NULL_HANDLE};
     VkFence mStillFence{VK_NULL_HANDLE};
     VkFence mStillSliceFence{VK_NULL_HANDLE};
