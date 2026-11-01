@@ -137,6 +137,19 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                         },
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
                     )
+                    if (state.bokehActive && !state.captureBusy && (!state.bokehModelReady || state.bokehLiveSuspended)) {
+                        Text(
+                            text = when {
+                                state.bokehLiveSuspended -> "Live effect paused · portrait still available"
+                                state.bokehModelError != null -> "Portrait unavailable · sharp photo still available"
+                                else -> "Portrait warming up · shutter available"
+                            },
+                            style = CameraType.Caption, color = CameraColors.Label,
+                            modifier = Modifier.align(Alignment.TopCenter).padding(top = 52.dp, start = 16.dp, end = 16.dp)
+                                .cameraGlass(RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 6.dp),
+                            maxLines = 2,
+                        )
+                    }
                     androidx.compose.animation.AnimatedVisibility(
                         visible = state.mode == CaptureMode.Photo,
                         enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.86f, animationSpec = CameraMotion.slide()),

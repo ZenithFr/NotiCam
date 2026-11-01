@@ -4,6 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CameraZoomTest {
+    @Test fun logicalStereoSessionUsesMainLensWithoutChangingPhysicalLenses() {
+        assertEquals("0", CameraZoom.lensForSession("5"))
+        assertEquals("0", CameraZoom.lensForSession(null))
+        for (id in listOf("0", "1", "2", "3")) assertEquals(id, CameraZoom.lensForSession(id))
+        assertEquals(1f, CameraZoom.digitalRatio(1f, CameraZoom.lensForSession("5"), 8f), 0f)
+    }
+
     @Test fun twoTimesAlwaysSelectsOpticalTelephoto() {
         assertEquals("3", CameraZoom.lensForZoom(2f))
         assertEquals("0", CameraZoom.lensForZoom(1f))

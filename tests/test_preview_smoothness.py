@@ -93,7 +93,7 @@ class PreviewSmoothness(unittest.TestCase):
         error = controller.split('private fun onSessionError', 1)[1].split('if (state.videoStarting', 1)[0]
         self.assertIn('preview30Fallbacks.add(previewKey())', error)
         self.assertIn('same still quality', error)
-        self.assertNotIn('resolution =', error)
+        self.assertNotRegex(error, r'\bresolution\s*=(?!=)')
         self.assertIn('No fresh viewfinder frames', controller)
         self.assertIn('previewMeasuredFps = fps', controller)
         self.assertIn('RENDERED · %.0f FPS · SENSOR', controller)

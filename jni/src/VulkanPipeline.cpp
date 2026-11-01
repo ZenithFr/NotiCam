@@ -1,4 +1,5 @@
 #include "VulkanPipeline.h"
+#include "PreviewSubmission.h"
 #include <android/log.h>
 #include <android/thermal.h>
 #include <vector>
@@ -793,8 +794,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     // Wait on fence for current frame in flight
     VkResult fRes = vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, 1000000000ULL);
     if (fRes == VK_SUCCESS) {
-        vkResetFences(mDevice, 1, &mRenderFences[mCurrentFrame]);
-
+        // Keep the fence signalled until acquisition/import/recording succeeded.
+        // Resetting here poisons the slot forever after a dropped acquire.
         static double sLastCoc = 0.0, sLastAlpha = 0.0, sLastGather = 0.0, sLastComp = 0.0, sLastCopy = 0.0, sLastTotalGpu = 0.0;
         // Safely read GPU timestamps from the frame slot that just completed execution
         if (mPreviewQueryPool != VK_NULL_HANDLE && mFrameSubmitted[mCurrentFrame]) {
@@ -878,7 +879,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     // 1. Acquire next swapchain image
     uint32_t imageIndex = 0;
     VkResult res = vkAcquireNextImageKHR(mDevice, mSwapchain, 50000000ULL, mImageAvailableSemaphores[mCurrentFrame], VK_NULL_HANDLE, &imageIndex);
-    if (res != VK_SUCCESS) {
+    if (res != VK_SUCCESS && res != VK_SUBOPTIMAL_KHR) {
         LOGE("vkAcquireNextImageKHR returned %d", res);
         if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR || res == VK_ERROR_SURFACE_LOST_KHR) {
             LOGI("Swapchain out-of-date/lost (%d), rebuilding via recreateSwapchain()", res);
@@ -894,13 +895,21 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     if (!mYuvConverter->importHardwareBuffer(colorBuffer, &importedImg, &importedMem, &importedView)) {
         LOGE("Failed to import AHardwareBuffer into Vulkan in renderFrame");
+        recreateSwapchain(); // Retire the acquired image/signalled acquire semaphore.
         return false;
     }
 
     // Sharp preview is one color composite + present. Do not upload/compute a
     // depth, alpha, CoC or gather result that the bypass shader never samples.
     // The full-resolution processStill() path is separate and unchanged.
-    if (targetFarFieldPx == 0.0f) {
+    const bool usableAlpha = alphaMatte != nullptr && alphaW == 256 && alphaH == 256;
+    bool hasDepthSignal = false;
+    if (depthY8Buffer != nullptr && depthW > 0 && depthH > 0) {
+        for (size_t i = 0; i < static_cast<size_t>(depthW) * depthH; i += 16) {
+            if (depthY8Buffer[i] > 5) { hasDepthSignal = true; break; }
+        }
+    }
+    if (targetFarFieldPx == 0.0f || (!usableAlpha && !hasDepthSignal)) {
         return presentSharpPreview(importedImg, importedMem, importedView, imageIndex);
     }
 
@@ -989,16 +998,6 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             static int sWaitLogCount = 0;
             if ((sWaitLogCount++ % 60) == 0) {
                 LOGI("trigger_guided_ab pending: waiting for subject in viewfinder (hasRealAlpha=%d)...", hasRealAlpha ? 1 : 0);
-            }
-        }
-    }
-
-    bool hasDepthSignal = false;
-    if (depthY8Buffer != nullptr && depthW > 0 && depthH > 0) {
-        for (uint32_t i = 0; i < depthW * depthH; i += 16) {
-            if (depthY8Buffer[i] > 5) {
-                hasDepthSignal = true;
-                break;
             }
         }
     }
@@ -1913,7 +1912,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         DONE = 4
     };
 
-    static BisectConfig sBisectConfig = BisectConfig::CONFIG_A;
+    static BisectConfig sBisectConfig = BisectConfig::DONE;
     static auto sBisectPhaseStart = std::chrono::steady_clock::time_point{};
     static bool sBisectPhaseStarted = false;
     static std::vector<double> sBisectFrameIntervalsMs;
@@ -1987,15 +1986,15 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         SEQ_1 = 1,
         SEQ_2 = 2,
         SEQ_3 = 3,
-        HOLD_2 = 4
+        HOLD_3 = 4
     };
 
-    static EdgeRefineState sEdgeState = EdgeRefineState::SEQ_0;
+    static EdgeRefineState sEdgeState = EdgeRefineState::HOLD_3;
     static auto sEdgePhaseStart = std::chrono::steady_clock::time_point{};
     static bool sEdgePhaseStarted = false;
     static std::vector<AlphaBandMetrics> sEdgeBandMetrics;
 
-    uint32_t curEdgeRefine = 2u;
+    uint32_t curEdgeRefine = 3u; // Preview: guided + contrast; no 25-tap bilateral sweep.
     if (sEdgeRefineOverride >= 0) {
         curEdgeRefine = static_cast<uint32_t>(sEdgeRefineOverride);
         if (sEdgeRefineOverrideChanged) {
@@ -2021,14 +2020,14 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             case EdgeRefineState::SEQ_1: curEdgeRefine = 1u; break;
             case EdgeRefineState::SEQ_2: curEdgeRefine = 2u; break;
             case EdgeRefineState::SEQ_3: curEdgeRefine = 3u; break;
-            case EdgeRefineState::HOLD_2:
+            case EdgeRefineState::HOLD_3:
             default:
-                curEdgeRefine = 2u;
+                curEdgeRefine = 3u;
                 break;
         }
     }
 
-    pcAlpha.gateBypass = curGateBypass;
+    pcAlpha.gateBypass = hasDepthSignal ? curGateBypass : 1u;
     pcAlpha.recordStats = curRecordStats;
     pcAlpha.alphaDiag = curRecordStats;
     pcAlpha.edgeRefine = curEdgeRefine;
@@ -2072,8 +2071,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     static auto sLastAlphaReadbackTime = std::chrono::steady_clock::time_point{};
     auto nowTime = std::chrono::steady_clock::now();
     bool doAlphaReadback = false;
-    if (sLastAlphaReadbackTime.time_since_epoch().count() == 0 ||
-        std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - sLastAlphaReadbackTime).count() >= 1000) {
+    if ((doTriggerAb || sEdgeRefineOverride >= 0) &&
+        (sLastAlphaReadbackTime.time_since_epoch().count() == 0 ||
+         std::chrono::duration_cast<std::chrono::milliseconds>(nowTime - sLastAlphaReadbackTime).count() >= 1000)) {
         doAlphaReadback = true;
     }
 
@@ -2142,60 +2142,72 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     __android_log_print(ANDROID_LOG_INFO, "TIMING_FREEZE", "preview_submitted: %llu ns", (unsigned long long)tSubNs);
 
     auto tSub0 = std::chrono::high_resolution_clock::now();
+    VkResult submissionResult;
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
-        vkQueueSubmit(mComputeQueue, 1, &submitInfo, mRenderFences[mCurrentFrame]);
-        mFrameSubmitted[mCurrentFrame] = true;
+        mFrameSubmitted[mCurrentFrame] = false;
+        submissionResult = completePreviewSubmission(VK_SUCCESS,
+            [&] { return vkResetFences(mDevice, 1, &mRenderFences[mCurrentFrame]); },
+            [&] {
+                VkResult result = vkQueueSubmit(mComputeQueue, 1, &submitInfo, mRenderFences[mCurrentFrame]);
+                mFrameSubmitted[mCurrentFrame] = result == VK_SUCCESS;
+                return result;
+            },
+            [&] { return vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX); });
+        if (submissionResult == VK_SUCCESS) {
+            // 1Hz Alpha Transition Band readback & metrics
+            if (doAlphaReadback) {
+                sLastAlphaReadbackTime = nowTime;
+                void* pMap = nullptr;
+                VkResult res = vkMapMemory(mDevice, mReadbackMem, 0, (VkDeviceSize)(mPreviewW * mPreviewH), 0, &pMap);
+                if (res == VK_SUCCESS && pMap != nullptr) {
+                    VkMappedMemoryRange range{ VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, nullptr, mReadbackMem, 0, (VkDeviceSize)(mPreviewW * mPreviewH) };
+                    vkInvalidateMappedMemoryRanges(mDevice, 1, &range);
 
-        // Synchronous wait on fence: guarantees GPU has completely rendered before present (eliminates SurfaceView QUEUE_BUFFER_TIMEOUT)
-        vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX);
+                    const uint8_t* pAlpha = static_cast<const uint8_t*>(pMap);
+                    AlphaBandMetrics m = computeAlphaBandMetrics(pAlpha, mPreviewW, mPreviewH);
+                    sEdgeBandMetrics.push_back(m);
 
-        // 1Hz Alpha Transition Band readback & metrics
-        if (doAlphaReadback) {
-            sLastAlphaReadbackTime = nowTime;
-            void* pMap = nullptr;
-            VkResult res = vkMapMemory(mDevice, mReadbackMem, 0, (VkDeviceSize)(mPreviewW * mPreviewH), 0, &pMap);
-            if (res == VK_SUCCESS && pMap != nullptr) {
-                VkMappedMemoryRange range{ VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, nullptr, mReadbackMem, 0, (VkDeviceSize)(mPreviewW * mPreviewH) };
-                vkInvalidateMappedMemoryRanges(mDevice, 1, &range);
+                    if (curEdgeRefine == 0) {
+                        LOGI("ALPHA_BAND_BEFORE: median=%d p90=%d max=%d runs=%zu", m.median, m.p90, m.max, m.runs);
+                    } else {
+                        LOGI("ALPHA_BAND_AFTER: median=%d p90=%d max=%d runs=%zu edgeRefine=%u", m.median, m.p90, m.max, m.runs, curEdgeRefine);
+                    }
+                    LOGI("ALPHA_BAND: edgeRefine=%u median=%d p90=%d max=%d runs=%zu", curEdgeRefine, m.median, m.p90, m.max, m.runs);
 
-                const uint8_t* pAlpha = static_cast<const uint8_t*>(pMap);
-                AlphaBandMetrics m = computeAlphaBandMetrics(pAlpha, mPreviewW, mPreviewH);
-                sEdgeBandMetrics.push_back(m);
-
-                if (curEdgeRefine == 0) {
-                    LOGI("ALPHA_BAND_BEFORE: median=%d p90=%d max=%d runs=%zu", m.median, m.p90, m.max, m.runs);
-                } else {
-                    LOGI("ALPHA_BAND_AFTER: median=%d p90=%d max=%d runs=%zu edgeRefine=%u", m.median, m.p90, m.max, m.runs, curEdgeRefine);
+                    vkUnmapMemory(mDevice, mReadbackMem);
                 }
-                LOGI("ALPHA_BAND: edgeRefine=%u median=%d p90=%d max=%d runs=%zu", curEdgeRefine, m.median, m.p90, m.max, m.runs);
-
-                vkUnmapMemory(mDevice, mReadbackMem);
             }
-        }
-
-        // Read back gate stats if recorded
-        if (shouldRecordStats && curRecordStats != 0u && mGateStatsMapped != nullptr) {
 
             // Read back gate stats if recorded
-            sLastGateStatsLog = nowGateStats;
-            auto* stats = reinterpret_cast<const GateStatsData*>(mGateStatsMapped);
-            if (stats->totalCount > 0) {
-                double subjectRescuedPct = (double)stats->subjectRescuedCount / (double)stats->totalCount;
-                double bgVetoedPct = (double)stats->bgVetoedCount / (double)stats->totalCount;
-                double alphaMassBefore = (double)stats->alphaBeforeSum / 1000.0;
-                double alphaMassAfter = (double)stats->alphaAfterSum / 1000.0;
-                double massRatio = (alphaMassBefore > 0.0001) ? (alphaMassAfter / alphaMassBefore) : 1.0;
-                LOGI("ALPHA_FUSION_STATS: subjectRescuedPct=%.4f bgVetoedPct=%.4f massRatio=%.4f s1=%.2fm",
-                     subjectRescuedPct, bgVetoedPct, massRatio, s1);
-                LOGI("ALPHA_PRE_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
-                     stats->preHist[0], stats->preHist[1], stats->preHist[2], stats->preHist[3], stats->preHist[4],
-                     stats->preHist[5], stats->preHist[6], stats->preHist[7], stats->preHist[8], stats->preHist[9]);
-                LOGI("ALPHA_POST_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
-                     stats->postHist[0], stats->postHist[1], stats->postHist[2], stats->postHist[3], stats->postHist[4],
-                     stats->postHist[5], stats->postHist[6], stats->postHist[7], stats->postHist[8], stats->postHist[9]);
+            if (shouldRecordStats && curRecordStats != 0u && mGateStatsMapped != nullptr) {
+
+                // Read back gate stats if recorded
+                sLastGateStatsLog = nowGateStats;
+                auto* stats = reinterpret_cast<const GateStatsData*>(mGateStatsMapped);
+                if (stats->totalCount > 0) {
+                    double subjectRescuedPct = (double)stats->subjectRescuedCount / (double)stats->totalCount;
+                    double bgVetoedPct = (double)stats->bgVetoedCount / (double)stats->totalCount;
+                    double alphaMassBefore = (double)stats->alphaBeforeSum / 1000.0;
+                    double alphaMassAfter = (double)stats->alphaAfterSum / 1000.0;
+                    double massRatio = (alphaMassBefore > 0.0001) ? (alphaMassAfter / alphaMassBefore) : 1.0;
+                    LOGI("ALPHA_FUSION_STATS: subjectRescuedPct=%.4f bgVetoedPct=%.4f massRatio=%.4f s1=%.2fm",
+                         subjectRescuedPct, bgVetoedPct, massRatio, s1);
+                    LOGI("ALPHA_PRE_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
+                         stats->preHist[0], stats->preHist[1], stats->preHist[2], stats->preHist[3], stats->preHist[4],
+                         stats->preHist[5], stats->preHist[6], stats->preHist[7], stats->preHist[8], stats->preHist[9]);
+                    LOGI("ALPHA_POST_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
+                         stats->postHist[0], stats->postHist[1], stats->postHist[2], stats->postHist[3], stats->postHist[4],
+                         stats->postHist[5], stats->postHist[6], stats->postHist[7], stats->postHist[8], stats->postHist[9]);
+                }
             }
         }
+    }
+    if (submissionResult != VK_SUCCESS) {
+        LOGE("Portrait preview submission failed: %d", submissionResult);
+        mYuvConverter->releaseImportedImage(importedImg, importedMem, importedView);
+        recreateSwapchain(); // Recover the unsignalled fence and acquired image.
+        return false;
     }
     auto tSub1 = std::chrono::high_resolution_clock::now();
     double submitMs = std::chrono::duration<double, std::milli>(tSub1 - tSub0).count();
@@ -2209,9 +2221,10 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     presentInfo.pImageIndices = &imageIndex;
 
     auto tPres0 = std::chrono::high_resolution_clock::now();
+    VkResult presentResult;
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
-        vkQueuePresentKHR(mComputeQueue, &presentInfo);
+        presentResult = vkQueuePresentKHR(mComputeQueue, &presentInfo);
     }
     auto tPres1 = std::chrono::high_resolution_clock::now();
     double presentMs = std::chrono::duration<double, std::milli>(tPres1 - tPres0).count();
@@ -2314,7 +2327,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     }
 
     // Edge Refinement Sequence Evaluation (0 -> 1 -> 2 -> 3, 5s each)
-    if (sEdgeRefineOverride < 0 && sEdgeState != EdgeRefineState::HOLD_2 && sEdgePhaseStarted) {
+    if (sEdgeRefineOverride < 0 && sEdgeState != EdgeRefineState::HOLD_3 && sEdgePhaseStarted) {
         double elapsedPhaseSec = std::chrono::duration<double>(tPresentSteady - sEdgePhaseStart).count();
         if (elapsedPhaseSec >= 5.0) {
             double meanAlphaMs = 0.0;
@@ -2352,8 +2365,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                     sEdgeState = EdgeRefineState::SEQ_3;
                 } else if (finishedRefine == 3) {
                     LOGI("ALPHA_BAND_AFTER: median=%d p90=%d max=%d runs=%zu edgeRefine=3", medVal, p90Val, maxVal, runCount);
-                    sEdgeState = EdgeRefineState::HOLD_2;
-                    LOGI("=== EDGE_REFINE SEQUENCE COMPLETE (preview held at edgeRefine=2) ===");
+                    sEdgeState = EdgeRefineState::HOLD_3;
+                    LOGI("=== EDGE_REFINE SEQUENCE COMPLETE (preview held at edgeRefine=3) ===");
                 }
                 sEdgePhaseStarted = false;
             }
@@ -2384,7 +2397,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     // 8. Release imported image
     mYuvConverter->releaseImportedImage(importedImg, importedMem, importedView);
-    return true;
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR || presentResult == VK_ERROR_SURFACE_LOST_KHR)
+        recreateSwapchain();
+    return presentResult == VK_SUCCESS || presentResult == VK_SUBOPTIMAL_KHR;
 }
 
 /** Low-latency viewfinder only. Keep the GPU completion wait: imported AHB/image
@@ -2469,18 +2484,21 @@ bool VulkanPipeline::presentSharpPreview(VkImage importedImg, VkDeviceMemory imp
     VkResult result;
     {
         std::lock_guard<std::mutex> lock(mQueueMutex);
-        result = vkQueueSubmit(mComputeQueue, 1, &submit, mRenderFences[mCurrentFrame]);
-        mFrameSubmitted[mCurrentFrame] = result == VK_SUCCESS;
-        if (result == VK_SUCCESS) {
-            result = vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX);
-            if (result == VK_SUCCESS) result = vkQueuePresentKHR(mComputeQueue, &present);
-        }
+        mFrameSubmitted[mCurrentFrame] = false;
+        result = completePreviewSubmission(VK_SUCCESS,
+            [&] { return vkResetFences(mDevice, 1, &mRenderFences[mCurrentFrame]); },
+            [&] {
+                VkResult submitted = vkQueueSubmit(mComputeQueue, 1, &submit, mRenderFences[mCurrentFrame]);
+                mFrameSubmitted[mCurrentFrame] = submitted == VK_SUCCESS;
+                return submitted;
+            },
+            [&] { return vkWaitForFences(mDevice, 1, &mRenderFences[mCurrentFrame], VK_TRUE, UINT64_MAX); });
+        if (result == VK_SUCCESS) result = vkQueuePresentKHR(mComputeQueue, &present);
     }
     // GPU reads are finished before releasing the imported view or returning the camera buffer.
     mYuvConverter->releaseImportedImage(importedImg, importedMem, importedView);
     mCurrentFrame = (mCurrentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
-    if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR || result == VK_ERROR_SURFACE_LOST_KHR)
-        recreateSwapchain();
+    if (result != VK_SUCCESS) recreateSwapchain(); // Includes submit/reset failures: retire the acquired image/fence.
     if (result != VK_SUCCESS) LOGE("Sharp preview submit/present failed: %d", result);
     return result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR;
 }

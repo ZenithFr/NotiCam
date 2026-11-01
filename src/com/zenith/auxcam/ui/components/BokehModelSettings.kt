@@ -43,6 +43,8 @@ fun BokehModelSettings(state: CameraUiState, actions: CameraActions) {
                 Text(model.detail, style = CameraType.Caption, color = CameraColors.LabelSecondary)
             }
         }
+        Text("Live preview is separate from photo capture. Repeatedly slow models pause live effects, but still run on the received portrait photo. A failed/timed-out portrait saves sharp with an explicit message; it never disables the shutter.",
+            style = CameraType.Caption, color = CameraColors.LabelSecondary)
         Text(state.bokehModelStatus, style = CameraType.Caption, color = CameraColors.LabelSecondary)
         state.bokehModelError?.let { error ->
             Text("Failed: $error. No model substituted. Select again or run checks.", style = CameraType.Caption, color = CameraColors.Label)

@@ -113,3 +113,33 @@ and without grid, with a failed PixelCopy, pause/surface loss during each phase,
 and zero animation scale. Still output dimensions, crop and JPEG bytes must not
 come from any presentation transform. A serial HAL opening can still hold the
 old frame; this fix removes mismatched reveal geometry, not hardware downtime.
+
+## Portrait integration fixes (2026-11-01)
+
+- Keep a frame-slot fence signalled through acquisition, import and recording.
+  Reset only at the final submission. An acquire timeout previously left a reset
+  fence with no submission to signal it, causing repeated one-second stalls.
+- Both sharp and portrait final submissions check reset → submit → completion in
+  order, with no wait after a failed submit. Failed submission/import retires the
+  acquired swapchain image/semaphore via rebuild. SUBOPTIMAL acquisition is usable;
+  portrait presentation results are now checked too. GPU completion waits are
+  intentionally retained for camera-buffer ownership.
+- No mask **and** no depth uses the sharp shortcut, rather than expensive work on
+  placeholder data. Logical session `5` is normalized to main lens `0` so its depth
+  callbacks are not accidentally rejected. No-depth alpha-gate bypass survives
+  diagnostic configuration, instead of being overwritten afterwards.
+- Automatic FPS-bisect and edge-refinement sweeps are off. Preview holds guided +
+  contrast refinement (mode 3), without the 25-tap bilateral sweep. Alpha readback
+  is restricted to explicit diagnostics; full-resolution still refinement is not
+  reduced. Matte-drop telemetry uses a try-lock and cannot wait behind a still.
+- Camera callbacks bulk-copy bounded YUV rows (still 384×512 model input); background
+  inference publishes an atomic, generation-tagged 256² mask. Cadence adapts and
+  repeatedly slow warm models pause live processing, with a visible notice, not
+  stale-mask timestamp tricks or an implicit model switch. See BOKEH_MODELS.md.
+
+The native ordering helper was compiled/executed on the host, including reset,
+submit and wait failures; VulkanPipeline.cpp was syntax-parsed, **not compiled
+against Android/Vulkan or run on a GPU**. Host checks cannot establish sustained
+60 fps or prove that every device-specific stutter is gone. Native still processing
+remains synchronous and may interrupt preview while a photo is captured; it does
+not use lower-resolution output to hide that cost.

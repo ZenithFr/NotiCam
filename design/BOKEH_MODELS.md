@@ -41,12 +41,29 @@ Native calls are allowed to finish before their resources close. Pause, turning
 portrait off and switching models release engines on that same worker.
 
 All models publish a **common 256² sensor-coordinate matte** into the existing
-Vulkan depth/CoC/refinement/gather/composite pipeline. Inference remains capped
-at about 12 updates/sec, independently of preview rendering. This is not a new
-full-resolution still-matting path. A bokeh still uses the timestamp-valid
-preview matte from the selected engine; it does not infer on the exact captured
-still. Ordinary HAL JPEG and 50 MP paths remain unchanged. Video bokeh is not
-implemented by adding RVM; RVM here is evaluated on the live Photo portrait feed.
+Vulkan depth/CoC/refinement/gather/composite pipeline. Live inference uses an
+83–300 ms adaptive dispatch interval, independently of preview rendering. Input
+stays **384 × 512**, and row-bulk plane reads preserve the original sampling,
+rotation, buffer origins and chroma strides. RGB conversion/inference run on a
+background-priority worker, with no new live inference dispatched during capture.
+
+The first (cold/load) cycle is exempt from the slow-cycle policy. Two consecutive
+warm cycles over 220 ms pause **only the live effect**, visibly; the chosen model
+remains selected and available for stills. Reselecting the model, running checks
+or opening a new portrait session resets this policy. This does not promise that
+all six models can sustain live bokeh on the phone. Prefer MediaPipe for live use;
+the reported ~708 ms MODNet median cannot produce a continuously fresh live mask.
+Mask freshness is still **500 ms**; timestamps are never rewritten to hide delay.
+
+Portrait capture no longer depends on a live matte being ready. It copies a
+bounded sample of the **received still** and infers with the frozen selected
+model on the same serial worker, allowing up to three seconds including queued
+work. No still Image is handed to that worker. Timeout/failure saves an explicitly
+reported **sharp photo**, not an unrelated or expired preview matte. Portrait
+requests disable ZSL; full native output dimensions, JPEG quality 100 and still
+GPU refinement remain unchanged. The 256² matte is not full-resolution neural
+inference. Ordinary HAL JPEG and 50 MP paths remain unchanged. Video bokeh is not
+implemented by adding RVM.
 
 ## What checks measure
 
@@ -65,9 +82,9 @@ implemented by adding RVM; RVM here is evaluated on the live Photo portrait feed
   These are short runtime checks, **not sustained FPS, GPU/thermal profiling,
   display-latch measurements, accuracy scores or proof of better hair detail**.
 
-Still capture/model changes are gated during checks. Portrait capture also waits
-for a fresh successful matte from the selected engine. A too-slow stale mask is
-reported, not made valid by assigning it a newer timestamp. Checks reject severe
+Still capture/model changes are gated during checks. Outside checks, a missing,
+failed, stale or suspended live matte does **not** disable the shutter. Camera
+readiness, one-capture-in-flight and zoom-transition safety gates remain. Checks reject severe
 thermal load and cancel cooperatively if it develops. The live view continues,
 but preview performance/portrait masking can degrade while benchmarking; inspect
 steady-state preview separately after checks finish.
@@ -119,3 +136,33 @@ not silent fallback. Cancel during model load/inference; background and return;
 change model quickly; test session/lens rebuilds and thermal interruption. Ensure
 old models cannot publish after a switch, RVM starts a fresh temporal history,
 and normal/50 MP JPEG dimensions/quality and video recording are unchanged.
+
+## Portrait integration regression pass (2026-11-01)
+
+The Nothing A001 report showed why a runtime PASS is not an integrated camera
+acceptance test. Fixes additionally normalize logical stereo camera `5` to UI/main
+lens `0` (preserving synchronized depth routing), publish coherent generation-tagged
+matte snapshots, and report failed/aborted still requests as failures rather than
+successful captures. A request failure permits retry on an otherwise healthy
+standard-resolution session; device/session failures remain separate.
+
+Current host validation: **71 Python tests**, including compilation/execution of
+the platform-free C++ submission-order regression; **69 JVM tests** covering the
+actual policy, sampler, readiness, zoom and existing math/orchestration code.
+For the standalone JVM run only, Compose marker/image types, Android Build and
+controller constants had test stand-ins; this is not controller/Compose validation.
+Actual AIDL generation and Java 17 compilation of CameraUserService,
+CameraCapabilities and CameraZoom against Android 35 also passed (warnings only).
+The C++ helper also ran with address/undefined-behavior sanitizers. Java/Kotlin
+syntax parsing and VulkanPipeline.cpp syntax parsing passed. Full APK/Compose,
+Android native compilation, shader compilation and on-device validation remain
+outstanding. Historical model-runtime results above are not repeated by these
+host tests.
+
+Phone acceptance: start with MediaPipe Landscape, portrait at 1× and a person in
+view. Confirm the shutter works during warmup; compare f/1.4 and f/16 in preview
+and saved photos. Repeat at 0.6×/2× and after pause/resume. Select MODNet and wait
+for the live-paused notice, then verify still portrait capture (or an explicit
+sharp fallback if it times out). Retry a failed request, run/cancel checks, and
+ensure no old matte appears after model/lens switches. Record rendered FPS and
+preview gaps **outside capture** separately from full-resolution capture latency.

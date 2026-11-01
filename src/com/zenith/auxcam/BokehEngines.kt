@@ -37,19 +37,9 @@ internal data class BokehInput(val samples: ByteArray, val timestampNs: Long) {
         const val HEIGHT = 512
         fun copy(image: Image): BokehInput {
             val planes = image.planes
-            val y = planes[0]; val u = planes[1]; val v = planes[2]
-            val yb = y.buffer; val ub = u.buffer; val vb = v.buffer
-            val yo = yb.position(); val uo = ub.position(); val vo = vb.position()
-            val samples = ByteArray(WIDTH * HEIGHT * 3)
-            var out = 0
-            for (dy in 0 until HEIGHT) for (dx in 0 until WIDTH) {
-                val sx = if (DeviceProfile.PREVIEW_ROTATION_90) dy * image.width / HEIGHT else dx * image.width / WIDTH
-                val sy = if (DeviceProfile.PREVIEW_ROTATION_90) image.height - 1 - dx * image.height / WIDTH else dy * image.height / HEIGHT
-                samples[out++] = yb.get(yo + sy * y.rowStride + sx * y.pixelStride)
-                samples[out++] = ub.get(uo + sy / 2 * u.rowStride + sx / 2 * u.pixelStride)
-                samples[out++] = vb.get(vo + sy / 2 * v.rowStride + sx / 2 * v.pixelStride)
-            }
-            return BokehInput(samples, image.timestamp)
+            fun plane(index: Int) = planes[index].let { FrameData.Plane(it.buffer, it.rowStride, it.pixelStride) }
+            return BokehInput(FrameData.sampleYuv(plane(0), plane(1), plane(2), image.width, image.height,
+                WIDTH, HEIGHT, DeviceProfile.PREVIEW_ROTATION_90), image.timestamp)
         }
     }
 }
