@@ -48,8 +48,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.exp
 import kotlin.math.roundToInt
 import rikka.shizuku.Shizuku
@@ -99,6 +99,10 @@ interface CameraActions {
     fun onFlashClick()
     fun onBokehToggle()
     fun onSettingsToggle()
+    fun onBokehModelSelected(model: BokehModel) {}
+    fun onRunBokehChecks(allModels: Boolean) {}
+    fun onCancelBokehChecks() {}
+    fun onCopyBokehChecks() {}
     fun onModeSelected(mode: CaptureMode)
     fun onZoomBlendFinished(token: Int) {}
     fun onZoomSelected(zoom: Float)
@@ -185,8 +189,11 @@ class CameraController(
     }
 
     // ── UI state ────────────────────────────────────────────────────────────
+    private val bokehPreferences = activity.getSharedPreferences("bokeh_models", Context.MODE_PRIVATE)
+    @Volatile private var selectedBokehModel = BokehModel.fromId(bokehPreferences.getString("model", null))
     private val _uiState = mutableStateOf(
         CameraUiState(
+            bokehModel = selectedBokehModel,
             status = "Connecting…",
             telemetry = "VIEWFINDER · idle",
             lensCount = 1,
@@ -232,7 +239,21 @@ class CameraController(
         }
     }
     private val stillCaptureInProgress = AtomicBoolean(false)
-    private var matteSegmenter: DualMatteSegmenter? = null
+    private val bokehProcessor = BokehProcessor(factory = { createBokehEngine(activity.applicationContext, it) })
+    @Volatile private var bokehModelGeneration = 0
+    @Volatile private var bokehCheckGeneration = 0
+    private data class BokehCheckRequest(val token: Int, val models: List<BokehModel>)
+    private val pendingBokehChecks = AtomicReference<BokehCheckRequest?>(null)
+    @Volatile private var bokehCheckCancelled = false
+    @Volatile private var bokehThermal = 0
+    @Volatile private var bokehSensorFps = 30f
+    @Volatile private var bokehLatestSensorTimestamp = 0L
+    private val bokehFrameTimeout = Runnable {
+        if (pendingBokehChecks.getAndSet(null) != null) {
+            ++bokehCheckGeneration
+            update { it.copy(bokehChecksRunning = false, bokehCheckStatus = "No fresh camera frame received. Reopen Photo and retry.") }
+        }
+    }
     @Volatile private var latestMatte = ByteArray(256 * 256)
     @Volatile
     private var hasRealMatte = false
@@ -241,8 +262,6 @@ class CameraController(
     }
     private val isMatteWorkerBusy = AtomicBoolean(false)
     private var lastMatteDispatchMs = 0L
-    private var matteDropCount5s = 0
-    private var lastMatteDropLogMs = 0L
     private var stillThread: HandlerThread? = null
     private var stillHandler: Handler? = null
     private var lastShutterTriggerNs = 0L
@@ -296,7 +315,7 @@ class CameraController(
     }
 
     /** Copy only on a physical handoff, never per preview frame or for a saved still. */
-    private fun beginZoomHandoff(fromZoom: Float, toZoom: Float, switch: () -> Unit) {
+    private fun beginZoomHandoff(fromZoom: Float, toZoom: Float, switch: (Float) -> Unit) {
         val token = ++zoomHandoffToken
         zoomHandoffPending = true
         zoomHandoffOrigin = fromZoom
@@ -313,8 +332,13 @@ class CameraController(
             activity.window.decorView.postOnAnimation {
                 activity.window.decorView.postOnAnimation {
                     if (!disposed && foreground && token == zoomHandoffToken) {
+                        // Consume the latest pinch target before opening a camera,
+                        // rather than always opening the first boundary crossed.
+                        val target = queuedZoom ?: toZoom
+                        queuedZoom = null
+                        update { it.copy(zoom = target, zoomBlendScale = target / fromZoom) }
                         zoomHandoffCommitted = true
-                        switch()
+                        switch(target)
                     }
                 }
             }
@@ -415,8 +439,10 @@ class CameraController(
     // ═══════════════════════════ LIFECYCLE ══════════════════════════════════
 
     fun start() {
+        if (disposed) return
         foreground = true
         if (started) {
+            if (!engineReady) surfaceHolder?.takeIf { it.surface.isValid }?.let { initializePreviewEngine(it) }
             if (!state.sessionReady) rebuildStillSession("Resuming native capture…")
             return
         }
@@ -425,6 +451,7 @@ class CameraController(
         discoverLenses()
         startReaderThread()
         setupImageReaders()
+        if (!engineReady) surfaceHolder?.takeIf { it.surface.isValid }?.let { initializePreviewEngine(it) }
 
         powerManager = activity.getSystemService(Context.POWER_SERVICE) as? PowerManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -470,19 +497,26 @@ class CameraController(
     }
 
     fun pause() {
+        if (disposed || !foreground) return
+        foreground = false // Reject queued reads/opens before releasing any resources.
+        engineReady = false
+        abandonBokehChecks()
+        invalidateAuxiliaryFrames()
         cancelZoomHandoff()
         if (state.videoStarting || state.videoRecording) stopVideo(save = state.videoRecording, restore = false)
         sessionToken++
         pendingRebuildToken = null
-        foreground = false
+        matteExecutor.execute { bokehProcessor.close() }
         timerRunning = false
         main.removeCallbacks(timerTick)
         try { service?.closeSession() } catch (e: RemoteException) { Log.w(TAG, "pause session", e) }
+        native.destroyEngine() // Release Vulkan imports/swapchain/window while stopped.
         update { it.copy(sessionReady = false, captureBusy = state.captureBusy || stillCaptureInProgress.get(), status = "Camera paused") }
     }
 
     fun dispose() {
         if (disposed) return
+        abandonBokehChecks()
         if (state.videoStarting || state.videoRecording) stopVideo(save = state.videoRecording, restore = false)
         cancelZoomHandoff()
         disposed = true
@@ -510,7 +544,10 @@ class CameraController(
         }
         thermalListener = null
 
-        try { service?.closeSession() } catch (e: RemoteException) { Log.w(TAG, "closeSession failed", e) }
+        val exitingService = service
+        // destroy performs orderly camera closure on the sidecar's handler and
+        // has its own process-exit watchdog; don't wait for its HAL on the UI thread.
+        try { exitingService?.destroy() } catch (_: RemoteException) { /* Dedicated service may exit before replying. */ }
         service = null
         colorReader?.setOnImageAvailableListener(null, null)
         depthReader?.setOnImageAvailableListener(null, null)
@@ -526,11 +563,11 @@ class CameraController(
         colorReader = null
         depthReader = null
         stillReader = null
+        // Close after any in-flight native inference, on its owning executor.
+        matteExecutor.execute { bokehProcessor.close() }
         matteExecutor.shutdown()
-        // Inference owns its interpreter until the worker has finished.
-        try {
-            if (matteExecutor.awaitTermination(5, TimeUnit.SECONDS)) matteSegmenter?.close()
-        } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
+        // Copied inputs have no camera/native-engine ownership. Do not block
+        // Activity teardown waiting for an uninterruptible model/NNAPI call.
         io.shutdown() // let an already queued save finish
 
         Shizuku.removeRequestPermissionResultListener(permissionListener)
@@ -567,6 +604,12 @@ class CameraController(
 
     override fun onPreviewSurfaceCreated(holder: SurfaceHolder) {
         surfaceHolder = holder
+        if (initializePreviewEngine(holder) && service != null) startStereoSession()
+    }
+
+    private fun initializePreviewEngine(holder: SurfaceHolder): Boolean {
+        if (!foreground || disposed || state.galleryOpen || !holder.surface.isValid) return false
+        surfaceHolder = holder
         // Size the swapchain from the *view*, not the sensor: the composable has
         // already measured the SurfaceView to exactly 4:3, so the initial extent is
         // correct and no swapchain recreation is needed on the first frame.
@@ -580,7 +623,7 @@ class CameraController(
         engineReady = ok
         Log.i(TAG, "nativeInitEngine -> $ok")
         if (!ok) update { it.copy(status = "Camera engine unavailable", sessionReady = false) }
-        if (ok && service != null) startStereoSession()
+        return ok
     }
 
     override fun onPreviewSurfaceChanged(holder: SurfaceHolder) {
@@ -596,9 +639,16 @@ class CameraController(
     }
 
     override fun onPreviewSurfaceDestroyed(holder: SurfaceHolder) {
+        if (surfaceHolder !== holder) return
         cancelZoomHandoff()
+        if (state.videoStarting || state.videoRecording) stopVideo(save = state.videoRecording, restore = false)
+        ++sessionToken
+        pendingRebuildToken = null
         engineReady = false
         surfaceHolder = null
+        try { service?.closeSession() } catch (_: RemoteException) { }
+        native.destroyEngine()
+        update { it.copy(sessionReady = false) }
     }
 
     // SurfaceHolder.Callback (kept for the AndroidView bridge)
@@ -630,7 +680,8 @@ class CameraController(
             ComponentName(activity.packageName, CameraUserService::class.java.name),
         )
             .daemon(false)
-            .version(6)
+            .tag("noticam-${android.os.Process.myPid()}-${System.identityHashCode(this)}")
+            .version(7)
             .processNameSuffix("auxcam_privileged")
         serviceArgs = args
         try { Shizuku.bindUserService(args, this) }
@@ -663,12 +714,6 @@ class CameraController(
 
     private fun setupImageReaders() {
         val handler = readerHandler ?: return
-
-        if (matteSegmenter == null) {
-            matteSegmenter = DualMatteSegmenter(activity).also {
-                it.initialize()
-            }
-        }
 
         if (stillThread == null) {
             val sThread = HandlerThread("StillReaderThread").also { it.start() }
@@ -781,7 +826,7 @@ class CameraController(
     }
 
     private fun onSessionReady(cameraId: String?) {
-        if (!foreground || disposed) return
+        if (!foreground || disposed || state.galleryOpen || !engineReady) return
         main.removeCallbacks(previewFrameTimeout)
         main.postDelayed(previewFrameTimeout, 4000)
         blendFreshFrames = 0
@@ -807,6 +852,19 @@ class CameraController(
                 lensIndex = physicalLenses.indexOf(currentLens).coerceAtLeast(0),
                 lensCount = physicalLenses.size.coerceAtLeast(1),
             )
+        }
+        if (state.mode == CaptureMode.Video && !state.videoStarting && !state.videoRecording) {
+            val lens = currentLens
+            val generation = sessionToken
+            val svc = service
+            update { it.copy(videoWidth = 0, videoHeight = 0) }
+            io.execute {
+                val size = try { svc?.getVideoSize(lens) } catch (_: Exception) { null }
+                post { if (generation == sessionToken && state.mode == CaptureMode.Video && currentLens == lens) {
+                    update { it.copy(videoWidth = size?.getOrNull(0) ?: 0, videoHeight = size?.getOrNull(1) ?: 0,
+                        status = if (size?.size == 3) "Ready · native-aspect video" else "Native-aspect recorder unavailable on this lens") }
+                } }
+            }
         }
         if (state.videoStarting && recordingSurface != null) {
             val generation = videoGeneration
@@ -887,7 +945,7 @@ class CameraController(
     }
 
     private fun onStats(colorFps: Float, depthFps: Float, dt: Float) {
-        matteSegmenter?.onFpsMeasured(colorFps)
+        bokehSensorFps = colorFps
         val text = String.format(
             Locale.US,
             "RENDERED · %.0f FPS · SENSOR · %.0f FPS · DEPTH · %.0f FPS · Δt %.1f ms",
@@ -941,51 +999,7 @@ class CameraController(
 
         try {
             if (!foreground || !state.sessionReady || disposed) return
-            val seg = matteSegmenter
-            val nowMs = SystemClock.elapsedRealtime()
-            val cadenceAllow = (nowMs - lastMatteDispatchMs >= 83L) // <= 12 Hz ceiling
-
-            if (state.bokehActive && seg != null && seg.isAvailable && cadenceAllow) {
-                if (isMatteWorkerBusy.get()) {
-                    matteDropCount5s++
-                    native.notifyMatteDrop()
-                    if (nowMs - lastMatteDropLogMs >= 5000L) {
-                        Log.i(TAG, "MATTE_DROP: drops=$matteDropCount5s in 5s")
-                        matteDropCount5s = 0
-                        lastMatteDropLogMs = nowMs
-                    }
-                } else if (isMatteWorkerBusy.compareAndSet(false, true)) {
-                    lastMatteDispatchMs = nowMs
-                    val generation = frameGeneration
-                    val sensorTimestamp = image.timestamp
-                    // preprocessFrame copies into model-owned tensors before
-                    // returning; the inference worker never needs a camera AHB.
-                    try {
-                        if (seg.preprocessFrame(image)) {
-                            matteExecutor.execute {
-                                try {
-                                    if (seg.runInference()) {
-                                        val matte = ByteArray(256 * 256)
-                                        seg.getLatestAlphaMatte(matte)
-                                        if (generation == frameGeneration && !disposed) {
-                                            latestMatte = matte
-                                            matteTimestampNs = sensorTimestamp
-                                            hasRealMatte = true
-                                        }
-                                    }
-                                } catch (t: Throwable) {
-                                    Log.w(TAG, "Worker inference error: ${t.message}")
-                                } finally {
-                                    isMatteWorkerBusy.set(false)
-                                }
-                            }
-                        } else isMatteWorkerBusy.set(false)
-                    } catch (t: Throwable) {
-                        isMatteWorkerBusy.set(false)
-                        Log.w(TAG, "Matte preprocessing failed", t)
-                    }
-                }
-            }
+            dispatchBokeh(image)
 
             val triggerL8 = File(activity.getExternalFilesDir("diag"), "trigger_l8")
             if (triggerL8.exists()) {
@@ -1028,6 +1042,14 @@ class CameraController(
                                     main.removeCallbacks(previewFrameTimeout)
                                     lensSwitching = false
                                     if (zoomHandoffPending && handoff == zoomHandoffToken) {
+                                        val destination = queuedZoom
+                                        if (destination != null && CameraZoom.lensForZoom(destination) != currentLens) {
+                                            queuedZoom = null
+                                            update { it.copy(zoom = destination, zoomBlendScale = destination / zoomHandoffOrigin,
+                                                zoomBlendReady = false, zoomBlendPending = true) }
+                                            selectLens(CameraZoom.lensForZoom(destination))
+                                            return@post
+                                        }
                                         if (state.zoomBlendImage == null) onZoomBlendFinished(handoff)
                                         else update { it.copy(zoomBlendReady = true, zoomBlendPending = false) }
                                     }
@@ -1583,13 +1605,169 @@ class CameraController(
         FlashMode.On -> "Flash on"
     }
 
+    override fun onBokehModelSelected(model: BokehModel) {
+        if (disposed || state.captureBusy || timerRunning || state.bokehChecksRunning || state.videoStarting || state.videoRecording || state.previewTransitioning) return
+        selectedBokehModel = model
+        ++bokehModelGeneration
+        hasRealMatte = false
+        bokehPreferences.edit().putString("model", model.id).apply()
+        matteExecutor.execute { bokehProcessor.close() }
+        update { it.copy(bokehModel = model, bokehModelReady = false, bokehModelError = null,
+            bokehModelStatus = "Selected ${model.label} · loads on next portrait frame") }
+        haptic()
+    }
+
+    override fun onRunBokehChecks(allModels: Boolean) {
+        if (disposed || state.captureBusy || timerRunning || state.bokehChecksRunning || state.videoStarting || state.videoRecording || state.previewTransitioning) return
+        if (!foreground || !state.sessionReady || state.mode != CaptureMode.Photo) {
+            update { it.copy(bokehCheckStatus = "Open Photo with a live camera preview, then retry.") }
+            return
+        }
+        if (bokehThermal >= PowerManager.THERMAL_STATUS_SEVERE) {
+            update { it.copy(bokehCheckStatus = "Phone is too hot. Let it cool before model checks.") }
+            return
+        }
+        ++bokehCheckGeneration
+        bokehCheckCancelled = false
+        update { it.copy(bokehChecksRunning = true, bokehCheckResults = emptyList(),
+            bokehCheckStatus = "Waiting for one fresh camera frame…", bokehModelError = null) }
+        pendingBokehChecks.set(BokehCheckRequest(bokehCheckGeneration,
+            if (allModels) BokehModel.entries.toList() else listOf(selectedBokehModel)))
+        main.removeCallbacks(bokehFrameTimeout)
+        main.postDelayed(bokehFrameTimeout, 8000)
+    }
+
+    override fun onCancelBokehChecks() {
+        bokehCheckCancelled = true
+        if (pendingBokehChecks.getAndSet(null) != null) {
+            ++bokehCheckGeneration
+            main.removeCallbacks(bokehFrameTimeout)
+            update { it.copy(bokehChecksRunning = false, bokehCheckStatus = "Checks cancelled") }
+        } else update { it.copy(bokehCheckStatus = "Cancelling after current native inference…") }
+    }
+
+    private fun abandonBokehChecks() {
+        ++bokehCheckGeneration
+        bokehCheckCancelled = true
+        pendingBokehChecks.set(null)
+        main.removeCallbacks(bokehFrameTimeout)
+        update { it.copy(bokehChecksRunning = false, bokehCheckStatus = if (it.bokehChecksRunning) "Checks interrupted; run again in Photo" else it.bokehCheckStatus) }
+    }
+
+    override fun onCopyBokehChecks() {
+        val text = buildString {
+            append("NotiCam bokeh runtime checks\n${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}\n")
+            append("${state.bokehCheckStatus}\nRendered preview now: ${state.previewMeasuredFps.toInt()} fps (not a sustained benchmark)\n")
+            state.bokehCheckResults.forEach { append("\n${it.model.label}\n${it.summary}\n") }
+            append("\nSame captured frame; one warmup + 5 samples; common input copy/RGB excluded.\nNo image-quality or sustained-FPS score. No images uploaded.\n")
+        }
+        val clipboard = activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("NotiCam model checks", text))
+        Toast.makeText(activity, "Model report copied", Toast.LENGTH_SHORT).show()
+    }
+
+    /** Copy only bounded samples on the reader; all model resources belong to the worker. */
+    private fun dispatchBokeh(image: android.media.Image) {
+        val request = pendingBokehChecks.get()
+        val checks = request?.models
+        val current = state
+        bokehLatestSensorTimestamp = image.timestamp
+        val now = SystemClock.elapsedRealtime()
+        val live = current.bokehActive && !current.bokehChecksRunning && current.bokehModelError == null
+        if (checks == null && (!live || now - lastMatteDispatchMs < 83L)) return
+        if (!isMatteWorkerBusy.compareAndSet(false, true)) {
+            if (live) native.notifyMatteDrop()
+            return
+        }
+        val generation = frameGeneration
+        val modelGeneration = bokehModelGeneration
+        val model = selectedBokehModel
+        val checkGeneration = request?.token ?: bokehCheckGeneration
+        try {
+            val input = BokehInput.copy(image) // No Image/plane/AHB escapes this call.
+            lastMatteDispatchMs = now
+            if (request != null) {
+                // Do not consume a newer request after a cancel/restart during copying.
+                if (!pendingBokehChecks.compareAndSet(request, null) || request.token != bokehCheckGeneration) {
+                    isMatteWorkerBusy.set(false)
+                    return
+                }
+                main.removeCallbacks(bokehFrameTimeout)
+            }
+            matteExecutor.execute {
+                try {
+                    if (disposed || !foreground || generation != frameGeneration ||
+                        (checks == null && modelGeneration != bokehModelGeneration)) return@execute
+                    val frame = input.rgb()
+                    if (checks != null) {
+                        val cancelled = { disposed || !foreground || checkGeneration != bokehCheckGeneration ||
+                            bokehCheckCancelled || generation != frameGeneration || bokehThermal >= PowerManager.THERMAL_STATUS_SEVERE }
+                        try {
+                            bokehProcessor.checks(frame, checks, bokehThermal, bokehSensorFps, cancelled,
+                                progress = { message -> post { if (checkGeneration == bokehCheckGeneration)
+                                    update { it.copy(bokehCheckStatus = message) } } },
+                                result = { result -> post { if (checkGeneration == bokehCheckGeneration)
+                                    update { it.copy(bokehCheckResults = it.bokehCheckResults + result) } } })
+                            post { if (checkGeneration == bokehCheckGeneration) update { it.copy(
+                                bokehCheckStatus = "Complete · same frame ${frame.timestampNs} ns · runtime checks, not a quality score") } }
+                        } catch (_: java.util.concurrent.CancellationException) {
+                            post { if (checkGeneration == bokehCheckGeneration) update { it.copy(bokehCheckStatus = "Checks cancelled/interrupted; completed results retained") } }
+                        }
+                    } else {
+                        val start = SystemClock.elapsedRealtimeNanos()
+                        val (mask, description) = bokehProcessor.process(frame, model, generation, bokehThermal, bokehSensorFps)
+                        val ms = (SystemClock.elapsedRealtimeNanos() - start) / 1_000_000.0
+                        post {
+                            if (generation == frameGeneration && modelGeneration == bokehModelGeneration && foreground &&
+                                state.bokehActive && !state.bokehChecksRunning) {
+                                val fresh = kotlin.math.abs(bokehLatestSensorTimestamp - frame.timestampNs) <= FrameData.MATTE_MAX_AGE_NS
+                                latestMatte = mask
+                                matteTimestampNs = frame.timestampNs
+                                hasRealMatte = fresh
+                                update { it.copy(bokehModelReady = fresh, bokehModelError = null,
+                                    status = if (it.status.startsWith("Bokeh model failed")) "Ready" else it.status,
+                                    bokehModelStatus = String.format(Locale.US, "%s · last cycle %.1f ms%s", description, ms,
+                                        if (fresh) "" else " · stale matte; try a lighter model")) }
+                            }
+                        }
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Selected bokeh engine failed", t)
+                    post {
+                        if (modelGeneration == bokehModelGeneration && generation == frameGeneration) {
+                            hasRealMatte = false
+                            update { it.copy(bokehModelReady = false, bokehModelError = t.message?.take(200) ?: t.javaClass.simpleName,
+                                bokehModelStatus = "Model failed; select again or run checks to retry",
+                                status = "Bokeh model failed — open Settings to retry or change model") }
+                        }
+                        if (checks != null && checkGeneration == bokehCheckGeneration)
+                            update { it.copy(bokehCheckStatus = "Check failed: ${t.message?.take(200)}") }
+                    }
+                } finally {
+                    isMatteWorkerBusy.set(false)
+                    if (checks != null) post { if (checkGeneration == bokehCheckGeneration) {
+                        hasRealMatte = false
+                        update { it.copy(bokehChecksRunning = false, bokehModelReady = false) }
+                    } }
+                }
+            }
+        } catch (t: Throwable) {
+            isMatteWorkerBusy.set(false)
+            post { if (checks != null && checkGeneration == bokehCheckGeneration) {
+                pendingBokehChecks.set(null)
+                main.removeCallbacks(bokehFrameTimeout)
+                update { it.copy(bokehChecksRunning = false, bokehCheckStatus = "Could not copy camera frame: ${t.message?.take(160)}") }
+            } }
+        }
+    }
+
     override fun onSettingsToggle() {
         update { it.copy(settingsOpen = !it.settingsOpen) }
         haptic()
     }
 
     override fun onModeSelected(mode: CaptureMode) {
-        if (state.previewTransitioning) return
+        if (state.previewTransitioning || state.bokehChecksRunning) return
         if (mode == state.mode || state.captureBusy || state.videoRecording || state.videoStarting) return
         invalidateAuxiliaryFrames()
         update { it.copy(mode = mode, bokehEnabled = false, settingsOpen = false,
@@ -1614,7 +1792,7 @@ class CameraController(
     override fun onZoomGesture(scaleFactor: Float) {
         showDial()
         if (scaleFactor == 0f) return
-        applyZoom(state.zoom * scaleFactor, force = false)
+        applyZoom((queuedZoom ?: state.zoom) * scaleFactor, force = false)
     }
 
     override fun onZoomDragStart() {
@@ -1627,7 +1805,7 @@ class CameraController(
         if (deltaPx == 0f || deltaPx.isNaN()) return
         // Exponential, so the same finger travel moves the same *proportion* of the
         // range at 0.6x and at 2x. ~180 px doubles the zoom.
-        applyZoom(state.zoom * exp(deltaPx / 180f), force = false)
+        applyZoom((queuedZoom ?: state.zoom) * exp(deltaPx / 180f), force = false)
         showDial()
     }
 
@@ -1639,13 +1817,14 @@ class CameraController(
 
     private fun invalidateAuxiliaryFrames() {
         hasRealMatte = false
+        update { it.copy(bokehModelReady = false) }
         frameGeneration++
         synchronized(depthFrames) { depthFrames.clear() }
         latestDepth = null
     }
 
     private fun applyZoom(requested: Float, force: Boolean) {
-        if (!requested.isFinite() || state.captureBusy || state.videoRecording || state.videoStarting || !foreground || disposed) return
+        if (!requested.isFinite() || state.bokehChecksRunning || state.captureBusy || state.videoRecording || state.videoStarting || !foreground || disposed) return
         val zoom = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (zoomHandoffPending) { queuedZoom = zoom; return }
         if (!state.sessionReady) return
@@ -1653,15 +1832,22 @@ class CameraController(
         val oldZoom = state.zoom
         val lens = CameraZoom.lensForZoom(zoom)
         if (lens != currentLens || (state.resolution == Resolution.High && kotlin.math.abs(zoom - 1f) > .01f)) {
-            beginZoomHandoff(oldZoom, zoom) {
-                if (state.resolution == Resolution.High && kotlin.math.abs(zoom - 1f) > .01f) {
-                    currentLens = lens
-                    onTele = lens == "3"
+            beginZoomHandoff(oldZoom, zoom) { target ->
+                val targetLens = CameraZoom.lensForZoom(target)
+                if (state.resolution == Resolution.High && kotlin.math.abs(target - 1f) > .01f) {
+                    currentLens = targetLens
+                    onTele = targetLens == "3"
                     lensSwitching = true
                     update { it.copy(resolution = Resolution.Standard) }
                     rebuildStillSession("Zoom uses 12 MP. Switching…")
-                } else selectLens(lens)
-                lastSentZoom = zoom
+                } else if (targetLens != currentLens) selectLens(targetLens)
+                else {
+                    // A reversal before camera closure no longer strands sessionReady=false.
+                    try { service?.setZoom(target) } catch (e: RemoteException) { Log.w(TAG, "Retarget zoom", e) }
+                    update { it.copy(sessionReady = true, zoomBlendReady = true, zoomBlendPending = false) }
+                    if (state.zoomBlendImage == null) onZoomBlendFinished(zoomHandoffToken)
+                }
+                lastSentZoom = target
             }
             return
         }
@@ -1742,9 +1928,10 @@ class CameraController(
     }
 
     override fun onBokehToggle() {
-        if (state.previewTransitioning) return
+        if (state.previewTransitioning || state.bokehChecksRunning) return
         if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
         val enabled = !state.bokehEnabled
+        if (!enabled) matteExecutor.execute { bokehProcessor.close() }
         if (enabled) { currentLens = "0"; onTele = false; lastSentZoom = 1f }
         update { it.copy(bokehEnabled = enabled, resolution = Resolution.Standard, aeAfLocked = false, manualFocus = false,
             zoom = if (enabled) 1f else it.zoom) }
@@ -1753,7 +1940,7 @@ class CameraController(
     }
 
     override fun onResolutionToggle() {
-        if (state.previewTransitioning) return
+        if (state.previewTransitioning || state.bokehChecksRunning) return
         if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
         if (state.resolution == Resolution.High) {
             update { it.copy(resolution = Resolution.Standard) }
@@ -1940,7 +2127,7 @@ class CameraController(
         io.execute {
             try {
                 val size = svc.getVideoSize(lens)
-                check(size.size == 3) { "This lens does not expose a 30 fps recorder stream" }
+                check(size.size == 3) { "No native-aspect 30 fps recorder + AVC encoder stream on this lens. No 16:9 substitute." }
                 val capture = VideoCapture(activity.applicationContext)
                 videoCapture = capture
                 capture.prepare(size[0], size[1], audio, size[2],
@@ -1995,18 +2182,24 @@ class CameraController(
     }
 
     override fun onGalleryOpen() {
-        if (state.previewTransitioning) return
+        if (state.previewTransitioning || state.bokehChecksRunning) return
         main.removeCallbacks(previewFrameTimeout)
         if (state.captureBusy || state.videoRecording || state.videoStarting) return
         ++sessionToken
         pendingRebuildToken = null
         try { service?.closeSession() } catch (_: Exception) { }
+        engineReady = false
+        invalidateAuxiliaryFrames()
+        native.destroyEngine()
         update { it.copy(galleryOpen = true, settingsOpen = false, sessionReady = false) }
     }
 
     override fun onGalleryClose() {
         update { it.copy(galleryOpen = false) }
-        if (foreground) rebuildStillSession("Returning to native capture…")
+        if (foreground) {
+            surfaceHolder?.takeIf { it.surface.isValid }?.let { initializePreviewEngine(it) }
+            rebuildStillSession("Returning to native capture…")
+        }
     }
 
     override fun onCameraReport() {
@@ -2090,7 +2283,7 @@ class CameraController(
 
     private fun onThermalChanged(status: Int) {
         Log.i(TAG, "thermal status $status")
-        matteSegmenter?.onThermalStatusChanged(status)
+        bokehThermal = status
         val severe = status >= PowerManager.THERMAL_STATUS_SEVERE
         native.setThermalThrottled(severe)
         update { it.copy(telemetry = "THERMAL · " + thermalName(status) + if (severe) " · throttled" else "") }

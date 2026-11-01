@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
@@ -56,8 +57,8 @@ fun ZoomChips(
     stops: List<Float>,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    chipSize: Dp = 44.dp,
-    gap: Dp = 6.dp,
+    chipSize: Dp = 48.dp,
+    gap: Dp = 0.dp,
 ) {
     if (stops.isEmpty()) return
     val haptics = rememberCameraHaptics()
@@ -105,6 +106,7 @@ fun ZoomChips(
             modifier = Modifier
                 .offset(x = discX)
                 .size(chipSize)
+                .padding(8.dp) // 32dp visible selector; 48dp hit target is unchanged.
                 .graphicsLayer {
                     scaleX = discScale
                     scaleY = discScale
@@ -190,6 +192,7 @@ private fun ZoomChip(
             Text(
                 text = label,
                 style = CameraType.Lens,
+                fontSize = 12.sp,
                 color = labelColor.copy(alpha = labelAlpha),
             )
             if (caption != null) {

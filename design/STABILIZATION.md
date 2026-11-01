@@ -188,7 +188,8 @@ resulting JPEGs at full resolution. Record OS/build fingerprint and app commit.
 3. Compare native JPEG detail/color/EXIF/4:3 framing with the old YUV encode. Test
    portrait on/off, rejected JPEG stream combinations, low light, focus and flash.
 4. Record each lens with audio granted/denied, stop after short/long clips, verify
-   playback duration/rotation/audio and 16:9 field of view. Test storage full,
+   playback duration/rotation/audio and native-aspect field of view against the
+   uncropped photo at the same physical lens/digital zoom. Test storage full,
    Shizuku death, lock/home, recording-start timeout and the 15-minute limit.
 5. Verify no microphone survives backgrounding, only valid videos are published,
    repeated start/stop cannot overlap, and Photo works after recording.
@@ -237,7 +238,7 @@ resulting JPEGs at full resolution. Record OS/build fingerprint and app commit.
   4:3 feed up to 1440×1080 prefers advertised 60 fps, otherwise an explicit lower
   rate. A failed 60 fps session retries at <=30 without reducing JPEG quality.
   Recording remains on its existing 30 fps encoder policy. UserService protocol
-  version is bumped to 6 for the extended AIDL API.
+  version is now 7 for the extended AIDL API and reserved Shizuku destroy hook.
 - A fixed upright 1080×1440 surface and API 30+ 60 Hz hint support consistent
   presentation. Rendered/queued-present FPS is measured separately from sensor
   result FPS. Neither a hint nor a requested range proves actual 60 fps output.
@@ -248,3 +249,52 @@ resulting JPEGs at full resolution. Record OS/build fingerprint and app commit.
   simulated handoff motion from actual camera performance.
 - Native compilation and phone testing remain required. See
   [PREVIEW_SMOOTHNESS.md](PREVIEW_SMOOTHNESS.md) for limitations and the device matrix.
+
+
+## Selectable bokeh engines and phone checks
+
+- Added persisted MediaPipe Auto/fixed Dual/Landscape/General, MODNet and RVM
+  MobileNetV3 selection in Camera controls. Runtime failures are explicit. The
+  Auto baseline alone has named, visible thermal/FPS Landscape fallback.
+- Check selected/all uses one fresh camera frame, additional warmup and five timed
+  cycles, hash/tensor/alpha validation, load/median/p95, mask statistics and a
+  copyable report. This is not a quality or sustained-FPS benchmark.
+- Serialized model lifecycle, bounded copied inputs, old-result generation guards,
+  temporal resets, cancellation/thermal handling and fresh-matte capture gating
+  keep native camera buffers and saved-still settings separate.
+- Large weights are ignored build inputs fetched from pinned release/blob URLs,
+  verified before bundling and again at runtime. All choices ship in the APK.
+  Bundled notices identify RVM's GPL-3.0-only redistribution/source obligations.
+- Actual model CPU contracts executed on desktop; RVM recurrence/reset exercised.
+  Seven model/data/profile Kotlin files compiled against Android 35, local TFLite
+  jars and official ORT 1.20 Java API sources. **25 JVM tests executed successfully**
+  (BokehMathTest + BokehProcessorTest + FrameDataTest). This does not constitute a full APK/Compose/NDK
+  build or execution of all existing Gradle tests.
+- Phone selection/preview/capture/delegate/performance and full build validation
+  remain required. See [BOKEH_MODELS.md](BOKEH_MODELS.md).
+
+
+## Native video / safe gallery / dedicated-process teardown
+
+See [NATIVE_VIDEO_AND_RAW.md](NATIVE_VIDEO_AND_RAW.md) for recorder selection,
+explicit RAW/Log limitations and the required phone test matrix. Native-aspect
+selection intersects advertised camera sizes/frame durations and hardware AVC
+surface-input size/rate support. It does not promise unbinned sensor readout,
+maximum-resolution video, or real-time throughput from metadata alone.
+
+Viewer video fit uses width/height/rotation metadata rather than 9:16. Dialog
+padding takes the maximum of physical root-window system-bar/cutout insets and
+Compose safeDrawing, then lifts actions another 20 dp. It does not replace
+Compose's window-inset listener. Zoom/secondary visible controls are smaller;
+48 dp touch targets and animations are retained.
+
+Pause/surface loss closes the camera and destroys native preview resources;
+resume/gallery return reinitializes even a surviving SurfaceHolder. Exit invokes
+the reserved Shizuku destroy transaction; service cleanup also runs on client
+Binder death, independently closes session/device, drops held Surface references,
+and exits only its own process. A late portrait still uses a temporary RAII-owned
+headless pipeline, not a resurrected global preview owner. A 2-second watchdog covers a blocked camera
+handler. Per-controller service tags prevent one controller's teardown removing
+a replacement controller's process. The app's already queued file writes are
+not canceled or killed. This is not a guarantee for a still not yet delivered by
+the HAL when the user exits.

@@ -303,15 +303,15 @@ class MainActivity : ComponentActivity(), NativeBridge {
             if (!modelDir.exists()) modelDir.mkdirs()
             val modelList = assets.list("models") ?: return
             for (name in modelList) {
+                // Optional ONNX weights/licenses remain in APK assets. Never try
+                // to open an asset directory as a file or reuse stale TFLite copies.
+                if (!name.endsWith(".tflite")) continue
                 val outFile = java.io.File(modelDir, name)
-                if (!outFile.exists() || outFile.length() == 0L) {
-                    assets.open("models/$name").use { input ->
-                        outFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    Log.i(TAG, "Extracted asset model: $name (${outFile.length()} bytes)")
+                val temporary = java.io.File(modelDir, "$name.tmp")
+                assets.open("models/$name").use { input ->
+                    temporary.outputStream().use { output -> input.copyTo(output) }
                 }
+                check(temporary.renameTo(outFile)) { "Cannot replace model $name" }
             }
         } catch (t: Throwable) {
             Log.w(TAG, "Failed to extract assets: ${t.message}")

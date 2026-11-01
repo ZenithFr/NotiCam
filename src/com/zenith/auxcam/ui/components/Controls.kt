@@ -96,7 +96,7 @@ import kotlin.math.roundToInt
  *
  * A translucent disc with soft interior light — no decorative rim or native
  * backdrop blur, so on a bright scene you read the glyph against the picture
- * rather than against a card. The 44 dp circle lives inside a 48 dp touch target
+ * rather than against a card. The 34 dp circle lives inside a 48 dp touch target
  * and only the circle is scaled on press (`clip = false`), so the glyph is never
  * cropped by the neighbouring layout while the animation runs.
  */
@@ -150,7 +150,7 @@ fun MatteIconButton(
     ) {
         Box(
             modifier = Modifier
-                .size(44.dp)
+                .size(34.dp)
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
@@ -163,7 +163,7 @@ fun MatteIconButton(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 tint = foreground.copy(alpha = foreground.alpha * availability),
-                modifier = Modifier.size(CameraSpacing.iconSize),
+                modifier = Modifier.size(18.dp),
             )
         }
     }
@@ -546,6 +546,9 @@ fun CameraSettings(
         )
         Spacer(Modifier.height(16.dp))
 
+        BokehModelSettings(state, actions)
+        Spacer(Modifier.height(22.dp))
+
         // ── Optional portrait depth ────────────────────────────────
         AnimatedVisibility(
             visible = state.apertureVisible,
@@ -894,7 +897,7 @@ fun TopBar(
     ) {
         Column(Modifier.weight(1f)) {
             Text("NotiCam", style = CameraType.Title, color = CameraColors.Label, maxLines = 1)
-            Text(if (state.mode == CaptureMode.Photo) "Photo · 4:3" else "Video · 16:9",
+            Text(if (state.mode == CaptureMode.Photo) "Photo · 4:3" else "Video · native frame",
                 style = CameraType.Caption, color = CameraColors.LabelSecondary, maxLines = 1)
         }
         Box(Modifier.size(64.dp, 48.dp), contentAlignment = Alignment.Center) {
@@ -905,10 +908,10 @@ fun TopBar(
                     color = CameraColors.Label,
                     modifier = Modifier.cameraGlass(RoundedCornerShape(24.dp))
                         .clickable(enabled = state.sessionReady && !state.captureBusy, onClick = actions::onResolutionToggle)
-                        .padding(horizontal = 10.dp, vertical = 15.dp),
+                        .padding(horizontal = 10.dp, vertical = 9.dp),
                 )
             } else {
-                Text("${state.videoHeight}p", style = CameraType.Caption, color = CameraColors.LabelSecondary)
+                Text(if (state.videoHeight > 0) "${state.videoHeight}p" else "FULL", style = CameraType.Caption, color = CameraColors.LabelSecondary)
             }
         }
         MatteIconButton(

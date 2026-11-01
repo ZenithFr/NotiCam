@@ -43,6 +43,13 @@ enum class FrameRatio(val label: String, val aspect: Float?) {
 data class CameraUiState(
     val mode: CaptureMode = CaptureMode.Photo,
     val bokehEnabled: Boolean = false,
+    val bokehModel: BokehModel = BokehModel.MediaPipeAuto,
+    val bokehModelReady: Boolean = false,
+    val bokehModelError: String? = null,
+    val bokehModelStatus: String = "Model loads on first portrait frame or when checks run",
+    val bokehChecksRunning: Boolean = false,
+    val bokehCheckStatus: String = "No model checks run yet",
+    val bokehCheckResults: List<BokehCheckResult> = emptyList(),
     /** The privileged main camera's advertised full-resolution JPEG size. */
     val highResolutionWidth: Int = 0,
     val highResolutionHeight: Int = 0,
@@ -94,8 +101,8 @@ data class CameraUiState(
     val videoRecording: Boolean = false,
     val videoElapsedSeconds: Long = 0,
     val videoHasAudio: Boolean = false,
-    val videoWidth: Int = 1920,
-    val videoHeight: Int = 1080,
+    val videoWidth: Int = 0,
+    val videoHeight: Int = 0,
     val photoWidth: Int = DeviceProfile.STILL_WIDTH,
     val photoHeight: Int = DeviceProfile.STILL_HEIGHT,
 
@@ -126,11 +133,12 @@ data class CameraUiState(
         get() = zoomBlendPending || zoomBlendImage != null
 
     val canTakePhoto: Boolean
-        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy && !previewTransitioning
+        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy && !previewTransitioning && !bokehChecksRunning &&
+            (!bokehActive || (bokehModelReady && bokehModelError == null))
 
     val canUseShutter: Boolean
         get() = if (mode == CaptureMode.Photo) canTakePhoto
-        else videoRecording || (sessionReady && !captureBusy && !videoStarting && !previewTransitioning)
+        else videoRecording || (sessionReady && !captureBusy && !videoStarting && !previewTransitioning && !bokehChecksRunning)
 
     val photoSizeLabel: String
         get() {

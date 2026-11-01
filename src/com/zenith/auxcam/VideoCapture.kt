@@ -4,6 +4,9 @@ import android.content.ContentValues
 import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.media.MediaRecorder
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -42,8 +45,16 @@ class VideoCapture(private val context: Context) {
             r.setOutputFile(checkNotNull(descriptor).fileDescriptor)
             r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             r.setVideoSize(width, height)
-            r.setVideoFrameRate(30)
-            r.setVideoEncodingBitRate(if (width >= 1920) 24_000_000 else 12_000_000)
+            r.setVideoFrameRate(VideoPolicy.FPS)
+            val codec = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
+                info.isEncoder && info.isHardwareAccelerated && try {
+                    val caps = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+                    caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) &&
+                        caps.videoCapabilities?.areSizeAndRateSupported(width, height, VideoPolicy.FPS.toDouble()) == true
+                } catch (_: IllegalArgumentException) { false }
+            } ?: error("No hardware AVC encoder for this native-aspect stream")
+            val bitrateRange = codec.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities.bitrateRange
+            r.setVideoEncodingBitRate(bitrateRange.clamp(VideoPolicy.bitrate(width, height)))
             if (audio) {
                 r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 r.setAudioSamplingRate(48000)

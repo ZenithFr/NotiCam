@@ -136,13 +136,19 @@ Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
         !validPlane(env, alphaMatteArray, alphaW, alphaH) ||
         !std::isfinite(fStop) || !std::isfinite(targetFarFieldPx)) return JNI_FALSE;
 
-    if (!gPipeline) {
-        gPipeline = std::make_unique<VulkanPipeline>();
-        if (!gPipeline->init(nullptr, 1440, 1080)) {
-            LOGE("Failed to auto-init VulkanPipeline for still bokeh");
-            gPipeline.reset();
+    // A received still may finish after pause destroyed the preview. Keep that
+    // work, but don't resurrect a persistent global GPU pipeline in background.
+    // This local owner's destructor frees even on early failure, while the
+    // pipeline mutex is still held. VulkanPipeline::~VulkanPipeline calls destroy.
+    std::unique_ptr<VulkanPipeline> headlessStillPipeline;
+    VulkanPipeline* stillPipeline = gPipeline.get();
+    if (!stillPipeline) {
+        headlessStillPipeline = std::make_unique<VulkanPipeline>();
+        if (!headlessStillPipeline->init(nullptr, 1440, 1080)) {
+            LOGE("Failed to init temporary VulkanPipeline for still bokeh");
             return JNI_FALSE;
         }
+        stillPipeline = headlessStillPipeline.get();
     }
 
     AHardwareBuffer* hb = AHardwareBuffer_fromHardwareBuffer(env, hardwareBufferObj);
@@ -168,7 +174,7 @@ Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
 
     int64_t ts[4] = {0, 0, 0, 0};
     LOGI("nativeProcessStillBokeh: calling processStillBokeh with outPath=%s, alphaMatte=%p (%dx%d)", outPath ? outPath : "null", alphaBytes, alphaW, alphaH);
-    bool ok = gPipeline->processStillBokeh(
+    bool ok = stillPipeline->processStillBokeh(
             hb,
             reinterpret_cast<const uint8_t*>(depthBytes),
             static_cast<uint32_t>(depthW),

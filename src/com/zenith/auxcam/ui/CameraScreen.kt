@@ -104,30 +104,24 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                 val frameWidth = if (widthBound) maxWidth else maxHeight * aspect
                 val frameHeight = if (widthBound) maxWidth / aspect else maxHeight
                 Box(Modifier.size(frameWidth, frameHeight).clip(RoundedCornerShape(24.dp))) {
-                    Viewfinder(
-                        gridVisible = state.grid,
-                        zoom = state.zoom,
-                        capturePulse = state.capturePulse,
-                        focusNonce = state.focusNonce,
-                        enabled = state.sessionReady && !state.captureBusy && !state.videoRecording,
-                        onSurfaceCreated = actions::onPreviewSurfaceCreated,
-                        onSurfaceChanged = actions::onPreviewSurfaceChanged,
-                        onSurfaceDestroyed = actions::onPreviewSurfaceDestroyed,
-                        onTap = actions::onFocusAt,
-                        onZoomGesture = actions::onZoomGesture,
-                        locked = state.aeAfLocked,
-                        onLock = actions::onFocusLock,
-                        onUnlock = actions::onFocusUnlock,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                    LensBlend(state, actions, Modifier.fillMaxSize())
-                    if (state.mode == CaptureMode.Video) {
-                        // The native preview stays 4:3; 16:9 recording takes the
-                        // center 75% of its sensor height (portrait width).
-                        Box(Modifier.align(Alignment.CenterStart).height(frameHeight).width(frameWidth / 8f)
-                            .background(Color.Black))
-                        Box(Modifier.align(Alignment.CenterEnd).height(frameHeight).width(frameWidth / 8f)
-                            .background(Color.Black))
+                    LensBlend(state, actions, Modifier.fillMaxSize()) {
+                        Viewfinder(
+                            gridVisible = state.grid,
+                            zoom = state.zoom,
+                            capturePulse = state.capturePulse,
+                            focusNonce = state.focusNonce,
+                            enabled = state.sessionReady && !state.previewTransitioning && !state.captureBusy && !state.videoRecording,
+                            zoomEnabled = (state.sessionReady || state.previewTransitioning) && !state.captureBusy && !state.videoRecording,
+                            onSurfaceCreated = actions::onPreviewSurfaceCreated,
+                            onSurfaceChanged = actions::onPreviewSurfaceChanged,
+                            onSurfaceDestroyed = actions::onPreviewSurfaceDestroyed,
+                            onTap = actions::onFocusAt,
+                            onZoomGesture = actions::onZoomGesture,
+                            locked = state.aeAfLocked,
+                            onLock = actions::onFocusLock,
+                            onUnlock = actions::onFocusUnlock,
+                            modifier = Modifier.fillMaxSize(),
+                        )
                     }
                     // A modest gradient gives controls contrast without grading the scene.
                     Box(Modifier.fillMaxWidth().height(100.dp).align(Alignment.BottomCenter)
@@ -135,7 +129,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                     ModeBadge(
                         label = when {
                             state.videoRecording -> String.format(java.util.Locale.US, "● %02d:%02d", state.videoElapsedSeconds / 60, state.videoElapsedSeconds % 60)
-                            state.mode == CaptureMode.Video -> "VIDEO  ·  16:9"
+                            state.mode == CaptureMode.Video -> if (state.videoWidth > 0) "VIDEO  ·  ${state.videoWidth} × ${state.videoHeight}" else "VIDEO  ·  NATIVE FRAME"
                             state.bokehActive -> "PORTRAIT  ${state.fStopLabel}"
                             state.resolution == Resolution.High -> "50 MP  ·  1×"
                             else -> null
@@ -158,7 +152,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                     }
                     Box(
                         Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
-                            .cameraGlass(RoundedCornerShape(30.dp)).padding(horizontal = 5.dp, vertical = 4.dp)
+                            .cameraGlass(RoundedCornerShape(24.dp)).padding(horizontal = 2.dp)
                             .pointerInput(Unit) {
                                 detectHorizontalDragGestures(
                                     onDragStart = { actions.onZoomDragStart() },
