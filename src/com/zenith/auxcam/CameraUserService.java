@@ -53,6 +53,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     private boolean mVideoMode;
     private boolean mHighResolutionStill;
     private volatile CameraCapabilities.Target mHighResolutionTarget;
+    private volatile int mRemosaicStatus = 0;
 
     private CaptureRequest.Builder mPreviewRequestBuilder;
     long mShutterCommandNs = 0;
@@ -405,7 +406,10 @@ public class CameraUserService extends IAuxCamService.Stub {
                 if (mRecordingSurface != null) outputs.add(new OutputConfiguration(mRecordingSurface));
             } else {
                 OutputConfiguration stillConfig = new OutputConfiguration(mStillSurface);
-                if (mHighResolutionStill && android.os.Build.VERSION.SDK_INT >= 31) stillConfig.addSensorPixelModeUsed(mStillPixelMode);
+                if (mHighResolutionStill && android.os.Build.VERSION.SDK_INT >= 31 &&
+                        (mHighResolutionTarget == null || !"Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source))) {
+                    stillConfig.addSensorPixelModeUsed(mStillPixelMode);
+                }
                 if (!mVideoMode && !mHighResolutionStill && CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) outputs.add(new OutputConfiguration(mDepthSurface));
                 outputs.add(stillConfig);
             }
@@ -539,11 +543,10 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             if (fullResolutionStill) {
                 // Maximum-resolution mode has a different sensor coordinate
-                // domain. Reusing the binned preview crop can cut out a quarter
-                // of the sensor, then upscale it into a misleading 50 MP JPEG.
-                Rect full = mStillPixelMode == CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION
-                        ? mMaximumActiveArray : mActiveArray;
-                if (full != null) b.set(CaptureRequest.SCALER_CROP_REGION, full);
+                // domain. Only set SCALER_CROP_REGION if mMaximumActiveArray is explicitly known.
+                if (mMaximumActiveArray != null) {
+                    b.set(CaptureRequest.SCALER_CROP_REGION, mMaximumActiveArray);
+                }
             } else if (mCropRegion != null) {
                 b.set(CaptureRequest.SCALER_CROP_REGION, mCropRegion);
             }
@@ -819,12 +822,12 @@ public class CameraUserService extends IAuxCamService.Stub {
             stillBuilder.addTarget(mStillSurface);
             stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl && mStillFormat != ImageFormat.JPEG);
             if (mStillFormat == ImageFormat.JPEG) {
-                if (android.os.Build.VERSION.SDK_INT >= 31) {
+                if (android.os.Build.VERSION.SDK_INT >= 31 && (mHighResolutionTarget == null || !"Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source))) {
                     stillBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
                 }
                 if (mHighResolutionStill) {
                     try {
-                        stillBuilder.set(new CaptureRequest.Key<Integer>("com.nothing.camera.remosaic.enable", Integer.class), 1);
+                        stillBuilder.set(new CaptureRequest.Key<Integer>("com.nothing.camera.remosaic.enable", Integer.class), mRemosaicStatus == 1 ? 1 : 0);
                     } catch (Throwable ignored) {}
                 }
                 stillBuilder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
@@ -846,7 +849,11 @@ public class CameraUserService extends IAuxCamService.Stub {
             }
             applyCropAndExposure(stillBuilder, mHighResolutionStill);
             applyStillFlash(stillBuilder);
-            applyMinimalProcessing(stillBuilder);
+            if (mHighResolutionStill) {
+                stillBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, mRemosaicStatus == 1 ? CaptureRequest.NOISE_REDUCTION_MODE_FAST : CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY);
+            } else {
+                applyMinimalProcessing(stillBuilder);
+            }
 
             mCaptureSession.capture(stillBuilder.build(), new StillCaptureCallback(this), mCameraHandler);
         } catch (Throwable t) {
@@ -886,6 +893,11 @@ public class CameraUserService extends IAuxCamService.Stub {
     void onCaptureResult(TotalCaptureResult result) {
         mColorFrameCount++;
         mDepthFrameCount++; // Synced hardware DPE frames
+
+        try {
+            Integer status = result.get(new CaptureResult.Key<Integer>("com.nothing.camera.remosaic.status", Integer.class));
+            if (status != null) mRemosaicStatus = status;
+        } catch (Throwable ignored) {}
 
         long nowCadence = SystemClock.elapsedRealtime();
         if (nowCadence - mLastCadenceLogMs >= 1000) {

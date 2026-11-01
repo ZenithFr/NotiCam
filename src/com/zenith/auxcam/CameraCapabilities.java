@@ -87,7 +87,7 @@ final class CameraCapabilities {
                         int w = ntSizes[i + 1];
                         int h = ntSizes[i + 2];
                         int io = ntSizes[i + 3];
-                        if (fmt == ImageFormat.JPEG && io == 0 && is50Mp(new Size(w, h))) {
+                        if ((fmt == 33 || fmt == ImageFormat.JPEG) && io == 0 && is50Mp(new Size(w, h))) {
                             return new Target(id, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
                         }
                     }
