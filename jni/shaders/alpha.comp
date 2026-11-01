@@ -29,12 +29,12 @@ void main() {
 
     vec2 uv = (vec2(coord) + 0.5) / vec2(pc.width, pc.height);
 
+    float s1 = max(pc.s1_focus_m, 0.1);
     float alpha = 0.0;
     if (pc.stubAlphaMode != 0) {
         // Stub-Alpha Debug Mode: derive alpha directly from depth map (no NPU)
         vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
         float depth_m = texture(uDepth, depthUv).r;
-        float s1 = max(pc.s1_focus_m, 0.1);
         alpha = 1.0 - smoothstep(s1 - 0.15, s1 + 0.15, depth_m);
     } else {
         // ── Real Alpha Guided Filter Edge Refinement ───────────────────────
@@ -65,6 +65,18 @@ void main() {
 
             alpha = clamp(refined, 0.0, 1.0);
         }
+    }
+
+    if (pc.stubAlphaMode == 0) {
+        // Low-light amplitude recovery. In good light this is a no-op.
+        alpha = smoothstep(0.35, 0.85, alpha);
+
+        // Depth gate: anything clearly beyond subject depth is
+        // background regardless of the AI's confidence.
+        vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
+        float depth_m = texture(uDepth, depthUv).r;
+        float gate = 1.0 - smoothstep(s1 * 1.2, s1 * 2.5, depth_m);
+        alpha *= gate;
     }
 
     imageStore(uOutAlpha, coord, vec4(alpha, 0.0, 0.0, 1.0));

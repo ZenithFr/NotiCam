@@ -816,6 +816,16 @@ class CameraController(
                 bitmap.compress(Bitmap.CompressFormat.JPEG, quality, outStream)
                 outStream.flush()
             }
+            try {
+                val edgeGatedFile = File("/sdcard/Pictures/NotiCam/edge_gated.png")
+                edgeGatedFile.parentFile?.mkdirs()
+                FileOutputStream(edgeGatedFile).use { fos ->
+                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
+                    fos.flush()
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Failed to save /sdcard/Pictures/NotiCam/edge_gated.png: ${t.message}")
+            }
             bitmap.recycle()
 
             // 4. Set EXIF orientation (sensor orientation is 90 deg)

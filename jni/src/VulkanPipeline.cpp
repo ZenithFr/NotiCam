@@ -727,14 +727,21 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     const char* matchedTrigger = nullptr;
     if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
         matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab";
+    } else if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_wire_ab", F_OK) == 0) {
+        matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_wire_ab";
     } else if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
         matchedTrigger = "/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab";
     } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab", F_OK) == 0) {
         matchedTrigger = "/sdcard/Pictures/NotiCam/trigger_guided_ab";
+    } else if (access("/sdcard/Pictures/NotiCam/trigger_wire_ab", F_OK) == 0) {
+        matchedTrigger = "/sdcard/Pictures/NotiCam/trigger_wire_ab";
     }
 
     bool forceTrigger = false;
-    if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
+    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
+        unlink("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
+        forceTrigger = true;
+    } else if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
         unlink("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
         forceTrigger = true;
     } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab_force", F_OK) == 0) {
@@ -859,14 +866,46 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
         float confidentPct = (totalGridPx > 0) ? (static_cast<float>(confidentCount) * 100.0f / totalGridPx) : 0.0f;
         const char* focusSource = "hold";
+
+        static struct timespec sLastConfidentTime = {0, 0};
+        static bool sInitializedHoldTimer = false;
+        struct timespec tsNowFocusCalc;
+        clock_gettime(CLOCK_MONOTONIC, &tsNowFocusCalc);
+        if (!sInitializedHoldTimer) {
+            sLastConfidentTime = tsNowFocusCalc;
+            sInitializedHoldTimer = true;
+        }
+
         if (confidentPct >= 2.0f && !confidentDepths.empty()) {
+            sLastConfidentTime = tsNowFocusCalc;
             std::nth_element(confidentDepths.begin(), confidentDepths.begin() + confidentDepths.size() / 2, confidentDepths.end());
             float medianDepth = confidentDepths[confidentDepths.size() / 2];
             mOpticalParams.s1FocusM = std::clamp(medianDepth, 0.3f, 5.0f);
             focusSource = "matte";
         } else {
-            mOpticalParams.s1FocusM = std::clamp(mOpticalParams.s1FocusM, 0.3f, 5.0f);
-            focusSource = "hold";
+            double holdSec = (tsNowFocusCalc.tv_sec - sLastConfidentTime.tv_sec) +
+                             (tsNowFocusCalc.tv_nsec - sLastConfidentTime.tv_nsec) * 1e-9;
+            if (holdSec < 3.0) {
+                mOpticalParams.s1FocusM = std::clamp(mOpticalParams.s1FocusM, 0.3f, 5.0f);
+                focusSource = "hold";
+            } else {
+                // After 3s of no confident pixels, use depth p10 as s1 (nearest valid background surface)
+                std::vector<float> validDepths;
+                validDepths.reserve(totalGridPx);
+                for (uint32_t i = 0; i < totalGridPx; ++i) {
+                    if (gridValid[i]) {
+                        validDepths.push_back(gridDepth[i]);
+                    }
+                }
+                if (!validDepths.empty()) {
+                    size_t p10Idx = static_cast<size_t>(validDepths.size() * 0.10f);
+                    std::nth_element(validDepths.begin(), validDepths.begin() + p10Idx, validDepths.end());
+                    mOpticalParams.s1FocusM = std::clamp(validDepths[p10Idx], 0.3f, 5.0f);
+                } else {
+                    mOpticalParams.s1FocusM = std::clamp(mOpticalParams.s1FocusM, 0.3f, 5.0f);
+                }
+                focusSource = "depth_fallback";
+            }
         }
         s1 = mOpticalParams.s1FocusM;
 
@@ -1132,6 +1171,12 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     writes[11].descriptorCount = 1;
     writes[11].pImageInfo = &descDepthSample;
 
+    static bool sDepthBoundLogged = false;
+    if (!sDepthBoundLogged) {
+        LOGI("ALPHA_DEPTH_BOUND unconditional=1");
+        sDepthBoundLogged = true;
+    }
+
     uint32_t numWrites = 12;
     if (mSetComp527 != VK_NULL_HANDLE) {
         writes[12].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1362,6 +1407,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             uint8_t* pBytes = (uint8_t*)pMap;
             savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
             savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
+            savePngRgba("/sdcard/Pictures/NotiCam/wire_gate_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
+            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/wire_gate_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
 
             if (cocOffset + cocCount * 2 > readbackBufferSize) {
                 LOGE("COC_READ_ABORT offset=%zu count=%zu bufsize=%zu", (size_t)cocOffset, cocCount, readbackBufferSize);
@@ -1441,8 +1488,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             vkUnmapMemory(mDevice, mReadbackMem);
         }
 
-        // PASS 2: Guided OFF (same frame!)
-        LOGI("COMPOSITE guided=off");
+        // PASS 2: Guided OFF / Gate OFF (same frame!)
+        LOGI("COMPOSITE guided=off / wire_gate_off");
         vkResetCommandBuffer(curCmd, 0);
         vkBeginCommandBuffer(curCmd, &bInfo);
 
@@ -1450,7 +1497,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         transition(mImgBlurred, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         transition(mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 1u };
+        // s1 = 100.0m disables the depth gate in alpha.comp
+        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, 100.0f, (hasRealAlpha ? 0u : 1u), 0, 1u };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOff);
@@ -1481,6 +1529,8 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             uint8_t* pBytes = (uint8_t*)pMap;
             savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_off.png", mPreviewW, mPreviewH, pBytes);
             savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_off.png", mPreviewW, mPreviewH, pBytes);
+            savePngRgba("/sdcard/Pictures/NotiCam/wire_gate_off.png", mPreviewW, mPreviewH, pBytes);
+            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/wire_gate_off.png", mPreviewW, mPreviewH, pBytes);
             vkUnmapMemory(mDevice, mReadbackMem);
         }
         LOGI("=== GUIDED A/B DIAGNOSTIC COMPLETE ===");
