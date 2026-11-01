@@ -10,17 +10,17 @@ have been fixed or that phase-two AI post-processing exists.
 ## Validation in the coding sandbox
 
 - `./build.sh check`: UI/resource reference checks, existing optical CoC math,
-  and 25 Python source-contract regression tests passed.
+  and 45 Python source-contract regression tests passed.
 - Seven compute shaders compiled successfully to SPIR-V using the npm
   `@webgpu/glslang` WebAssembly compiler (validation only; generated binaries are
   not committed). This is separate from the standard `glslc` Android build step.
 - Kotlin, Java and C++ source parsed with Tree-sitter; JNI export macros were
   removed only from parser input, not from source.
 - `git diff --check` passed.
-- Eighteen JVM tests added for the actual `FrameData`/`CaptureOutput` production helpers: padded rows,
+- Twenty-nine JVM tests authored for `FrameData`, `CaptureOutput`, `CameraZoom` and UI policy: padded rows,
   pixel stride, buffer position, malformed geometry, timestamp selection/age
   boundaries, empty inputs, inverse matte rotation, full-resolution output
-  validation, two-mode behavior, and bokeh/video/shutter gating.
+  validation, two-mode behavior, optical/digital zoom separation and bokeh/video/shutter gating.
 - **Not run:** Gradle Android build, JVM tests, NDK compile, instrumentation or
   physical camera tests. This sandbox has no JDK, Gradle, Android SDK/NDK or
   connected phone, and its network does not include the Android dependency hosts.
@@ -130,12 +130,12 @@ resulting JPEGs at full resolution. Record OS/build fingerprint and app commit.
    50 MP badge.
 4. Test background/resume, Shizuku death and low storage during 50 MP capture.
    Confirm no empty published rows and no ~200 MB bitmap allocation.
-5. Select Video, press the shutter/accessibility actions and send the legacy
-   capture broadcast: no JPEG or recording should start. Return to Photo and
-   confirm still capture works. Video recording is intentionally deferred.
+5. In Video, the legacy still-capture broadcast must not save a JPEG. Verify the
+   red shutter starts MP4 recording, stop finalizes it, and Photo still works
+   after changing modes. Also test the release gates below.
 
 
-## Matte and motion refinement
+## Earlier matte and motion refinement (surface styling superseded below)
 
 - Retained the controls but removed their decorative glass rims, sheen and blur;
   uniformly shaded matte fills now back the toolbar, zoom and mode capsules.
@@ -152,3 +152,99 @@ resulting JPEGs at full resolution. Record OS/build fingerprint and app commit.
   phone that rapid pinch/scrub, slider resets, repeated capture, failed saves,
   orientation/resume and system animator scale 0 behave correctly. Verify that
   no animation causes extra lens switches or SurfaceView/swapchain resizes.
+
+
+## Optical zoom, quality, borderless glass, viewer and basic video
+
+- Removed the tele-assist settings control, state flag and callback. The 2× stop
+  selects camera 3 unconditionally; `CameraZoom.digitalRatio(2, "3", max)` is 1.
+  Session opening now carries the requested zoom, avoiding an old crop during
+  lens/session handoff. Lens failures are explicit, not silent main-sensor crops.
+- Sharp images use per-sensor advertised native JPEG sizes and preserve HAL bytes
+  at quality 100. YUV/Vulkan still processing is reserved for portrait effect;
+  portrait activation returns to main/1×. Sensor orientation comes from metadata.
+- Broadened 50 MP discovery and added read-only vendor/extension/physical-camera
+  reports. This is not a claim that OEM-only full-resolution mode is unlocked.
+- Restored glass depth using translucent body gradients, without decorative rims.
+- Added the app-owned Photos-inspired viewer and foreground-only video recorder.
+  Video uses a separate preview/recorder session (no depth/still output), chooses
+  advertised 30-fps-compatible sizes up to 1080p, and transactionally publishes MP4.
+- Current checks: 31 Python source contracts and optical/UI checks; Java/Kotlin/C++
+  syntax parsing; Chromium preview interactions including simulated video and
+  viewer controls. Android compilation and all JVM/device tests remain unrun.
+- API 29 is the new minimum, so the existing pending-row storage contract is not
+  falsely offered on API 28.
+
+### Required phone checks for this pass
+
+1. Compare 1× and 2× against the stock app, including saved image field of view,
+   lens ID/focal length and dimensions. At 2×, the tele crop region must be the
+   full active array. Exercise UW/main/tele failures and rapid repeated changes.
+2. Share **Camera controls → Camera report**. Determine whether the stock 50 MP
+   path is another openable main ID, a maximum-resolution map, a physical-only
+   output, an extension, or proprietary remosaic/operating-mode control. Validate
+   real detail, not just output dimensions, before calling a new vendor path true
+   50 MP. Never invent dimensions or enable guessed vendor controls.
+3. Compare native JPEG detail/color/EXIF/4:3 framing with the old YUV encode. Test
+   portrait on/off, rejected JPEG stream combinations, low light, focus and flash.
+4. Record each lens with audio granted/denied, stop after short/long clips, verify
+   playback duration/rotation/audio and 16:9 field of view. Test storage full,
+   Shizuku death, lock/home, recording-start timeout and the 15-minute limit.
+5. Verify no microphone survives backgrounding, only valid videos are published,
+   repeated start/stop cannot overlap, and Photo works after recording.
+6. Verify full-image fit/EXIF, page/pinch gesture arbitration, thumbnail memory,
+   sharing, persistent favorites, confirmed deletion and camera return in viewer.
+   Review video playback while backgrounding the viewer and returning to it.
+
+
+## BitChord-inspired styling and consistent Shizuku discovery
+
+- Independently adapted BitChord's white selection pill, floating round glass,
+  soft artwork atmosphere and title/secondary-text hierarchy. No upstream code,
+  fonts or artwork is included in the app; native controls do not claim real
+  SurfaceView refraction. Functional focus/shutter rings remain.
+- Added a bounded 12×12 saved-thumbnail palette on a background dispatcher. Only
+  chrome is tinted; no live-frame readback, capture shader or JPEG processing was
+  added. Hardware thumbnails use a private readable copy, never recycling the
+  caller's bitmap. Viewer atmosphere follows the current capture.
+- Restyled the viewer with floating actions and a spring-animated filmstrip.
+  Original fit/zoom/share/delete/video behavior remains; camera surface geometry
+  is fixed while modes and overlays change.
+- Reused one cached shell-context CameraManager for capture and every capability
+  query. Discovery also checks the existing auxiliary routes if enumeration
+  omits them. Reports distinguish enumerated/queried IDs, actual process UID,
+  attribution and camera permissions; no global settings or vendor keys changed.
+- `./build.sh check`: **38** Python source contracts, CoC and UI/import checks
+  passed. **38** Java/Kotlin/C++ source files parsed successfully (not compiled).
+  Chromium regression checks passed for photo/bokeh/50 MP simulations, stable
+  framing, zoom/sliders, video simulation/timer/guards, viewer actions, reduced
+  motion, 320–390 px layouts and no JavaScript errors. A separate narrow-header
+  measurement caught and fixed title overlap at 320 px.
+- Android build, JVM tests and device capture remain unrun. On the phone, verify
+  header/system text scaling, thumbnail palette changes, viewer page/delete
+  transitions, Shizuku shell/root report identity and real JPEG/video sessions.
+  Obtain the camera report before asserting OEM 50 MP support.
+
+
+## Smooth zoom and 1080-line/60 fps preview target
+
+- Added one-shot outgoing-frame freeze/zoom/dissolve for physical handoffs,
+  fresh-queue/rendered-frame readiness, bounded copy/open/frame timeouts,
+  cancellation tokens, coalesced targets and transition shutter gating.
+- Same-lens crops ease on the camera handler; full-quality stills snap to the
+  final requested zoom. Ultrawide now reaches just below 1× before the main route.
+- Preview size/FPS are queried separately from still size. The largest eligible
+  4:3 feed up to 1440×1080 prefers advertised 60 fps, otherwise an explicit lower
+  rate. A failed 60 fps session retries at <=30 without reducing JPEG quality.
+  Recording remains on its existing 30 fps encoder policy. UserService protocol
+  version is bumped to 6 for the extended AIDL API.
+- A fixed upright 1080×1440 surface and API 30+ 60 Hz hint support consistent
+  presentation. Rendered/queued-present FPS is measured separately from sensor
+  result FPS. Neither a hint nor a requested range proves actual 60 fps output.
+- Sharp GPU frames skip unused depth/alpha staging and blur passes entirely;
+  safe GPU completion/image lifetime and full-resolution still processing remain.
+- Added seven source regression tests (45 total) and six JVM tests (29 authored,
+  not executed here). Browser demonstration and documentation explicitly separate
+  simulated handoff motion from actual camera performance.
+- Native compilation and phone testing remain required. See
+  [PREVIEW_SMOOTHNESS.md](PREVIEW_SMOOTHNESS.md) for limitations and the device matrix.

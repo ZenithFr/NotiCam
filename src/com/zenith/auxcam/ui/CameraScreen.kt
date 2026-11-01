@@ -61,6 +61,7 @@ import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.DeviceProfile
 import com.zenith.auxcam.Resolution
+import com.zenith.auxcam.ui.components.LensBlend
 import com.zenith.auxcam.ui.components.BottomBar
 import com.zenith.auxcam.ui.components.CameraSettings
 import com.zenith.auxcam.ui.components.MatteIconButton
@@ -68,7 +69,8 @@ import com.zenith.auxcam.ui.components.QuickApertureRow
 import com.zenith.auxcam.ui.components.TopBar
 import com.zenith.auxcam.ui.components.Viewfinder
 import com.zenith.auxcam.ui.components.ZoomChips
-import com.zenith.auxcam.ui.effects.cameraMatte
+import com.zenith.auxcam.ui.effects.SceneAtmosphere
+import com.zenith.auxcam.ui.effects.cameraGlass
 import com.zenith.auxcam.ui.icons.NotiIcons
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
@@ -76,7 +78,7 @@ import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.roundToInt
 
 /**
- * Scene-first camera: borderless matte controls, a two-mode dock and an explicit
+ * Scene-first camera: borderless glass controls, a two-mode dock and an explicit
  * portrait-effect button. No backdrop blur over a SurfaceView and no resizing
  * of the preview when controls open or the effect is toggled.
  */
@@ -86,6 +88,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
     var shutterCenter by remember { mutableStateOf(Offset.Zero) }
     var galleryCenter by remember { mutableStateOf(Offset.Zero) }
     Box(modifier.fillMaxSize().background(CameraColors.Black)) {
+        SceneAtmosphere(state.lastThumbnail, Modifier.matchParentSize())
         Column(
             modifier = Modifier.fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing),
@@ -106,7 +109,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                         zoom = state.zoom,
                         capturePulse = state.capturePulse,
                         focusNonce = state.focusNonce,
-                        enabled = state.sessionReady && !state.captureBusy,
+                        enabled = state.sessionReady && !state.captureBusy && !state.videoRecording,
                         onSurfaceCreated = actions::onPreviewSurfaceCreated,
                         onSurfaceChanged = actions::onPreviewSurfaceChanged,
                         onSurfaceDestroyed = actions::onPreviewSurfaceDestroyed,
@@ -117,11 +120,22 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                         onUnlock = actions::onFocusUnlock,
                         modifier = Modifier.fillMaxSize(),
                     )
+                    LensBlend(state, actions, Modifier.fillMaxSize())
+                    if (state.mode == CaptureMode.Video) {
+                        // The native preview stays 4:3; 16:9 recording takes the
+                        // center 75% of its sensor height (portrait width).
+                        Box(Modifier.align(Alignment.CenterStart).height(frameHeight).width(frameWidth / 8f)
+                            .background(Color.Black))
+                        Box(Modifier.align(Alignment.CenterEnd).height(frameHeight).width(frameWidth / 8f)
+                            .background(Color.Black))
+                    }
                     // A modest gradient gives controls contrast without grading the scene.
                     Box(Modifier.fillMaxWidth().height(100.dp).align(Alignment.BottomCenter)
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0x70000000)))))
                     ModeBadge(
                         label = when {
+                            state.videoRecording -> String.format(java.util.Locale.US, "● %02d:%02d", state.videoElapsedSeconds / 60, state.videoElapsedSeconds % 60)
+                            state.mode == CaptureMode.Video -> "VIDEO  ·  16:9"
                             state.bokehActive -> "PORTRAIT  ${state.fStopLabel}"
                             state.resolution == Resolution.High -> "50 MP  ·  1×"
                             else -> null
@@ -139,12 +153,12 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                             contentDescription = if (state.bokehActive) "Turn portrait effect off" else "Turn portrait effect on",
                             onClick = actions::onBokehToggle,
                             selected = state.bokehActive,
-                            enabled = state.sessionReady && !state.captureBusy,
+                            enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.previewTransitioning,
                         )
                     }
                     Box(
                         Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
-                            .cameraMatte(RoundedCornerShape(30.dp)).padding(horizontal = 5.dp, vertical = 4.dp)
+                            .cameraGlass(RoundedCornerShape(30.dp)).padding(horizontal = 5.dp, vertical = 4.dp)
                             .pointerInput(Unit) {
                                 detectHorizontalDragGestures(
                                     onDragStart = { actions.onZoomDragStart() },
@@ -154,7 +168,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                             },
                     ) {
                         ZoomChips(zoom = state.zoom, onSelect = actions::onZoomSelected,
-                            stops = DeviceProfile.ZOOM_STOPS, enabled = state.sessionReady && !state.captureBusy)
+                            stops = DeviceProfile.ZOOM_STOPS, enabled = state.sessionReady && !state.captureBusy && !state.videoRecording)
                     }
                     androidx.compose.animation.AnimatedVisibility(
                         visible = state.zoomActive,
@@ -173,14 +187,18 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                     if (apertureVisible) QuickApertureRow(state = state, actions = actions)
                     else {
                         val message = when {
-                            state.mode == CaptureMode.Video -> "Video recording is coming later"
+                            state.videoRecording -> if (state.videoHasAudio) "Recording • audio on" else "Recording • microphone off"
+                            state.mode == CaptureMode.Video && state.captureBusy -> state.status
+                            state.mode == CaptureMode.Video -> if (state.status == "Ready")
+                                "${state.videoHeight}p · 30 fps · ${if (state.videoHasAudio) "Audio on" else "Mic permission requested on Record"}"
+                                else state.status
                             !DeviceProfile.isTargetDevice() -> "Designed for CMF Phone 2 Pro"
-                            state.status == "Ready" -> "${state.resolution.label}  ·  4:3  ·  JPEG"
+                            state.status == "Ready" -> "${state.photoSizeLabel}  ·  4:3  ·  JPEG"
                             else -> state.status
                         }
                         Crossfade(targetState = message, animationSpec = tween(180), label = "camera-status") { text ->
                             Text(text = text, style = CameraType.Caption,
-                                color = if (state.captureBusy) CameraColors.Yellow else CameraColors.LabelSecondary,
+                                color = if (state.captureBusy) CameraColors.Accent else CameraColors.LabelSecondary,
                                 modifier = Modifier.padding(horizontal = 24.dp), maxLines = 2)
                         }
                     }
@@ -212,6 +230,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                     .verticalScroll(rememberScrollState()).padding(bottom = 24.dp))
         }
     }
+    if (state.galleryOpen) GalleryScreen(onClose = actions::onGalleryClose)
 }
 
 /** Preserve the last valid label while fading out, rather than flashing a false 50 MP badge. */
@@ -225,8 +244,8 @@ private fun ModeBadge(label: String?, modifier: Modifier = Modifier) {
         exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.94f),
         modifier = modifier,
     ) {
-        Text(text = label ?: lastLabel, style = CameraType.Caption, color = CameraColors.Yellow,
-            modifier = Modifier.cameraMatte(RoundedCornerShape(16.dp)).padding(horizontal = 14.dp, vertical = 8.dp))
+        Text(text = label ?: lastLabel, style = CameraType.Caption, color = CameraColors.Accent,
+            modifier = Modifier.cameraGlass(RoundedCornerShape(16.dp)).padding(horizontal = 14.dp, vertical = 8.dp))
     }
 }
 
@@ -236,7 +255,7 @@ private fun ZoomReadout(zoom: Float) {
     val displayedZoom by animateFloatAsState(zoom, CameraMotion.fluid(), label = "zoom-readout")
     Text(String.format(java.util.Locale.US, "%.1f×", displayedZoom),
         style = CameraType.Dial, color = Color.White,
-        modifier = Modifier.cameraMatte(RoundedCornerShape(28.dp)).padding(horizontal = 22.dp, vertical = 12.dp))
+        modifier = Modifier.cameraGlass(RoundedCornerShape(28.dp)).padding(horizontal = 22.dp, vertical = 12.dp))
 }
 
 /** A successful save alone sends a thumbnail into the gallery. Failed captures never fly. */

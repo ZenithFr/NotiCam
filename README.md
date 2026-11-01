@@ -9,23 +9,32 @@ part of the default capture path today.
 
 | Mode / feature | Behavior |
 | --- | --- |
-| Photo | Sharp 4080 × 3072 YUV → RGB → JPEG, quality 100; no app bokeh |
-| Video | Selectable preview only; recording is explicitly unavailable until the video phase |
+| Photo | Selected sensor’s largest advertised standard 4:3 JPEG (up to 20 MP); quality 100; original HAL bytes preserved. 12 MP YUV/Vulkan processing only with portrait effect on |
+| Video | H.264 MP4 at the largest advertised 16:9 size up to 1080p/30; AAC audio with microphone permission; start/stop and timer |
 | Portrait button | Optional 12 MP depth/matte bokeh inside Photo; displayed aperture is **simulated**, not a movable lens iris |
 | Camera processing | Request noise reduction OFF (or MINIMAL if advertised) and edge enhancement OFF when supported |
-| Lenses | Device-specific main/stereo `5`, ultra-wide `2`, tele `3`; tele assist is an explicit setting |
-| Framing | Native sensor 4:3 only; custom crops are not implemented |
+| Lenses | Main `0` (stereo `5` for portrait), ultra-wide `2`, optical tele `3`. The 2× chip selects tele automatically, without another 2× digital crop; no tele-assist setting |
+| Framing | Photos preserve native 4:3. Video is 16:9, with corresponding side masks on the portrait preview; electronic stabilization is off to avoid hidden crop |
 | Sensor RAW / DNG | **Not implemented.** The old RAW toggle only dumped a Y plane and has been removed |
 | 50 MP | Separate main-camera JPEG path using advertised ordinary/high-resolution or maximum-resolution sensor-pixel-mode sizes; JPEG quality 100; no upscaling or second JPEG encode |
-| Orientation | Portrait preview; 12 MP sensor-landscape JPEG with 90° EXIF; 50 MP preserves the HAL JPEG and its orientation metadata |
-| Saving | Pending MediaStore row published only after successful encoding; failed rows are deleted |
+| Orientation | Portrait UI; JPEG/recording orientation uses sensor metadata; original JPEG EXIF is preserved and the viewer honors rotation/mirroring |
+| Saving | Pending MediaStore row published only after a valid JPEG/MP4 is written; failed/empty rows are deleted |
+| Viewer | In-app Photos-inspired viewer for NotiCam-owned images/videos: paging, full-image fit, pinch/double-tap zoom, filmstrip, favorites, sharing, confirmed deletion and video playback |
 
 **YUV is not unprocessed sensor RAW.** Camera ISP demosaic, color conversion,
 white balance and potentially other vendor processing still apply. JPEG 100 is
 also not lossless. The app does not yet have a Bayer `RAW_SENSOR` + capture
 metadata + `DngCreator` path, and must not claim otherwise.
 
-50 MP is a **main camera, 1×, sharp-capture** option. Turning on the portrait
+50 MP is a **main camera, 1×, sharp-capture** option, only when an exposed regular
+Camera2 stream supports it. Discovery checks queryable rear main-field-of-view
+cameras, including the existing auxiliary routes if enumeration omits them, not just ID 0.
+Metadata eligibility is not proof of a successful camera/session open. Vendor/physical-camera and extension metadata are available
+through **Camera controls → Camera report**. A stock-camera 50 MP mode may need
+OEM-only session/remosaic controls; this implementation does **not** claim to
+have unlocked those without a device report. See [50 MP investigation](design/CAMERA_DISCOVERY.md).
+
+When an advertised 50 MP path is available, turning on the portrait
 effect or changing zoom/lenses returns to 12 MP. The app validates the encoded
 JPEG dimensions against the selected HAL size before publication. A rejected
 50 MP stream combination rolls back to 12 MP; unsupported devices never get an
@@ -44,17 +53,35 @@ phones. Permission to use the privileged camera service is provided by Shizuku.
 - `DualMatteSegmenter.kt`: upright MediaPipe inference; output mapped back into sensor space.
 - `jni/src/`: Vulkan/YUV pipeline and a synchronized JNI lifetime boundary.
 - `jni/shaders/`: CoC, matte refinement, gather and composition.
-- `src/com/zenith/auxcam/ui/`: Compose camera UI, warm accent, persistent status, settings and shutter.
+- `src/com/zenith/auxcam/ui/`: Compose camera UI, thumbnail atmosphere, floating controls, settings and shutter.
 
-The iOS-inspired UI has only Photo/Video modes, a yellow selection accent,
-rounded scene framing, borderless matte controls and a modal settings sheet. The
-portrait-effect button lives in the viewfinder corner, not in the mode selector.
-This is an original approximation of the requested design direction, not a
-pixel-verified copy of an iOS 27 screenshot or Apple assets. Flat fills replace
-glass rims and sheen. Traveling mode/zoom indicators, direct-drag sliders, capture
-pulses, a real busy indicator and a successful-save thumbnail handoff provide
-motion without animating camera commands or resizing the Vulkan surface. The
-separate lens-cycle button is gone; zoom stops, pinch and scrub still select lenses.
+The [BitChord-inspired UI](design/DESIGN.md) has only Photo/Video modes, a white
+sliding selection pill, floating borderless glass controls and a title/metadata
+hierarchy. Soft background color comes from a tiny saved-thumbnail palette,
+computed off the main thread; the viewer follows the selected capture's color.
+The portrait-effect button remains in the viewfinder corner, not the mode selector.
+This is an independent visual adaptation, not copied BitChord code, fonts or branding.
+Translucent fills and restrained interior gradients provide glass depth without
+rims. Native controls do not claim live SurfaceView backdrop blur or refraction.
+Traveling mode/zoom indicators, direct-drag sliders, capture pulses, busy state,
+filmstrip selection and a successful-save thumbnail handoff provide motion
+without animating camera commands, grading captured pixels or resizing the Vulkan
+surface. The separate lens-cycle button is gone; zoom still selects lenses.
+
+The viewfinder now targets a full-field **1440×1080 / 60 fps** feed (upright
+1080×1440 buffer) when advertised, independently of the saved photo resolution.
+Same-lens zoom eases its crop; physical changes use an outgoing-frame zoom/dissolve
+that waits for fresh incoming frames. The sharp GPU preview skips unused blur
+passes. Camera controls report target versus rendered FPS and any fallback; this
+is not a device-verified promise of sustained 60 fps. See
+[preview smoothness and quality isolation](design/PREVIEW_SMOOTHNESS.md).
+
+Capture and discovery now share one cached, shell-context CameraManager inside the
+Shizuku UserService. **Camera controls → Camera report** shows the actual process
+UID, attribution and camera permissions alongside enumerated/queried IDs and HAL
+metadata. Shizuku shell privileges are not root, do not grant an OEM app identity,
+and do not guarantee vendor-only 50 MP/remosaic controls. No global app-ops,
+permissions, sensor-privacy switches or vendor properties are changed.
 
 Capture is single-flight through
 saving, not just until a camera buffer arrives. Depth is selected by sensor
@@ -80,6 +107,29 @@ Lens/mode changes invalidate auxiliary frames.
 - Native preview drops a frame rather than racing a still or engine teardown.
   Serialization favors correctness over the previous unverified interleaving
   performance claims; measure its latency and preview gaps on-device.
+
+## Video and viewer
+
+Choose a lens before recording, select Video and tap the red shutter. Microphone
+permission is requested on first use. If denied, an explicit message explains
+that another tap records silently. The stop square and clock represent actual
+recording state. Camera/mode changes are locked during recording; backgrounding
+stops/finalizes the clip and releases the microphone. A 15-minute safety limit
+also stops recording. Invalid/too-short clips are discarded, not published as
+successful videos. 4K, pause/resume recording, EIS and synthetic video bokeh are
+not implemented in this basic pass.
+
+The gallery button opens only this app’s captured photos/videos, not the whole
+phone library. The viewer displays the full frame initially; only filmstrip
+thumbnails are cropped. Originals are never resized/re-encoded by viewing or
+sharing. Display decoding is subsampled to at most 2048 pixels on the long edge
+to avoid decoding a 50 MP bitmap into a ~200 MB allocation. Camera streaming is
+closed while reviewing and restored on return. Favorites are stored locally;
+deleting a capture requires confirmation.
+
+Minimum Android version is now **Android 10 / API 29**, matching the transactional
+MediaStore and app-owned storage model used by photos, video and the viewer.
+No background recording service or broad photo/video-library access is needed.
 
 ## Build
 

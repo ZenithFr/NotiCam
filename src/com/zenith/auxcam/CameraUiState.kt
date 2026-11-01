@@ -46,8 +46,20 @@ data class CameraUiState(
     /** The privileged main camera's advertised full-resolution JPEG size. */
     val highResolutionWidth: Int = 0,
     val highResolutionHeight: Int = 0,
+    val highResolutionChecked: Boolean = false,
     val flash: FlashMode = FlashMode.Off,
     val zoom: Float = 1f,
+    /** Viewfinder policy only; none of these values select the saved JPEG size. */
+    val previewWidth: Int = DeviceProfile.COLOR_WIDTH,
+    val previewHeight: Int = DeviceProfile.COLOR_HEIGHT,
+    val previewTargetFps: Int = 30,
+    val previewMeasuredFps: Float = 0f,
+    val previewFallback: String = "Checking advertised 60 fps support",
+    val zoomBlendImage: ImageBitmap? = null,
+    val zoomBlendReady: Boolean = false,
+    val zoomBlendScale: Float = 1f,
+    val zoomBlendToken: Int = 0,
+    val zoomBlendPending: Boolean = false,
 
     /**
      * Aperture, as a real f-number. Continuous: the slider interpolates
@@ -65,12 +77,6 @@ data class CameraUiState(
     /** 12MP vs 50MP output. */
     val resolution: Resolution = Resolution.Standard,
 
-    /**
-     * Telephoto assist: above 2x the engine switches to the physical tele lens
-     * instead of digitally cropping the main sensor.
-     */
-    val telephoto: Boolean = false,
-
     /** Viewfinder framing, default 4:3 (sensor native). */
     val frameRatio: FrameRatio = FrameRatio.FourThree,
 
@@ -83,6 +89,15 @@ data class CameraUiState(
     val focusFraction: Float = 0f,
 
     val settingsOpen: Boolean = false,
+    val galleryOpen: Boolean = false,
+    val videoStarting: Boolean = false,
+    val videoRecording: Boolean = false,
+    val videoElapsedSeconds: Long = 0,
+    val videoHasAudio: Boolean = false,
+    val videoWidth: Int = 1920,
+    val videoHeight: Int = 1080,
+    val photoWidth: Int = DeviceProfile.STILL_WIDTH,
+    val photoHeight: Int = DeviceProfile.STILL_HEIGHT,
 
     val status: String = "",
     val telemetry: String = "",
@@ -107,8 +122,22 @@ data class CameraUiState(
     val supportsHighResolution: Boolean
         get() = CaptureOutput.is50MpSize(highResolutionWidth, highResolutionHeight)
 
+    val previewTransitioning: Boolean
+        get() = zoomBlendPending || zoomBlendImage != null
+
     val canTakePhoto: Boolean
-        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy
+        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy && !previewTransitioning
+
+    val canUseShutter: Boolean
+        get() = if (mode == CaptureMode.Photo) canTakePhoto
+        else videoRecording || (sessionReady && !captureBusy && !videoStarting && !previewTransitioning)
+
+    val photoSizeLabel: String
+        get() {
+            val pixels = photoWidth.toLong() * photoHeight
+            return if (pixels in 11_000_000L..14_000_000L) "12 MP"
+                else String.format(java.util.Locale.US, "%.0f MP", pixels.toDouble() / 1_000_000)
+        }
 
     /** Aperture shown by the sliders: 0 = open (1.4), 1 = closed (16). */
     val apertureFraction: Float

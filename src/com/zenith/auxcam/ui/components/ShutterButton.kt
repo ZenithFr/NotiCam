@@ -22,6 +22,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -57,6 +59,7 @@ fun ShutterButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     busy: Boolean = false,
+    recording: Boolean = false,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -76,6 +79,10 @@ fun ShutterButton(
     val enabledAmount by animateFloatAsState(
         targetValue = if (enabled || busy) 1f else 0.55f,
         animationSpec = CameraMotion.fade(200), label = "shutter-availability",
+    )
+    val recordingShape by animateFloatAsState(
+        targetValue = if (recording) 1f else 0f,
+        animationSpec = CameraMotion.fluid(), label = "record-stop-shape",
     )
     val discColor by animateColorAsState(
         targetValue = if (videoMode) CameraColors.Red else Color.White,
@@ -103,7 +110,7 @@ fun ShutterButton(
     Box(
         modifier = modifier
             .size(CameraSpacing.shutterTouch)
-            .semantics { contentDescription = if (busy) "Saving photo" else if (videoMode) "Video recording is not available yet" else if (enabled) "Take photo" else "Camera busy or unavailable" }
+            .semantics { contentDescription = if (busy) "Saving capture" else if (recording) "Stop recording" else if (videoMode) "Start recording" else if (enabled) "Take photo" else "Camera busy or unavailable" }
             .clickable(
                 interactionSource = interaction,
                 // No ripple: the ring/disc compression is the feedback.
@@ -169,12 +176,14 @@ fun ShutterButton(
                 style = Stroke(width = ringWidth),
             )
 
-            // Video is visually distinct but deliberately disabled until recording exists.
-            drawCircle(
+            val radius = discRadius * (1f - 0.16f * busyAmount) *
+                (1f - 0.04f * (1f - pulseProgress.value).coerceIn(0f, 1f))
+            val halfSize = radius * (1f - 0.48f * recordingShape)
+            drawRoundRect(
                 color = discColor.copy(alpha = enabledAmount),
-                radius = discRadius * (1f - 0.16f * busyAmount) *
-                    (1f - 0.04f * (1f - pulseProgress.value).coerceIn(0f, 1f)),
-                center = center,
+                topLeft = Offset(center.x - halfSize, center.y - halfSize),
+                size = Size(halfSize * 2f, halfSize * 2f),
+                cornerRadius = CornerRadius(radius * (1f - 0.88f * recordingShape)),
             )
 
         }
@@ -183,7 +192,7 @@ fun ShutterButton(
         AnimatedVisibility(visible = busy, enter = fadeIn(tween(100)), exit = fadeOut(tween(160))) {
             CircularProgressIndicator(
                 modifier = Modifier.size(CameraSpacing.shutterVisual + 8.dp),
-                color = CameraColors.Yellow,
+                color = CameraColors.Accent,
                 trackColor = Color.Transparent,
                 strokeWidth = 1.5.dp,
             )

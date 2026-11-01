@@ -69,6 +69,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -80,9 +82,7 @@ import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
 import com.zenith.auxcam.Resolution
-import com.zenith.auxcam.ui.effects.cameraMatte
-import com.zenith.auxcam.ui.effects.matte
-import com.zenith.auxcam.ui.effects.rememberMatteGrain
+import com.zenith.auxcam.ui.effects.cameraGlass
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.icons.NotiIcons
 import com.zenith.auxcam.ui.theme.CameraColors
@@ -92,9 +92,9 @@ import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.roundToInt
 
 /**
- * Matte icon button.
+ * Borderless glass icon button.
  *
- * A flat neutral matte disc — no rim, no sheen, no
+ * A translucent disc with soft interior light — no decorative rim or native
  * backdrop blur, so on a bright scene you read the glyph against the picture
  * rather than against a card. The 44 dp circle lives inside a 48 dp touch target
  * and only the circle is scaled on press (`clip = false`), so the glyph is never
@@ -120,7 +120,7 @@ fun MatteIconButton(
         label = "matte-press",
     )
     val surface by animateColorAsState(
-        targetValue = if (selected) CameraColors.Yellow else CameraColors.ControlSurface,
+        targetValue = if (selected) CameraColors.Accent else CameraColors.ControlSurface,
         animationSpec = CameraMotion.select(),
         label = "matte-surface",
     )
@@ -156,7 +156,7 @@ fun MatteIconButton(
                     scaleY = scale
                     clip = false
                 }
-                .background(surface, CircleShape),
+                .cameraGlass(CircleShape, baseColor = surface),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -241,12 +241,13 @@ fun LensChip(
     }
 }
 
-/** Two-mode dock, with a single traveling matte selection pill. */
+/** Floating two-mode dock with a single spring-driven white selection. */
 @Composable
 fun ModeCarousel(
     selected: CaptureMode,
     onSelect: (CaptureMode) -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val tabWidth = 104.dp
     val indicatorX by animateDpAsState(
@@ -254,25 +255,25 @@ fun ModeCarousel(
         animationSpec = CameraMotion.select(),
         label = "mode-indicator",
     )
-    Box(modifier = modifier.cameraMatte(RoundedCornerShape(28.dp)).padding(4.dp)) {
+    Box(modifier = modifier.cameraGlass(RoundedCornerShape(28.dp)).padding(4.dp)) {
         Box(Modifier.offset(x = indicatorX).size(tabWidth, 48.dp)
-            .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(24.dp)))
+            .background(CameraColors.Accent, RoundedCornerShape(24.dp)))
         Row(verticalAlignment = Alignment.CenterVertically) {
             CaptureMode.entries.forEach { mode ->
                 ModeLabel(label = mode.label, selected = mode == selected,
-                    onClick = { onSelect(mode) }, modifier = Modifier.size(tabWidth, 48.dp))
+                    onClick = { onSelect(mode) }, enabled = enabled, modifier = Modifier.size(tabWidth, 48.dp))
             }
         }
     }
 }
 
 @Composable
-private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val haptics = rememberCameraHaptics()
     val color by animateColorAsState(
-        targetValue = if (selected) CameraColors.Yellow else CameraColors.LabelTertiary,
+        targetValue = if (selected) CameraColors.OnLight else CameraColors.LabelSecondary,
         animationSpec = tween(220),
         label = "mode-color",
     )
@@ -289,7 +290,10 @@ private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit, mod
 
     Box(
         modifier = modifier
+            .semantics { this.selected = selected }
             .clickable(
+                role = Role.Tab,
+                enabled = enabled,
                 interactionSource = interaction,
                 indication = null,
                 onClick = { haptics.select(); onClick() },
@@ -297,7 +301,7 @@ private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit, mod
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = label.uppercase(),
+            text = label,
             style = CameraType.Mode,
             color = color,
             maxLines = 1,
@@ -438,8 +442,7 @@ fun GalleryTile(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(10.dp)
-    val grain = rememberMatteGrain()
+    val shape = RoundedCornerShape(18.dp)
     val haptics = rememberCameraHaptics()
 
     // Landing: the tile pops and a white flash washes over it the moment the
@@ -469,10 +472,7 @@ fun GalleryTile(
                 clip = false
             }
             .clip(shape)
-            .background(CameraColors.Matte, shape)
-            // Lighter tooth than the chrome: a captured frame sits under this, and
-            // grain over a photo should read as a matte print, not as noise.
-            .matte(grain, shape, strength = 0.5f)
+            .cameraGlass(shape)
             .clickable(
                 interactionSource = pressed,
                 indication = null,
@@ -519,7 +519,7 @@ fun GalleryTile(
  * The panel itself is static — [BottomBar] performs the slide-in on the whole
  * panel (translation + fade + a 4 % scale) so the contents are never re-laid out
  * frame by frame. The only thing that morphs inside is the aperture block, which
- * belongs to Portrait mode.
+ * belongs to the optional portrait effect.
  */
 @Composable
 fun CameraSettings(
@@ -527,16 +527,13 @@ fun CameraSettings(
     actions: CameraActions,
     modifier: Modifier = Modifier,
 ) {
-    val grain = rememberMatteGrain()
-
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(CameraColors.MatteScrim, RoundedCornerShape(CameraSpacing.panelRadius))
-            .matte(grain, RoundedCornerShape(CameraSpacing.panelRadius))
+            .cameraGlass(RoundedCornerShape(CameraSpacing.panelRadius), CameraColors.MatteScrim)
             .padding(horizontal = 20.dp, vertical = 18.dp),
     ) {
-        Text("Camera controls", style = CameraType.Value, color = CameraColors.Label)
+        Text("Camera controls", style = CameraType.Title, color = CameraColors.Label)
         Spacer(Modifier.height(8.dp))
         Text("${state.resolution.label} · 4:3 · JPEG 100", style = CameraType.Value, color = CameraColors.Label)
         Spacer(Modifier.height(8.dp))
@@ -549,7 +546,7 @@ fun CameraSettings(
         )
         Spacer(Modifier.height(16.dp))
 
-        // ── Aperture: Portrait and Pro only ────────────────────────────────
+        // ── Optional portrait depth ────────────────────────────────
         AnimatedVisibility(
             visible = state.apertureVisible,
             enter = fadeIn(tween(200)) + slideInVertically(
@@ -622,7 +619,7 @@ fun CameraSettings(
             Icon(
                 imageVector = NotiIcons.Focus,
                 contentDescription = "Focus",
-                tint = if (state.manualFocus) CameraColors.Yellow else CameraColors.LabelSecondary,
+                tint = if (state.manualFocus) CameraColors.Accent else CameraColors.LabelSecondary,
                 modifier = Modifier.size(16.dp),
             )
             Spacer(Modifier.width(7.dp))
@@ -631,7 +628,7 @@ fun CameraSettings(
             Text(
                 state.focusLabel,
                 style = CameraType.Value,
-                color = if (state.manualFocus) CameraColors.Yellow else CameraColors.Label,
+                color = if (state.manualFocus) CameraColors.Accent else CameraColors.Label,
             )
             if (state.manualFocus || state.aeAfLocked) {
                 Spacer(Modifier.width(8.dp))
@@ -679,18 +676,22 @@ fun CameraSettings(
             )
         }
 
-        Spacer(Modifier.height(8.dp))
-
-        // Telephoto assist: above 2x hand the session to the physical tele lens.
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TelephotoPill(
-                active = state.telephoto,
-                onClick = { actions.onTelephotoToggle() },
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        Spacer(Modifier.height(14.dp))
+        Spacer(Modifier.height(22.dp))
+        Text("Viewfinder", style = CameraType.Heading, color = CameraColors.Label)
+        Text("${state.previewWidth} × ${state.previewHeight} · ${state.previewTargetFps} fps target · ${state.previewMeasuredFps.toInt()} rendered",
+            style = CameraType.Caption, color = CameraColors.LabelSecondary)
+        Text(state.previewFallback, style = CameraType.Caption, color = CameraColors.LabelSecondary)
+        Text("Still resolution and original JPEG quality are independent of this preview.",
+            style = CameraType.Caption, color = CameraColors.LabelSecondary)
+        Spacer(Modifier.height(18.dp))
+        Text("Shizuku camera backend", style = CameraType.Heading, color = CameraColors.Label)
+        Spacer(Modifier.height(6.dp))
+        Text("Report service UID, permissions and exposed camera streams. Shell access does not guarantee OEM-only modes.",
+            style = CameraType.Caption, color = CameraColors.LabelSecondary)
+        Spacer(Modifier.height(12.dp))
+        TogglePill(label = "CAMERA REPORT", active = false, onClick = actions::onCameraReport,
+            modifier = Modifier.fillMaxWidth())
+        Spacer(Modifier.height(12.dp))
         Text(
             text = state.telemetry,
             style = CameraType.Telemetry,
@@ -751,108 +752,6 @@ private fun SegmentPill(
     }
 }
 
-/**
- * Telephoto toggle with the "camera with a long lens" pictogram, so it reads as a
- * lens choice rather than another abstract switch.
- */
-@Composable
-private fun TelephotoPill(
-    active: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val haptics = rememberCameraHaptics()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.95f else 1f,
-        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
-        label = "tele-press",
-    )
-    val bg by animateColorAsState(
-        targetValue = if (active) Color.White else CameraColors.Matte,
-        animationSpec = tween(190),
-        label = "tele-bg",
-    )
-    val fg by animateColorAsState(
-        targetValue = if (active) Color.Black else CameraColors.LabelSecondary,
-        animationSpec = tween(190),
-        label = "tele-fg",
-    )
-
-    Row(
-        modifier = modifier
-            .height(36.dp)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                clip = false
-            }
-            .background(bg, RoundedCornerShape(18.dp))
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                onClick = {
-                    haptics.select()
-                    onClick()
-                },
-            )
-            .padding(horizontal = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.Center,
-    ) {
-        TelephotoGlyph(tint = fg, modifier = Modifier.size(16.dp))
-        Spacer(Modifier.width(7.dp))
-        Text(
-            text = if (active) "TELE · >2×" else "TELE OFF",
-            style = CameraType.Caption,
-            color = fg,
-            maxLines = 1,
-        )
-    }
-}
-
-/** Camera body with a long barrel — drawn, not themed, so it tints cleanly. */
-@Composable
-private fun TelephotoGlyph(tint: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        val stroke = 1.4.dp.toPx()
-        // body
-        drawRoundRect(
-            color = tint,
-            topLeft = Offset(w * 0.04f, h * 0.28f),
-            size = Size(w * 0.52f, h * 0.44f),
-            cornerRadius = CornerRadius(h * 0.10f),
-            style = Stroke(width = stroke),
-        )
-        // barrel
-        drawRoundRect(
-            color = tint,
-            topLeft = Offset(w * 0.56f, h * 0.38f),
-            size = Size(w * 0.34f, h * 0.24f),
-            cornerRadius = CornerRadius(h * 0.05f),
-            style = Stroke(width = stroke),
-        )
-        // hood
-        drawLine(
-            color = tint,
-            start = Offset(w * 0.90f, h * 0.34f),
-            end = Offset(w * 0.90f, h * 0.66f),
-            strokeWidth = stroke * 1.6f,
-        )
-        // viewfinder hump
-        drawRoundRect(
-            color = tint,
-            topLeft = Offset(w * 0.16f, h * 0.16f),
-            size = Size(w * 0.18f, h * 0.14f),
-            cornerRadius = CornerRadius(h * 0.04f),
-            style = Stroke(width = stroke),
-        )
-    }
-}
-
 /** Inverse of [CameraUiState.apertureFraction]: 0..1 → f-number on a log scale. */
 private fun fStopForFraction(fraction: Float): Float {
     val lo = CameraController.FSTOPS.first().toDouble()
@@ -898,7 +797,7 @@ fun QuickApertureRow(
     }
 }
 
-/** Reset chip with tactile press animation and yellow accent when active. */
+/** Reset chip with tactile press animation and white accent when active. */
 @Composable
 fun ResetChip(
     onClick: () -> Unit,
@@ -920,7 +819,7 @@ fun ResetChip(
                 scaleY = scale
             }
             .clip(RoundedCornerShape(10.dp))
-            .background(CameraColors.Yellow.copy(alpha = 0.20f))
+            .background(CameraColors.Accent.copy(alpha = 0.20f))
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -935,7 +834,7 @@ fun ResetChip(
         Text(
             text = "RESET",
             style = CameraType.Caption,
-            color = CameraColors.Yellow,
+            color = CameraColors.Accent,
         )
     }
 }
@@ -956,7 +855,7 @@ fun QuickFocusRow(
         Icon(
             imageVector = NotiIcons.Focus,
             contentDescription = "Manual Focus",
-            tint = if (state.manualFocus) CameraColors.Yellow else CameraColors.LabelSecondary,
+            tint = if (state.manualFocus) CameraColors.Accent else CameraColors.LabelSecondary,
             modifier = Modifier.size(15.dp),
         )
         Spacer(Modifier.width(6.dp))
@@ -971,7 +870,7 @@ fun QuickFocusRow(
         Text(
             text = state.focusLabel,
             style = CameraType.Value,
-            color = if (state.manualFocus) CameraColors.Yellow else CameraColors.Label,
+            color = if (state.manualFocus) CameraColors.Accent else CameraColors.Label,
             modifier = Modifier.width(54.dp),
             textAlign = androidx.compose.ui.text.style.TextAlign.End,
         )
@@ -982,7 +881,7 @@ fun QuickFocusRow(
     }
 }
 
-/** Quiet iOS-inspired toolbar, with equal-sized side controls. */
+/** Player-like title and metadata, with a compact cluster of floating controls. */
 @Composable
 fun TopBar(
     state: CameraUiState,
@@ -990,9 +889,28 @@ fun TopBar(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth().height(64.dp).padding(horizontal = 20.dp),
+        modifier = modifier.fillMaxWidth().height(76.dp).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        Column(Modifier.weight(1f)) {
+            Text("NotiCam", style = CameraType.Title, color = CameraColors.Label, maxLines = 1)
+            Text(if (state.mode == CaptureMode.Photo) "Photo · 4:3" else "Video · 16:9",
+                style = CameraType.Caption, color = CameraColors.LabelSecondary, maxLines = 1)
+        }
+        Box(Modifier.size(64.dp, 48.dp), contentAlignment = Alignment.Center) {
+            if (state.mode == CaptureMode.Photo) {
+                Text(
+                    text = if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel,
+                    style = CameraType.Value,
+                    color = CameraColors.Label,
+                    modifier = Modifier.cameraGlass(RoundedCornerShape(24.dp))
+                        .clickable(enabled = state.sessionReady && !state.captureBusy, onClick = actions::onResolutionToggle)
+                        .padding(horizontal = 10.dp, vertical = 15.dp),
+                )
+            } else {
+                Text("${state.videoHeight}p", style = CameraType.Caption, color = CameraColors.LabelSecondary)
+            }
+        }
         MatteIconButton(
             icon = when (state.flash) {
                 FlashMode.Off -> NotiIcons.FlashOff
@@ -1002,30 +920,15 @@ fun TopBar(
             contentDescription = "Flash: ${state.flash.name}",
             onClick = actions::onFlashClick,
             enabled = state.mode == CaptureMode.Photo && state.sessionReady && !state.captureBusy,
-            tint = if (state.flash == FlashMode.Off) Color.White else CameraColors.Yellow,
+            selected = state.flash != FlashMode.Off,
         )
-        Spacer(Modifier.weight(1f))
         MatteIconButton(
             icon = if (state.settingsOpen) NotiIcons.Close else NotiIcons.Sliders,
             contentDescription = "Camera controls",
             onClick = actions::onSettingsToggle,
             selected = state.settingsOpen,
+            enabled = !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
         )
-        Spacer(Modifier.weight(1f))
-        Box(Modifier.size(64.dp, 44.dp), contentAlignment = Alignment.Center) {
-            if (state.mode == CaptureMode.Photo) {
-                Text(
-                    text = if (state.resolution == Resolution.High) "50 MP" else "12 MP",
-                    style = CameraType.Value,
-                    color = if (state.resolution == Resolution.High) CameraColors.Yellow else Color.White,
-                    modifier = Modifier.cameraMatte(RoundedCornerShape(22.dp))
-                        .clickable(enabled = state.sessionReady && !state.captureBusy, onClick = actions::onResolutionToggle)
-                        .padding(horizontal = 11.dp, vertical = 13.dp),
-                )
-            } else {
-                Text("SOON", style = CameraType.Caption, color = CameraColors.LabelSecondary)
-            }
-        }
     }
 }
 
@@ -1047,6 +950,7 @@ fun BottomBar(
         // Settings use a modal overlay and never resize the native preview.
         ModeCarousel(
             selected = state.mode,
+            enabled = !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
             onSelect = { actions.onModeSelected(it) },
         )
 
@@ -1072,7 +976,8 @@ fun BottomBar(
 
             ShutterButton(
                 videoMode = state.mode == CaptureMode.Video,
-                enabled = state.canTakePhoto,
+                enabled = state.canUseShutter,
+                recording = state.videoRecording,
                 busy = state.captureBusy,
                 pulse = state.capturePulse,
                 onClick = { actions.onShutterClick() },

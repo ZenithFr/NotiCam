@@ -51,7 +51,7 @@ import kotlin.math.sin
  *    both ends dissolve and the bottom of the circle stays empty;
  *  • the backdrop is a radial gradient that reaches fully transparent before the
  *    bottom edge — no disc, no rim;
- *  • a yellow thread tracks the travelled portion, with a needle and glow knob at
+ *  • a white thread tracks the travelled portion, with a needle and glow knob at
  *    the current stop; the callout pops each time the wheel lands on a chip.
  */
 @Composable
@@ -139,7 +139,7 @@ fun ZoomDial(
             // Travelled thread.
             if (position > 0.001f) {
                 drawArc(
-                    color = CameraColors.Yellow.copy(alpha = 0.55f),
+                    color = CameraColors.Accent.copy(alpha = 0.55f),
                     startAngle = START_DEGREES,
                     sweepAngle = SWEEP_DEGREES * position,
                     useCenter = false,
@@ -156,19 +156,19 @@ fun ZoomDial(
             val fade = sin(position * Math.PI).toFloat()
 
             drawLine(
-                color = CameraColors.Yellow.copy(alpha = 0.35f + 0.65f * fade),
+                color = CameraColors.Accent.copy(alpha = 0.35f + 0.65f * fade),
                 start = center + dir * (arcRadius - 14.dp.toPx()),
                 end = tip,
                 strokeWidth = 3.dp.toPx(),
                 cap = StrokeCap.Round,
             )
             drawCircle(
-                color = CameraColors.Yellow.copy(alpha = 0.22f * fade),
+                color = CameraColors.Accent.copy(alpha = 0.22f * fade),
                 radius = 8.dp.toPx(),
                 center = tip,
             )
             drawCircle(
-                color = CameraColors.Yellow.copy(alpha = 0.55f + 0.45f * fade),
+                color = CameraColors.Accent.copy(alpha = 0.55f + 0.45f * fade),
                 radius = 3.2.dp.toPx(),
                 center = tip,
             )

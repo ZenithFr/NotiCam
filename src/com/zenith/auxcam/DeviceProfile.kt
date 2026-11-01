@@ -69,7 +69,7 @@ object DeviceProfile {
     const val FOCAL_MAIN_MM = 24f
 
     /**
-     * Lens ladder: 0.6x (ultra-wide), 1x (main) and 2x (sensor crop).
+     * Lens ladder: 0.6x (ultra-wide), 1x (main) and 2x (physical telephoto).
      * The chips, the zoom wheel and the pinch clamp all read this list.
      */
     val ZOOM_STOPS = listOf(0.6f, 1f, 2f)
