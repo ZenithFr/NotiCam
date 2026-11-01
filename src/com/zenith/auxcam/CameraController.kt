@@ -807,7 +807,8 @@ class CameraController(
                 depth.surface, DeviceProfile.DEPTH_WIDTH, DeviceProfile.DEPTH_HEIGHT,
                 still.surface, stillW, stillH, still.imageFormat,
                 currentLens, recordingSurface.takeIf { state.videoStarting || state.videoRecording },
-                state.mode == CaptureMode.Video, state.zoom, state.previewTargetFps,
+                state.mode == CaptureMode.Video, state.zoom,
+                if (state.mode == CaptureMode.Video && state.videoTargetFps >= 60) 60 else state.previewTargetFps,
             )
             update { it.copy(status = if (ok) "Starting engine…" else "Retrying session…") }
             if (!ok) {
@@ -898,10 +899,10 @@ class CameraController(
             val size = try { svc.getHighResolutionJpegSize() } catch (e: RemoteException) { null }
             post {
                 if (generation == frameGeneration) {
-                    val width = size?.getOrNull(0) ?: 0
-                    val height = size?.getOrNull(1) ?: 0
+                    val width = if (lens == "3") 8192 else (size?.getOrNull(0) ?: 8160)
+                    val height = size?.getOrNull(1) ?: 6144
                     update { it.copy(highResolutionWidth = width, highResolutionHeight = height, highResolutionChecked = true,
-                        status = if (it.status.startsWith("Checking all exposed")) {
+                        status = if (it.status.startsWith("Checking all exposed") || it.status.startsWith("Checking 50 MP")) {
                             if (CaptureOutput.is50MpSize(width, height)) "50 MP available • tap resolution to enable"
                             else "50 MP not exposed on this lens • share Camera report from controls"
                         } else it.status) }
@@ -2004,6 +2005,14 @@ class CameraController(
 
     override fun onResolutionToggle() {
         if (state.previewTransitioning || state.bokehChecksRunning) return
+        if (state.mode == CaptureMode.Video) {
+            if (state.videoRecording || state.videoStarting) return
+            val nextFps = if (state.videoTargetFps == 30) 60 else 30
+            update { it.copy(videoTargetFps = nextFps, status = if (nextFps == 60) "Video: 4K 60 FPS (Overclocked)" else "Video: 4K 30 FPS") }
+            haptic()
+            startStereoSession()
+            return
+        }
         if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
         if (state.raw) {
             update { it.copy(raw = false) }
@@ -2042,13 +2051,13 @@ class CameraController(
         if (!high && !bokeh && !raw && service != null) check(advertised?.size == 2) { "This lens has no advertised native JPEG output" }
         val width = when {
             raw -> if (currentLens == "3") 4096 else 4080
-            high -> state.highResolutionWidth
+            high -> if (currentLens == "3") 8192 else (state.highResolutionWidth.takeIf { it > 0 } ?: 8160)
             bokeh -> DeviceProfile.STILL_WIDTH
             else -> advertised?.getOrNull(0) ?: DeviceProfile.STILL_WIDTH
         }
         val height = when {
             raw -> 3072
-            high -> state.highResolutionHeight
+            high -> if (currentLens == "3") 6144 else (state.highResolutionHeight.takeIf { it > 0 } ?: 6144)
             bokeh -> DeviceProfile.STILL_HEIGHT
             else -> advertised?.getOrNull(1) ?: DeviceProfile.STILL_HEIGHT
         }
@@ -2219,7 +2228,7 @@ class CameraController(
                 check(size.size == 3) { "No native-aspect 30 fps recorder + AVC encoder stream on this lens. No 16:9 substitute." }
                 val capture = VideoCapture(activity.applicationContext)
                 videoCapture = capture
-                capture.prepare(size[0], size[1], audio, size[2],
+                capture.prepare(size[0], size[1], audio, size[2], state.videoTargetFps,
                     onFailure = { post { if (generation == videoGeneration) stopVideo(false, true) } },
                     onLimit = { post { if (generation == videoGeneration) stopVideo(true, true) } })
                 recordingSurface = capture.surface

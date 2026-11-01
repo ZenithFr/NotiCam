@@ -85,6 +85,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     private float mZoomRatio = 1.0f;
     private float mRequestedZoom = 1.0f;
     private int mPreviewMaxFps = 30;
+    private int mVideoRecordFps = 30;
     private Range<Integer> mPreviewFpsRange;
     private float mMaxDigitalZoom = 1.0f;
     private Rect mActiveArray;
@@ -353,6 +354,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         mZoomRatio = Float.isFinite(requestedZoom) ? Math.max(.6f, Math.min(10f, requestedZoom)) : 1f;
         mRequestedZoom = mZoomRatio;
         mPreviewMaxFps = previewMaxFps >= 60 && recordingSurface == null ? 60 : 30;
+        mVideoRecordFps = previewMaxFps >= 60 ? 60 : 30;
         mHighResolutionStill = !videoMode && stillFormat == ImageFormat.JPEG && (long) stillW * stillH >= 45_000_000L;
 
         mColorW = colorW;
@@ -377,10 +379,12 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         if (mHighResolutionStill) {
             int[] size = getHighResolutionJpegSize(colorPhysicalId);
-            if (size.length != 3 || size[0] != mStillW || size[1] != mStillH) {
+            if (size.length != 3 || Math.abs(size[0] - mStillW) > 32 || size[1] != mStillH) {
                 notifyError("Requested 50 MP JPEG size is not advertised by camera " + colorPhysicalId);
                 return;
             }
+            mStillW = size[0];
+            mStillH = size[1];
             mStillPixelMode = size[2];
             mCurrentCameraId = mHighResolutionTarget.cameraId;
             Log.i(TAG, "50 MP path: " + mCurrentCameraId + " / " + mHighResolutionTarget.source);
@@ -450,7 +454,8 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             CameraManager cm = cameraManager();
             String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
-            Size size = CameraCapabilities.videoSize(cm, id);
+            Size size = CameraCapabilities.fourKVideoSize(cm, id);
+            if (size == null) size = CameraCapabilities.videoSize(cm, id);
             if (size != null) {
                 Integer orientation = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION);
                 return new int[]{size.getWidth(), size.getHeight(), orientation == null ? 90 : orientation};
@@ -675,8 +680,19 @@ public class CameraUserService extends IAuxCamService.Stub {
         applyMinimalProcessing(b);
         try {
             b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
-            if (mVideoMode) b.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD);
-            if (mPreviewFpsRange != null) b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mPreviewFpsRange);
+            if (mVideoMode) {
+                b.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD);
+                if (mVideoRecordFps >= 60 || mPreviewMaxFps >= 60) {
+                    b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(30, 60));
+                    try {
+                        b.set(new CaptureRequest.Key<Integer>("com.mediatek.streamingfeature.hfpsMode", Integer.class), 1);
+                    } catch (Throwable ignored) {}
+                } else if (mPreviewFpsRange != null) {
+                    b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mPreviewFpsRange);
+                }
+            } else if (mPreviewFpsRange != null) {
+                b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mPreviewFpsRange);
+            }
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
 

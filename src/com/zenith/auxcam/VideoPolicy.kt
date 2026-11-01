@@ -19,10 +19,13 @@ object VideoPolicy {
     }
 
     @JvmStatic
-    fun bitrate(width: Int, height: Int): Int {
+    fun bitrate(width: Int, height: Int): Int = bitrate(width, height, FPS)
+
+    @JvmStatic
+    fun bitrate(width: Int, height: Int, fps: Int): Int {
         require(width > 0 && height > 0)
         // Scale with actual encoded pixels. 1080p-class ≈22 Mbps; larger native
         // frames must not inherit a fixed 12/24 Mbps budget. Clamp to codec caps later.
-        return (width.toDouble() * height * FPS * .35).coerceIn(12_000_000.0, 120_000_000.0).toInt()
+        return (width.toDouble() * height * fps * .35).coerceIn(12_000_000.0, 120_000_000.0).toInt()
     }
 }

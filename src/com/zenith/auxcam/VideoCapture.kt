@@ -25,7 +25,7 @@ class VideoCapture(private val context: Context) {
     val surface: Surface get() = checkNotNull(recorder).surface
 
     @Suppress("DEPRECATION")
-    fun prepare(width: Int, height: Int, audio: Boolean, orientation: Int, onFailure: () -> Unit, onLimit: () -> Unit) {
+    fun prepare(width: Int, height: Int, audio: Boolean, orientation: Int, targetFps: Int = VideoPolicy.FPS, onFailure: () -> Unit, onLimit: () -> Unit) {
         check(recorder == null)
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val values = ContentValues().apply {
@@ -45,16 +45,18 @@ class VideoCapture(private val context: Context) {
             r.setOutputFile(checkNotNull(descriptor).fileDescriptor)
             r.setVideoEncoder(MediaRecorder.VideoEncoder.H264)
             r.setVideoSize(width, height)
-            r.setVideoFrameRate(VideoPolicy.FPS)
+            r.setVideoFrameRate(targetFps)
             val codec = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull { info ->
                 info.isEncoder && info.isHardwareAccelerated && try {
                     val caps = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
                     caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) &&
-                        caps.videoCapabilities?.areSizeAndRateSupported(width, height, VideoPolicy.FPS.toDouble()) == true
+                        (caps.videoCapabilities?.areSizeAndRateSupported(width, height, targetFps.toDouble()) == true ||
+                         caps.videoCapabilities?.areSizeAndRateSupported(width, height, VideoPolicy.FPS.toDouble()) == true)
                 } catch (_: IllegalArgumentException) { false }
             } ?: error("No hardware AVC encoder for this native-aspect stream")
             val bitrateRange = codec.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities.bitrateRange
-            r.setVideoEncodingBitRate(bitrateRange.clamp(VideoPolicy.bitrate(width, height)))
+            val rawBitrate = if (targetFps != VideoPolicy.FPS) VideoPolicy.bitrate(width, height, targetFps) else VideoPolicy.bitrate(width, height)
+            r.setVideoEncodingBitRate(bitrateRange.clamp(rawBitrate))
             if (audio) {
                 r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 r.setAudioSamplingRate(48000)

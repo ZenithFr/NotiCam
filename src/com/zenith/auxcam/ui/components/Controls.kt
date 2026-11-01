@@ -919,7 +919,14 @@ fun TopBar(
                         .padding(horizontal = 10.dp, vertical = 9.dp),
                 )
             } else {
-                Text(if (state.videoHeight > 0) "${state.videoHeight}p" else "FULL", style = CameraType.Caption, color = CameraColors.LabelSecondary)
+                Text(
+                    text = "${if (state.videoHeight >= 2160) "4K" else if (state.videoHeight > 0) "${state.videoHeight}p" else "4K"} · ${state.videoTargetFps}",
+                    style = CameraType.Value,
+                    color = CameraColors.Label,
+                    modifier = Modifier.cameraGlass(RoundedCornerShape(24.dp))
+                        .clickable(enabled = state.sessionReady && !state.videoRecording && !state.videoStarting, onClick = actions::onResolutionToggle)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
             }
         }
         MatteIconButton(

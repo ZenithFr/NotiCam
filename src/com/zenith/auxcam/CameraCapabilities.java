@@ -92,7 +92,7 @@ final class CameraCapabilities {
                         int w = ntSizes[i + 1];
                         int h = ntSizes[i + 2];
                         int io = ntSizes[i + 3];
-                        if (fmt == ImageFormat.JPEG && io == 0 && is50Mp(new Size(w, h))) {
+                        if ((fmt == 33 || fmt == ImageFormat.JPEG) && io == 0 && is50Mp(new Size(w, h))) {
                             return new Target(id, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
                         }
                     }
@@ -205,6 +205,20 @@ final class CameraCapabilities {
             }
         }
         return best == null ? new int[0] : new int[]{best.getWidth(), best.getHeight(), rate.getLower(), rate.getUpper()};
+    }
+    static Size fourKVideoSize(CameraManager cm, String id) {
+        try {
+            CameraCharacteristics chars = cm.getCameraCharacteristics(id);
+            StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            if (map == null) return null;
+            Size[] sizes = map.getOutputSizes(MediaRecorder.class);
+            if (sizes != null) for (Size size : sizes) {
+                if (size.getWidth() == 3840 && size.getHeight() == 2160) {
+                    return size;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
     /** Largest advertised native-aspect recorder stream supported by hardware AVC
      * at 30 fps. Not unbinned sensor RAW, and not proof of combined-session throughput.

@@ -60,6 +60,7 @@ data class CameraUiState(
     val previewWidth: Int = DeviceProfile.COLOR_WIDTH,
     val previewHeight: Int = DeviceProfile.COLOR_HEIGHT,
     val previewTargetFps: Int = 30,
+    val videoTargetFps: Int = 30,
     val previewMeasuredFps: Float = 0f,
     val previewFallback: String = "Checking advertised 60 fps support",
     val zoomBlendImage: ImageBitmap? = null,
