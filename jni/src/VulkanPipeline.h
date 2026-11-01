@@ -31,13 +31,24 @@ public:
         float focalLengthMm = 5.56f;
         float sensorWidthMm = 8.16f;
         float baseFStop = 1.88f;
-        float s1FocusM = 2.0f;
+        float s1FocusM = 0.65f; // Initial default: 0.65m arm's length (never defaults to 2.0m)
     } mOpticalParams;
 
-    void setCameraOpticalParams(float focalMm, float sensorWidthMm, float baseFStop) {
+    void setCameraOpticalParams(float focalMm, float sensorWidthMm, float baseFStop, float s1 = -1.0f) {
         mOpticalParams.focalLengthMm = focalMm;
         mOpticalParams.sensorWidthMm = sensorWidthMm;
         mOpticalParams.baseFStop = baseFStop;
+        if (s1 > 0.05f) {
+            mOpticalParams.s1FocusM = std::clamp(s1, 0.3f, 5.0f);
+        }
+    }
+
+    void setS1FocusM(float s1) {
+        mOpticalParams.s1FocusM = std::clamp(s1, 0.3f, 5.0f);
+    }
+
+    float getS1FocusM() const {
+        return mOpticalParams.s1FocusM;
     }
 
     // Process still bokeh on 4080x3072 AHardwareBuffer using 1020x768 gather, 4K guided filter & 4080x3072 composite
@@ -73,6 +84,10 @@ private:
     uint32_t mWidth{1440};
     uint32_t mHeight{1080};
     bool mInitialized{false};
+
+    // Preview Bokeh Working Resources (527x703 intermediate pass)
+    uint32_t mPreviewW{527};
+    uint32_t mPreviewH{703};
 
     // Still Bokeh Resources (1020x768 32-tap Gather + 4080x3072 Full-Res Composite)
     bool mStillBokehInitialized{false};

@@ -18,24 +18,9 @@
 static bool sDisableGuided = false;
 
 static inline float halfToFloat(uint16_t h) {
-    uint32_t sign = (h & 0x8000) << 16;
-    uint32_t exp = (h & 0x7C00) >> 10;
-    uint32_t mant = (h & 0x03FF);
-    if (exp == 0) {
-        if (mant == 0) {
-            uint32_t u = sign; float f; memcpy(&f, &u, 4); return f;
-        }
-        while (!(mant & 0x0400)) { mant <<= 1; exp--; }
-        exp++;
-        mant &= ~0x0400;
-    } else if (exp == 31) {
-        uint32_t u = sign | 0x7F800000 | (mant << 13);
-        float f; memcpy(&f, &u, 4); return f;
-    }
-    exp = exp + (127 - 15);
-    uint32_t u = sign | (exp << 23) | (mant << 13);
-    float f; memcpy(&f, &u, 4);
-    return f;
+    __fp16 f16;
+    memcpy(&f16, &h, sizeof(h));
+    return static_cast<float>(f16);
 }
 
 static void writeU32Be(FILE* f, uint32_t val) {
@@ -738,6 +723,52 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         memset(alphaLowDst, 0, alphaLowSize);
     }
 
+    bool doTriggerAb = false;
+    const char* matchedTrigger = nullptr;
+    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
+        matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab";
+    } else if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
+        matchedTrigger = "/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab";
+    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab", F_OK) == 0) {
+        matchedTrigger = "/sdcard/Pictures/NotiCam/trigger_guided_ab";
+    }
+
+    bool forceTrigger = false;
+    if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
+        unlink("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
+        forceTrigger = true;
+    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab_force", F_OK) == 0) {
+        unlink("/sdcard/Pictures/NotiCam/trigger_guided_ab_force");
+        forceTrigger = true;
+    }
+
+    if (forceTrigger) {
+        if (matchedTrigger) unlink(matchedTrigger);
+        doTriggerAb = true;
+    } else if (matchedTrigger != nullptr) {
+        bool hasSubjectMatte = false;
+        if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
+            uint32_t fgCount = 0;
+            for (uint32_t i = 0; i < alphaW * alphaH; ++i) {
+                if (alphaMatte[i] > 100) {
+                    fgCount++;
+                }
+            }
+            if (fgCount > 500) {
+                hasSubjectMatte = true;
+            }
+        }
+        if (hasSubjectMatte) {
+            unlink(matchedTrigger);
+            doTriggerAb = true;
+        } else {
+            static int sWaitLogCount = 0;
+            if ((sWaitLogCount++ % 60) == 0) {
+                LOGI("trigger_guided_ab pending: waiting for subject in viewfinder (hasRealAlpha=%d)...", hasRealAlpha ? 1 : 0);
+            }
+        }
+    }
+
     bool hasDepthSignal = false;
     if (depthY8Buffer != nullptr && depthW > 0 && depthH > 0) {
         for (uint32_t i = 0; i < depthW * depthH; i += 16) {
@@ -779,7 +810,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     const float cy = mStillH * 0.5f;
     const float radiusFg = mStillW * 0.24f;
 
-    const float s1 = (mOpticalParams.s1FocusM > 0.05f) ? mOpticalParams.s1FocusM : 0.6f;
+    float s1 = std::clamp(mOpticalParams.s1FocusM, 0.3f, 5.0f);
     static constexpr uint8_t kMatteThresholdByte = 166; // 0.65f * 255 = 165.75 -> 166
 
     struct timespec tsInpaint0, tsInpaint1;
@@ -801,6 +832,51 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             } else {
                 invalidCount++;
             }
+        }
+
+        // Derive focus plane once per matte update from depth grid and AI matte
+        uint32_t totalGridPx = depthW * depthH;
+        std::vector<float> confidentDepths;
+        confidentDepths.reserve(totalGridPx / 4);
+        uint32_t confidentCount = 0;
+
+        if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
+            for (uint32_t dy = 0; dy < depthH; ++dy) {
+                uint32_t aY = (dy * alphaH) / depthH;
+                for (uint32_t dx = 0; dx < depthW; ++dx) {
+                    uint32_t aX = (dx * alphaW) / depthW;
+                    uint8_t aByte = alphaMatte[aY * alphaW + aX];
+                    if (aByte >= 230) {
+                        confidentCount++;
+                        uint32_t idx = dy * depthW + dx;
+                        if (gridValid[idx]) {
+                            confidentDepths.push_back(gridDepth[idx]);
+                        }
+                    }
+                }
+            }
+        }
+
+        float confidentPct = (totalGridPx > 0) ? (static_cast<float>(confidentCount) * 100.0f / totalGridPx) : 0.0f;
+        const char* focusSource = "hold";
+        if (confidentPct >= 2.0f && !confidentDepths.empty()) {
+            std::nth_element(confidentDepths.begin(), confidentDepths.begin() + confidentDepths.size() / 2, confidentDepths.end());
+            float medianDepth = confidentDepths[confidentDepths.size() / 2];
+            mOpticalParams.s1FocusM = std::clamp(medianDepth, 0.3f, 5.0f);
+            focusSource = "matte";
+        } else {
+            mOpticalParams.s1FocusM = std::clamp(mOpticalParams.s1FocusM, 0.3f, 5.0f);
+            focusSource = "hold";
+        }
+        s1 = mOpticalParams.s1FocusM;
+
+        static struct timespec sLastFocusLog = {0, 0};
+        struct timespec tsNowFocus;
+        clock_gettime(CLOCK_MONOTONIC, &tsNowFocus);
+        double dtFocus = (tsNowFocus.tv_sec - sLastFocusLog.tv_sec) + (tsNowFocus.tv_nsec - sLastFocusLog.tv_nsec) * 1e-9;
+        if (dtFocus >= 1.0 || doTriggerAb) {
+            sLastFocusLog = tsNowFocus;
+            LOGI("FOCUS s1=%.2fm confidentPct=%.2f source=%s", mOpticalParams.s1FocusM, confidentPct, focusSource);
         }
 
         static bool sLoggedSkipInpaintPreview = false;
@@ -867,6 +943,38 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             }
         }
 
+        // CPU metric depth histogram over 448x288 grid (n=129024) immediately before depth upload
+        static struct timespec sLastDepthLog = {0, 0};
+        struct timespec tsNowDepth;
+        clock_gettime(CLOCK_MONOTONIC, &tsNowDepth);
+        double dtDepth = (tsNowDepth.tv_sec - sLastDepthLog.tv_sec) + (tsNowDepth.tv_nsec - sLastDepthLog.tv_nsec) * 1e-9;
+        if (dtDepth >= 1.0 || doTriggerAb) {
+            sLastDepthLog = tsNowDepth;
+            std::vector<float> sortedDepths = gridDepth;
+            std::sort(sortedDepths.begin(), sortedDepths.end());
+            size_t nDepth = sortedDepths.size();
+            float minD = sortedDepths.front();
+            float p10D = sortedDepths[static_cast<size_t>(nDepth * 0.10f)];
+            float p50D = sortedDepths[nDepth / 2];
+            float p90D = sortedDepths[static_cast<size_t>(nDepth * 0.90f)];
+            float maxD = sortedDepths.back();
+
+            uint32_t bLt05 = 0, b05_1 = 0, b1_2 = 0, b2_3 = 0, b3_5 = 0, b5_10 = 0, bGt10 = 0;
+            for (float d : gridDepth) {
+                if (d < 0.5f) bLt05++;
+                else if (d < 1.0f) b05_1++;
+                else if (d < 2.0f) b1_2++;
+                else if (d < 3.0f) b2_3++;
+                else if (d < 5.0f) b3_5++;
+                else if (d < 10.0f) b5_10++;
+                else bGt10++;
+            }
+            LOGI("DEPTH_GRID n=%zu min=%.2f p10=%.2f p50=%.2f p90=%.2f max=%.2f",
+                 nDepth, minD, p10D, p50D, p90D, maxD);
+            LOGI("DEPTH_BINS <0.5=%u 0.5-1=%u 1-2=%u 2-3=%u 3-5=%u 5-10=%u >10=%u",
+                 bLt05, b05_1, b1_2, b2_3, b3_5, b5_10, bGt10);
+        }
+
         // 4. Map inpainted metric depth to staging buffer
         for (uint32_t y = 0; y < mStillH; ++y) {
             uint32_t srcY = (y * depthH) / mStillH;
@@ -904,6 +1012,14 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             }
         }
     } else {
+        static struct timespec sLastFocusLogHold = {0, 0};
+        struct timespec tsNowFocus;
+        clock_gettime(CLOCK_MONOTONIC, &tsNowFocus);
+        double dtFocus = (tsNowFocus.tv_sec - sLastFocusLogHold.tv_sec) + (tsNowFocus.tv_nsec - sLastFocusLogHold.tv_nsec) * 1e-9;
+        if (dtFocus >= 1.0 || doTriggerAb) {
+            sLastFocusLogHold = tsNowFocus;
+            LOGI("FOCUS s1=%.2fm confidentPct=0.00 source=hold", mOpticalParams.s1FocusM);
+        }
         for (uint32_t y = 0; y < mStillH; ++y) {
             for (uint32_t x = 0; x < mStillW; ++x) {
                 float dx = (x - cx);
@@ -1124,52 +1240,6 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         }
     }
 
-    bool doTriggerAb = false;
-    const char* matchedTrigger = nullptr;
-    if (access("/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
-        matchedTrigger = "/data/user/0/com.zenith.auxcam/files/diag/trigger_guided_ab";
-    } else if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab", F_OK) == 0) {
-        matchedTrigger = "/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab";
-    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab", F_OK) == 0) {
-        matchedTrigger = "/sdcard/Pictures/NotiCam/trigger_guided_ab";
-    }
-
-    bool forceTrigger = false;
-    if (access("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force", F_OK) == 0) {
-        unlink("/sdcard/Android/data/com.zenith.auxcam/files/diag/trigger_guided_ab_force");
-        forceTrigger = true;
-    } else if (access("/sdcard/Pictures/NotiCam/trigger_guided_ab_force", F_OK) == 0) {
-        unlink("/sdcard/Pictures/NotiCam/trigger_guided_ab_force");
-        forceTrigger = true;
-    }
-
-    if (forceTrigger) {
-        if (matchedTrigger) unlink(matchedTrigger);
-        doTriggerAb = true;
-    } else if (matchedTrigger != nullptr) {
-        bool hasSubjectMatte = false;
-        if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
-            uint32_t fgCount = 0;
-            for (uint32_t i = 0; i < alphaW * alphaH; ++i) {
-                if (alphaMatte[i] > 100) {
-                    fgCount++;
-                }
-            }
-            if (fgCount > 500) {
-                hasSubjectMatte = true;
-            }
-        }
-        if (hasSubjectMatte) {
-            unlink(matchedTrigger);
-            doTriggerAb = true;
-        } else {
-            static int sWaitLogCount = 0;
-            if ((sWaitLogCount++ % 60) == 0) {
-                LOGI("trigger_guided_ab pending: waiting for subject in viewfinder (hasRealAlpha=%d)...", hasRealAlpha ? 1 : 0);
-            }
-        }
-    }
-
     CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, (float)mStillW };
     AlphaPushConstants pcAlpha{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u) };
     GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f, 0 };
@@ -1204,7 +1274,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
         // Alpha (guided ON)
-        AlphaPushConstants pcAlphaOn{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u };
+        AlphaPushConstants pcAlphaOn{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 0u };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOn);
@@ -1219,9 +1289,9 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &memBarrier, 0, nullptr, 0, nullptr);
 
         // Composite 527x703
-        CompositePushConstants pcComp527{ mStillW, mStillH, kPreviewRotate90, 0 };
-        uint32_t gx527 = (mStillW + 15) / 16;
-        uint32_t gy527 = (mStillH + 15) / 16;
+        CompositePushConstants pcComp527{ mPreviewW, mPreviewH, kPreviewRotate90, 0 };
+        uint32_t gx527 = (mPreviewW + 15) / 16;
+        uint32_t gy527 = (mPreviewH + 15) / 16;
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeComp);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlComp, 0, 1, &mSetComp527, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlComp, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(CompositePushConstants), &pcComp527);
@@ -1232,23 +1302,45 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         transition(mImgCoc, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
         transition(mImgAlpha, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
 
+        const size_t compBytes = (size_t)mPreviewW * mPreviewH * 4;
+        const VkDeviceSize compOffset = 0;
+        const VkDeviceSize cocOffset = (compBytes + 4095) & ~4095ULL;
+        const size_t cocCount = (size_t)mPreviewW * mPreviewH;
+        const size_t cocBytes = cocCount * sizeof(uint16_t);
+        const VkDeviceSize alphaOffset = (cocOffset + cocBytes + 4095) & ~4095ULL;
+        const size_t alphaCount = (size_t)mPreviewW * mPreviewH;
+        const size_t alphaBytes = alphaCount * sizeof(uint8_t);
+        const size_t totalMapBytes = (size_t)(alphaOffset + alphaBytes);
+        const size_t readbackBufferSize = (size_t)mFullW * mFullH * 4;
+
         VkBufferImageCopy copyComp{};
-        copyComp.bufferOffset = 0;
+        copyComp.bufferOffset = compOffset;
         copyComp.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copyComp.imageExtent = { mStillW, mStillH, 1 };
+        copyComp.imageExtent = { mPreviewW, mPreviewH, 1 };
         vkCmdCopyImageToBuffer(curCmd, mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyComp);
 
         VkBufferImageCopy copyCoc{};
-        copyCoc.bufferOffset = 2000000;
+        copyCoc.bufferOffset = cocOffset;
         copyCoc.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copyCoc.imageExtent = { mStillW, mStillH, 1 };
+        copyCoc.imageExtent = { mPreviewW, mPreviewH, 1 };
         vkCmdCopyImageToBuffer(curCmd, mImgCoc, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyCoc);
 
         VkBufferImageCopy copyAlpha{};
-        copyAlpha.bufferOffset = 3000000;
+        copyAlpha.bufferOffset = alphaOffset;
         copyAlpha.imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
-        copyAlpha.imageExtent = { mStillW, mStillH, 1 };
+        copyAlpha.imageExtent = { mPreviewW, mPreviewH, 1 };
         vkCmdCopyImageToBuffer(curCmd, mImgAlpha, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, mReadbackBuffer, 1, &copyAlpha);
+
+        VkBufferMemoryBarrier bufBarrier{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER };
+        bufBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        bufBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        bufBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bufBarrier.buffer = mReadbackBuffer;
+        bufBarrier.offset = 0;
+        bufBarrier.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(curCmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &bufBarrier, 0, nullptr);
 
         vkEndCommandBuffer(curCmd);
 
@@ -1262,38 +1354,56 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
         // Process Pass 1
         void* pMap = nullptr;
-        vkMapMemory(mDevice, mReadbackMem, 0, 4000000, 0, &pMap);
+        vkMapMemory(mDevice, mReadbackMem, 0, totalMapBytes, 0, &pMap);
         if (pMap) {
-            uint8_t* pBytes = (uint8_t*)pMap;
-            savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_on.png", mStillW, mStillH, pBytes);
-            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_on.png", mStillW, mStillH, pBytes);
+            VkMappedMemoryRange range{ VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, nullptr, mReadbackMem, 0, VK_WHOLE_SIZE };
+            vkInvalidateMappedMemoryRanges(mDevice, 1, &range);
 
-            // CoC histogram
-            uint16_t* pCocHalf = (uint16_t*)(pBytes + 2000000);
-            size_t totalPx = mStillW * mStillH;
-            std::vector<float> cocVals(totalPx);
-            size_t countOver8 = 0;
-            for (size_t i = 0; i < totalPx; ++i) {
-                float c = halfToFloat(pCocHalf[i]) * (float)mStillW;
-                cocVals[i] = c;
-                if (c > 8.0f) countOver8++;
+            uint8_t* pBytes = (uint8_t*)pMap;
+            savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
+            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_on.png", mPreviewW, mPreviewH, pBytes + compOffset);
+
+            if (cocOffset + cocCount * 2 > readbackBufferSize) {
+                LOGE("COC_READ_ABORT offset=%zu count=%zu bufsize=%zu", (size_t)cocOffset, cocCount, readbackBufferSize);
+            } else {
+                uint16_t* pCocHalf = reinterpret_cast<uint16_t*>(pBytes + cocOffset);
+                LOGI("RAW_COC_SAMPLES: [0]=0x%04x [100]=0x%04x [1000]=0x%04x [10000]=0x%04x [100000]=0x%04x",
+                     pCocHalf[0], pCocHalf[100], pCocHalf[1000], pCocHalf[10000], pCocHalf[100000]);
+                std::vector<float> cocVals(cocCount);
+                uint32_t b[10] = {0};
+                for (size_t i = 0; i < cocCount; ++i) {
+                    float c = halfToFloat(pCocHalf[i]) * static_cast<float>(mPreviewW);
+                    cocVals[i] = c;
+                    if (c < 1.0f) b[0]++;
+                    else if (c < 2.0f) b[1]++;
+                    else if (c < 4.0f) b[2]++;
+                    else if (c < 6.0f) b[3]++;
+                    else if (c < 8.0f) b[4]++;
+                    else if (c < 10.0f) b[5]++;
+                    else if (c < 14.0f) b[6]++;
+                    else if (c < 18.0f) b[7]++;
+                    else if (c < 22.0f) b[8]++;
+                    else b[9]++;
+                }
+                std::sort(cocVals.begin(), cocVals.end());
+                float minCoc = cocVals.front();
+                float p50Coc = cocVals[cocCount / 2];
+                float p95Coc = cocVals[static_cast<size_t>(cocCount * 0.95f)];
+                float maxCoc = cocVals.back();
+                LOGI("COC_N min=%.4f p50=%.4f p95=%.4f max=%.4f count=%zu", minCoc, p50Coc, p95Coc, maxCoc, cocCount);
+                LOGI("COC_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
+                     b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9]);
             }
-            std::sort(cocVals.begin(), cocVals.end());
-            float p50Coc = cocVals[totalPx / 2];
-            float p95Coc = cocVals[(size_t)(totalPx * 0.95f)];
-            float maxCoc = cocVals.back();
-            float fracOver8 = (float)countOver8 / (float)totalPx;
-            LOGI("COC p50=%.4f p95=%.4f max=%.4f frac_over_8=%.4f", p50Coc, p95Coc, maxCoc, fracOver8);
 
             // Alpha distribution by luma band
-            uint8_t* pAlphaBytes = pBytes + 3000000;
+            uint8_t* pAlphaBytes = pBytes + alphaOffset;
             std::vector<float> darkAlphas, midAlphas, brightAlphas;
-            darkAlphas.reserve(totalPx / 4);
-            midAlphas.reserve(totalPx / 2);
-            brightAlphas.reserve(totalPx / 4);
+            darkAlphas.reserve(cocCount / 4);
+            midAlphas.reserve(cocCount / 2);
+            brightAlphas.reserve(cocCount / 4);
 
             double sumDark = 0, sumMid = 0, sumBright = 0;
-            for (size_t i = 0; i < totalPx; ++i) {
+            for (size_t i = 0; i < cocCount; ++i) {
                 float r = pBytes[i * 4 + 0];
                 float g = pBytes[i * 4 + 1];
                 float b = pBytes[i * 4 + 2];
@@ -1340,7 +1450,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         transition(mImgBlurred, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         transition(mImgComp527, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, 0, VK_ACCESS_SHADER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
-        AlphaPushConstants pcAlphaOff{ mStillW, mStillH, s1, (hasRealAlpha ? 0u : 1u), 0, 1u };
+        AlphaPushConstants pcAlphaOff{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, 1u };
         vkCmdBindPipeline(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(curCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaPreview, 0, nullptr);
         vkCmdPushConstants(curCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaOff);
@@ -1366,11 +1476,11 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         vkQueueWaitIdle(mComputeQueue);
 
         pMap = nullptr;
-        vkMapMemory(mDevice, mReadbackMem, 0, 2000000, 0, &pMap);
+        vkMapMemory(mDevice, mReadbackMem, 0, compBytes, 0, &pMap);
         if (pMap) {
             uint8_t* pBytes = (uint8_t*)pMap;
-            savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_off.png", mStillW, mStillH, pBytes);
-            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_off.png", mStillW, mStillH, pBytes);
+            savePngRgba("/sdcard/Pictures/NotiCam/edge_guided_off.png", mPreviewW, mPreviewH, pBytes);
+            savePngRgba("/sdcard/Android/data/com.zenith.auxcam/files/diag/edge_guided_off.png", mPreviewW, mPreviewH, pBytes);
             vkUnmapMemory(mDevice, mReadbackMem);
         }
         LOGI("=== GUIDED A/B DIAGNOSTIC COMPLETE ===");
@@ -1542,6 +1652,8 @@ uint32_t VulkanPipeline::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFla
 
 bool VulkanPipeline::initStillBokehResources(uint32_t width, uint32_t height) {
     if (mStillBokehInitialized) return true;
+    mPreviewW = width;
+    mPreviewH = height;
     mStillW = width;
     mStillH = height;
 

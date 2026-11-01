@@ -245,6 +245,9 @@ class MainActivity : ComponentActivity(), NativeBridge {
         @JvmStatic
         private external fun nativeSetThermalThrottled(throttled: Boolean)
 
+        @JvmStatic
+        private external fun nativeSetFocusDistance(s1FocusM: Float)
+
         var DISABLE_GUIDED: Boolean = false
             set(value) {
                 field = value

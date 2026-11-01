@@ -93,6 +93,14 @@ Java_com_zenith_auxcam_MainActivity_nativeSetCameraOpticalParams(
     }
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_zenith_auxcam_MainActivity_nativeSetFocusDistance(
+        JNIEnv* env, jclass clazz, jfloat s1FocusM) {
+    if (gPipeline) {
+        gPipeline->setS1FocusM(s1FocusM);
+    }
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(
         JNIEnv* env, jobject thiz, jobject hardwareBufferObj, jbyteArray depthY8Array, jint depthW, jint depthH, jbyteArray alphaMatteArray, jint alphaW, jint alphaH, jfloat fStop, jfloat targetFarFieldPx, jstring outPathStr, jlongArray timestampsOut) {

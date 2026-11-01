@@ -621,7 +621,11 @@ class CameraController(
                 dumpPreviewDiagnostics(image)
             }
 
-            val buffer = image.hardwareBuffer
+            val buffer = try {
+                image.hardwareBuffer
+            } catch (t: Throwable) {
+                null
+            }
             if (buffer != null) {
                 try {
                     val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
@@ -673,7 +677,11 @@ class CameraController(
         val shutterNs = shutterClickNs
         try {
             val t3 = SystemClock.elapsedRealtimeNanos()
-            val buffer = image.hardwareBuffer
+            val buffer = try {
+                image.hardwareBuffer
+            } catch (t: Throwable) {
+                null
+            }
             var gpuElapsedNs = 0L
 
             if (buffer != null) {
