@@ -7,6 +7,11 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.MediaRecorder;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
+import android.media.MediaFormat;
+import android.graphics.Rect;
+import android.hardware.camera2.params.DynamicRangeProfiles;
 import android.os.Build;
 import android.util.Size;
 import android.util.SizeF;
@@ -62,20 +67,57 @@ final class CameraCapabilities {
         return ids;
     }
     static Target discover(CameraManager cm) throws Exception {
-        return discover(cm, "0");
+        double mainFov = fieldOfViewRatio(cm.getCameraCharacteristics("0"));
+        // Prefer main, then other queryable rear main-FOV IDs. A telephoto
+        // 50 MP output must not masquerade as a 1x main-camera image.
+        java.util.LinkedHashSet<String> ids = candidateIds(cm);
+        for (String id : ids) try {
+            CameraCharacteristics c = cm.getCameraCharacteristics(id);
+            Integer facing = c.get(CameraCharacteristics.LENS_FACING);
+            if (facing == null || facing != CameraCharacteristics.LENS_FACING_BACK) continue;
+            double fov = fieldOfViewRatio(c);
+            if (!"0".equals(id) && (mainFov == 0 || fov == 0 || Math.abs(fov / mainFov - 1) > .15)) continue;
+            Size s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP), true);
+            if (s != null) return new Target(id, s, CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT, "Camera2 default/high-resolution map");
+            if (Build.VERSION.SDK_INT >= 31 && c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) != null) {
+                s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION), true);
+                if (s != null) return new Target(id, s, CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Camera2 maximum-resolution map");
+            }
+            try {
+                CameraCharacteristics.Key<int[]> ntKey = new CameraCharacteristics.Key<>("nothing.scaler.availableStreamConfigurations", int[].class);
+                int[] ntSizes = c.get(ntKey);
+                if (ntSizes != null) {
+                    for (int i = 0; i + 3 < ntSizes.length; i += 4) {
+                        int fmt = ntSizes[i];
+                        int w = ntSizes[i + 1];
+                        int h = ntSizes[i + 2];
+                        int io = ntSizes[i + 3];
+                        if (fmt == ImageFormat.JPEG && io == 0 && is50Mp(new Size(w, h))) {
+                            return new Target(id, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
+                        }
+                    }
+                }
+            } catch (Throwable ignored) {}
+            // Vendor output tables and extension sizes are diagnostic only.
+            // Without documented remosaic/session controls, requesting a larger
+            // JPEG could merely upscale a binned sensor readout.
+        } catch (Exception ignored) { /* Another queryable ID may still work. */ }
+        return null;
     }
 
     static Target discover(CameraManager cm, String preferredLensId) throws Exception {
-        String targetId = preferredLensId != null ? preferredLensId : "0";
+        if (preferredLensId == null || preferredLensId.isEmpty() || "0".equals(preferredLensId)) {
+            return discover(cm);
+        }
         try {
-            CameraCharacteristics c = cm.getCameraCharacteristics(targetId);
+            CameraCharacteristics c = cm.getCameraCharacteristics(preferredLensId);
             Integer facing = c.get(CameraCharacteristics.LENS_FACING);
             if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
                 Size s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP), true);
-                if (s != null) return new Target(targetId, s, CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT, "Camera2 default/high-resolution map");
+                if (s != null) return new Target(preferredLensId, s, CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT, "Camera2 default/high-resolution map");
                 if (Build.VERSION.SDK_INT >= 31 && c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) != null) {
                     s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION), true);
-                    if (s != null) return new Target(targetId, s, CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Camera2 maximum-resolution map");
+                    if (s != null) return new Target(preferredLensId, s, CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Camera2 maximum-resolution map");
                 }
                 try {
                     CameraCharacteristics.Key<int[]> ntKey = new CameraCharacteristics.Key<>("nothing.scaler.availableStreamConfigurations", int[].class);
@@ -87,7 +129,7 @@ final class CameraCapabilities {
                             int h = ntSizes[i + 2];
                             int io = ntSizes[i + 3];
                             if ((fmt == 33 || fmt == ImageFormat.JPEG) && io == 0 && is50Mp(new Size(w, h))) {
-                                return new Target(targetId, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
+                                return new Target(preferredLensId, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
                             }
                         }
                     }
@@ -164,25 +206,108 @@ final class CameraCapabilities {
         }
         return best == null ? new int[0] : new int[]{best.getWidth(), best.getHeight(), rate.getLower(), rate.getUpper()};
     }
+    /** Largest advertised native-aspect recorder stream supported by hardware AVC
+     * at 30 fps. Not unbinned sensor RAW, and not proof of combined-session throughput.
+     * Never silently substitutes a wide crop when a native stream is unavailable.
+     */
     static Size videoSize(CameraManager cm, String id) throws Exception {
-        StreamConfigurationMap map = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-        if (map == null) return null;
-        android.util.Range<Integer>[] fps = cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+        CameraCharacteristics chars = cm.getCameraCharacteristics(id);
+        StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        Rect active = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+        if (map == null || active == null) return null;
+        android.util.Range<Integer>[] fps = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
         boolean thirtyFps = false;
         if (fps != null) for (android.util.Range<Integer> range : fps) {
-            if (range.getUpper() == 30 && range.getLower() <= 30) thirtyFps = true;
+            if (range.getUpper() == VideoPolicy.FPS && range.getLower() <= VideoPolicy.FPS) thirtyFps = true;
         }
         if (!thirtyFps) return null;
         Size result = null;
         Size[] sizes = map.getOutputSizes(MediaRecorder.class);
-        if (sizes != null) for (Size s : sizes) {
-            if (s.getWidth() > 1920 || s.getHeight() > 1080 || Math.abs((double) s.getWidth() / s.getHeight() - 16.0 / 9.0) > .02) continue;
-            long duration = map.getOutputMinFrameDuration(MediaRecorder.class, s);
-            if (duration > 33_333_334L) continue;
-            if (result == null || (long) s.getWidth() * s.getHeight() > (long) result.getWidth() * result.getHeight()) result = s;
+        MediaCodecInfo[] codecs = new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos();
+        if (sizes != null) for (Size size : sizes) {
+            if (!VideoPolicy.matchesSensor(size.getWidth(), size.getHeight(), active.width(), active.height())) continue;
+            long duration = map.getOutputMinFrameDuration(MediaRecorder.class, size);
+            if (duration > 1_000_000_000L / VideoPolicy.FPS + 1) continue;
+            boolean encodable = false;
+            for (MediaCodecInfo codec : codecs) {
+                if (!codec.isEncoder() || !codec.isHardwareAccelerated()) continue;
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = codec.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC);
+                    boolean surfaceInput = false;
+                    for (int format : caps.colorFormats) if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surfaceInput = true;
+                    MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
+                    if (surfaceInput && video != null && video.areSizeAndRateSupported(size.getWidth(), size.getHeight(), VideoPolicy.FPS)) {
+                        encodable = true; break;
+                    }
+                } catch (IllegalArgumentException ignored) { /* Another encoder may support AVC. */ }
+            }
+            if (encodable && (result == null || (long) size.getWidth() * size.getHeight() > (long) result.getWidth() * result.getHeight())) result = size;
         }
         return result;
     }
+
+    private static boolean hasCapability(CameraCharacteristics c, int capability) {
+        int[] capabilities = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        if (capabilities != null) for (int value : capabilities) if (value == capability) return true;
+        return false;
+    }
+
+    private static void appendFootageCapabilities(StringBuilder out, CameraCharacteristics c, StreamConfigurationMap map) {
+        out.append("RAW capability: ").append(hasCapability(c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)).append('\n');
+        if (map != null) {
+            for (int format : new int[]{ImageFormat.RAW_SENSOR, ImageFormat.RAW10, ImageFormat.RAW12}) {
+                Size[] sizes = map.getOutputSizes(format);
+                String name = format == ImageFormat.RAW_SENSOR ? "RAW_SENSOR" : format == ImageFormat.RAW10 ? "RAW10" : "RAW12";
+                out.append(name).append(" (format ").append(format).append(") sizes/minFrameNs: ");
+                if (sizes != null) for (Size size : sizes) {
+                    out.append(size).append('/').append(map.getOutputMinFrameDuration(format, size)).append(' ');
+                }
+                out.append('\n');
+            }
+            out.append("Recorder sizes: ").append(Arrays.toString(map.getOutputSizes(MediaRecorder.class))).append('\n');
+        }
+        out.append("Tone-map modes: ").append(Arrays.toString(c.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES))).append('\n');
+        if (Build.VERSION.SDK_INT >= 31) out.append("Rotate-and-crop modes (NONE requested when advertised): ").append(Arrays.toString(c.get(CameraCharacteristics.SCALER_AVAILABLE_ROTATE_AND_CROP_MODES))).append('\n');
+        if (Build.VERSION.SDK_INT >= 33) {
+            out.append("10-bit dynamic range capability: ").append(hasCapability(c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_DYNAMIC_RANGE_TEN_BIT)).append('\n');
+            DynamicRangeProfiles profiles = c.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES);
+            if (profiles != null) for (long profile : profiles.getSupportedProfiles()) {
+                String name = profile == DynamicRangeProfiles.STANDARD ? "SDR" : profile == DynamicRangeProfiles.HLG10 ? "HLG10" :
+                        profile == DynamicRangeProfiles.HDR10 ? "HDR10" : profile == DynamicRangeProfiles.HDR10_PLUS ? "HDR10+" : "Other HDR " + profile;
+                out.append("Dynamic range ").append(name).append(" constraints=").append(profiles.getProfileCaptureRequestConstraints(profile)).append('\n');
+            }
+            if (map != null) out.append("P010 sizes: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.YCBCR_P010))).append('\n');
+        }
+        out.append("RAW metadata/stream availability is not proof of RAW video throughput. HLG/HDR and flat 8-bit curves are not camera Log.\n");
+    }
+
+    private static void appendEncoderCapabilities(StringBuilder out) {
+        try {
+            out.append("\nHardware video encoders (availability, not a recording mode already implemented):\n");
+            for (MediaCodecInfo codec : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+                if (!codec.isEncoder() || !codec.isHardwareAccelerated()) continue;
+                for (String mime : codec.getSupportedTypes()) {
+                    if (!MediaFormat.MIMETYPE_VIDEO_AVC.equals(mime) && !MediaFormat.MIMETYPE_VIDEO_HEVC.equals(mime)) continue;
+                    try {
+                        MediaCodecInfo.CodecCapabilities caps = codec.getCapabilitiesForType(mime);
+                        out.append(codec.getName()).append(' ').append(mime).append(" profiles: ");
+                        boolean main10 = false;
+                        for (MediaCodecInfo.CodecProfileLevel profile : caps.profileLevels) {
+                            out.append(profile.profile).append('/').append(profile.level).append(' ');
+                            if (profile.profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10 ||
+                                    profile.profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10 ||
+                                    profile.profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus) main10 = true;
+                        }
+                        if (MediaFormat.MIMETYPE_VIDEO_HEVC.equals(mime)) out.append(" HEVC Main10=").append(main10);
+                        MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
+                        if (video != null) out.append(" widths=").append(video.getSupportedWidths()).append(" heights=").append(video.getSupportedHeights()).append(" bitrates=").append(video.getBitrateRange());
+                        out.append('\n');
+                    } catch (IllegalArgumentException ignored) { }
+                }
+            }
+        } catch (Exception e) { out.append("Encoder capability query failed: ").append(e).append('\n'); }
+    }
+
     static String report(CameraManager cm) throws Exception {
         StringBuilder out = new StringBuilder("NotiCam Camera2 capability report\nDevice: ")
                 .append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append(" / ").append(Build.FINGERPRINT).append('\n');
@@ -192,6 +317,7 @@ final class CameraCapabilities {
         out.append("Enumerated IDs: ").append(Arrays.toString(cm.getCameraIdList()))
                 .append("\nQueried IDs (includes existing auxiliary routes): ").append(candidateIds(cm))
                 .append("\nMetadata eligibility is not proof of a successful capture session.\n");
+        appendEncoderCapabilities(out); // Preserve codec evidence even if vendor tables truncate later.
         for (String id : candidateIds(cm)) try {
             CameraCharacteristics c = cm.getCameraCharacteristics(id);
             out.append("\nCamera ").append(id).append(" facing=").append(c.get(CameraCharacteristics.LENS_FACING))
@@ -211,6 +337,8 @@ final class CameraCapabilities {
                     .append(" sensor pixels=").append(c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE))
                     .append(" physical size=").append(c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE))
                     .append(" focal lengths=").append(Arrays.toString(c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS))).append('\n');
+            appendFootageCapabilities(out, c, map);
+            out.append("Native-aspect AVC/30 recorder candidate: ").append(videoSize(cm, id)).append('\n');
             out.append("Preview profile (width,height,minFPS,maxFPS): ").append(Arrays.toString(previewConfig(cm, id, true))).append('\n');
             if (map != null) out.append("YUV: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.YUV_420_888)))
                     .append("\nRAW: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.RAW_SENSOR))).append('\n');
@@ -231,7 +359,7 @@ final class CameraCapabilities {
             }
             for (CameraCharacteristics.Key<?> key : c.getKeys()) {
                 String name = key.getName().toLowerCase(java.util.Locale.US);
-                if (name.startsWith("android.") || !(name.contains("stream") || name.contains("resol") || name.contains("remosaic") || name.contains("pixel"))) continue;
+                if (name.startsWith("android.") || !(name.contains("stream") || name.contains("resol") || name.contains("remosaic") || name.contains("pixel") || name.contains("log") || name.contains("raw") || name.contains("hdr") || name.contains("bitdepth"))) continue;
                 try {
                     Object value = c.get(key);
                     String text = value instanceof int[] ? Arrays.toString((int[]) value) : value instanceof long[] ? Arrays.toString((long[]) value) : String.valueOf(value);

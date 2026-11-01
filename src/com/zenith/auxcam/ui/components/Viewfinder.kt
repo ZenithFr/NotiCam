@@ -69,6 +69,7 @@ fun Viewfinder(
     locked: Boolean,
     onLock: () -> Unit,
     onUnlock: () -> Unit,
+    zoomEnabled: Boolean = enabled,
     modifier: Modifier = Modifier,
 ) {
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
@@ -297,8 +298,8 @@ fun Viewfinder(
                         },
                     )
                 }
-                .pointerInput(enabled) {
-                    if (!enabled) return@pointerInput
+                .pointerInput(zoomEnabled) {
+                    if (!zoomEnabled) return@pointerInput
                     var lastStop = -1
                     detectTransformGestures { _, _, scale, _ ->
                         if (scale == 1f) return@detectTransformGestures

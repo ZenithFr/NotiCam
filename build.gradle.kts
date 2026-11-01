@@ -101,6 +101,8 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // Shizuku + TensorFlow Lite ship as local jars (no network needed).
     implementation(fileTree("libs") { include("*.jar") })
+    // MODNet + recurrent RVM use their original FP32 ONNX exports.
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
     implementation("androidx.compose.ui:ui")
@@ -173,3 +175,16 @@ val verifySources = tasks.register<Exec>("verifySources") {
     commandLine("bash", "build.sh", "check")
 }
 tasks.named("check") { dependsOn(verifySources) }
+
+// All picker models ship inside the APK; no runtime download or placeholders.
+// Large weights stay out of Git, following assets/models/*.onnx conventions.
+val fetchBokehModels = tasks.register<Exec>("fetchBokehModels") {
+    group = "build"
+    description = "Fetches and SHA-256 verifies pinned MODNet/RVM assets for APK bundling"
+    inputs.files("tools/fetch_bokeh_models.py", "assets/models/bokeh-models.json")
+    outputs.dir("assets/models/optional")
+    outputs.upToDateWhen { false } // Rehash cached assets; download only missing/corrupt files.
+    workingDir(projectDir)
+    commandLine("python3", "tools/fetch_bokeh_models.py")
+}
+tasks.named("preBuild") { dependsOn(fetchBokehModels) }

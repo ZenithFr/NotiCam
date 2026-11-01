@@ -46,10 +46,11 @@ private fun Interpreter.getOutputDetails(): List<TensorDetails> {
 }
 
 /**
- * Production dual-tier MediaPipe portrait segmentation engine on mt6878 APU (mtk-mdla_shim).
+ * Dual-tier MediaPipe Selfie Segmentation. Tries NNAPI mtk-mdla_shim; actual
+ * delegation/performance must be verified on the device (not assumed APU execution).
  *
  * Implements:
- *   - SHA256 verification of packaged INT8 models against project ledger at init.
+ *   - SHA256 verification of float-preferred assets, with INT8 fallback.
  *   - Asymmetric quantization reading (in_scale, in_zero, out_scale, out_zero).
  *   - Stretch resizing to [1,144,256,3] and [1,256,256,3] without letterboxing.
  *   - Dequantization to float probability and bilinear upsample of landscape to 256x256.
@@ -58,7 +59,7 @@ private fun Interpreter.getOutputDetails(): List<TensorDetails> {
  *   - Spatial/temporal EMA smoothing (alpha=0.25).
  *   - Thermal fallback (DUAL -> FAST landscape alone, thr 0.45) on thermal >= 2 or fps < 28.
  */
-class DualMatteSegmenter(private val context: Context) {
+class DualMatteSegmenter(private val context: Context, private val packagedOnly: Boolean = false) {
 
     enum class TierMode {
         DUAL, // Landscape + General (pixel-max, thr 0.65)
@@ -423,7 +424,7 @@ class DualMatteSegmenter(private val context: Context) {
             File(context.filesDir, assetPath.substringAfterLast('/')),
             File("/data/data/com.zenith.auxcam/files/$assetPath")
         )
-        for (f in fileCandidates) {
+        for (f in if (packagedOnly) emptyArray<File>() else fileCandidates) {
             if (f.exists() && f.canRead()) {
                 FileInputStream(f).use { fis ->
                     val fc = fis.channel
@@ -534,6 +535,44 @@ class DualMatteSegmenter(private val context: Context) {
             preprocessStretchYuv(image, 256, 256, inDtypeG, inScaleG, inZeroG, inBufG)
         }
         return true
+    }
+
+    /** Worker-only RGB entry point. The Image was copied/closed by the camera reader. */
+    internal fun preprocessRgb(frame: BokehFrame): Boolean {
+        if (!isInitialized.get()) return false
+        preparedMode = currentMode
+        if (interpLandscape == null || (preparedMode == TierMode.DUAL && interpGeneral == null)) return false
+        fun write(w: Int, h: Int, type: DataType, scale: Float, zero: Int, buffer: ByteBuffer) {
+            buffer.rewind()
+            if (type == DataType.FLOAT32) frame.writeTensor(buffer.asFloatBuffer(), w, h, nchw = false)
+            else {
+                val floats = java.nio.FloatBuffer.allocate(w * h * 3)
+                frame.writeTensor(floats, w, h, nchw = false)
+                require(scale > 0f)
+                repeat(floats.capacity()) { buffer.put(Math.round(floats.get() / scale + zero).coerceIn(-128, 127).toByte()) }
+            }
+            buffer.rewind()
+        }
+        write(256, 144, inDtypeL, inScaleL, inZeroL, inBufL)
+        if (preparedMode == TierMode.DUAL) write(256, 256, inDtypeG, inScaleG, inZeroG, inBufG)
+        // A scene change resets the same EMA used by the original Image path.
+        val hist = FloatArray(16)
+        var count = 0
+        for (i in frame.rgb.indices step 48) {
+            val luma = ((frame.rgb[i].toInt() and 255) + (frame.rgb[i + 1].toInt() and 255) + (frame.rgb[i + 2].toInt() and 255)) / 3
+            hist[luma / 16]++; count++
+        }
+        var delta = 0f
+        for (i in hist.indices) { hist[i] /= count.toFloat(); delta += kotlin.math.abs(hist[i] - prevHistogram[i]) }
+        mFastPathTriggered = hasPrevHistogram && delta * .5f > FAST_PATH_HIST_DELTA
+        hist.copyInto(prevHistogram); hasPrevHistogram = true
+        return true
+    }
+
+    internal fun resetTemporalState() {
+        emaInitialized = false
+        hasPrevHistogram = false
+        mFastPathTriggered = false
     }
 
     /**
@@ -669,6 +708,11 @@ class DualMatteSegmenter(private val context: Context) {
         } else {
             // Fast mode: landscape alone
             System.arraycopy(probUpsampledL, 0, probCombined, 0, 256 * 256)
+        }
+
+        if (probCombined.any { !it.isFinite() || it < -.001f || it > 1.001f }) {
+            Log.e(TAG, "Invalid/nonfinite MediaPipe alpha")
+            return false
         }
 
         // 4. Threshold & Telemetry

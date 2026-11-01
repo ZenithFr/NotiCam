@@ -41,3 +41,6 @@ Thumbs.db
 # Local validation environments
 .cache/
 __pycache__/
+
+# Large model weights are checksum-pinned and bundled by fetchBokehModels at build time.
+assets/models/optional/

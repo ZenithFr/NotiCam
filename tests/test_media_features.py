@@ -71,6 +71,102 @@ class MediaFeatures(unittest.TestCase):
         self.assertIn('galleryOpen = true', viewer)
         self.assertIn('service?.closeSession()', viewer)
 
+    def test_recorder_selects_native_aspect_camera_and_encoder_intersection(self):
+        caps = (SRC / 'CameraCapabilities.java').read_text().split('static Size videoSize(', 1)[1].split('private static boolean hasCapability', 1)[0]
+        for required in ('SENSOR_INFO_ACTIVE_ARRAY_SIZE', 'VideoPolicy.matchesSensor',
+                         'getOutputSizes(MediaRecorder.class)', 'getOutputMinFrameDuration',
+                         'CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES', 'isHardwareAccelerated()',
+                         'areSizeAndRateSupported', 'COLOR_FormatSurface', 'VideoPolicy.FPS'):
+            self.assertIn(required, caps)
+        self.assertNotIn('1920', caps)
+        self.assertNotIn('16.0 / 9.0', caps)
+        video = (SRC / 'VideoCapture.kt').read_text()
+        self.assertIn('VideoPolicy.bitrate(width, height)', video)
+        self.assertIn('bitrateRange.clamp', video)
+        self.assertIn('No 16:9 substitute', (SRC / 'CameraController.kt').read_text())
+        self.assertNotIn('16:9', (SRC / 'ui/CameraScreen.kt').read_text())
+
+    def test_gallery_uses_rotated_video_metadata_not_hardcoded_portrait_crop(self):
+        gallery = (SRC / 'ui/GalleryScreen.kt').read_text()
+        for key in ('METADATA_KEY_VIDEO_WIDTH', 'METADATA_KEY_VIDEO_HEIGHT', 'METADATA_KEY_VIDEO_ROTATION',
+                    'VideoPolicy.displayAspect(w, h, rotation)', 'minOf(maxWidth, maxHeight * aspect)', 'Modifier.size(videoWidth, videoHeight)'):
+            self.assertIn(key, gallery)
+        self.assertNotIn('aspectRatio(9f / 16f)', gallery)
+
+    def test_gallery_lifts_actions_above_unconsumed_physical_dialog_insets(self):
+        gallery = (SRC / 'ui/GalleryScreen.kt').read_text()
+        for key in ('decorFitsSystemWindows = false', 'gallerySafePadding()',
+                    'getRootWindowInsets(view)', 'getInsetsIgnoringVisibility',
+                    'Type.systemBars()', 'Type.displayCutout()', 'WindowInsets.safeDrawing',
+                    'fallback.getBottom(density)', '+ 20.dp', 'removeOnGlobalLayoutListener'):
+            self.assertIn(key, gallery)
+        self.assertNotIn('setOnApplyWindowInsetsListener', gallery)
+
+    def test_reserved_shizuku_destroy_preserves_original_transaction_ids(self):
+        import re
+        aidl = (SRC / 'IAuxCamService.aidl').read_text()
+        methods = re.findall(r'(?:void|boolean|int\[\]|String)\s+(\w+)\([^;]*?\)\s*=\s*(\d+);', aidl)
+        self.assertEqual([int(code) for _, code in methods[:-1]], list(range(17)))
+        self.assertEqual(methods[-1], ('destroy', '16777114'))
+        controller = (SRC / 'CameraController.kt').read_text()
+        self.assertIn('.version(7)', controller)
+        self.assertIn('.daemon(false)', controller)
+        self.assertIn('.tag("noticam-', controller)
+        self.assertIn('exitingService?.destroy()', controller)
+
+    def test_camera_exit_cleans_independently_and_handles_client_death(self):
+        service = (SRC / 'CameraUserService.java').read_text()
+        for key in ('linkToDeath(mClientDeath', 'unlinkToDeath(mClientDeath',
+                    'mClientDeath = this::destroy', 'compareAndSet(false, true)',
+                    'CameraExitWatchdog', 'Thread.sleep(2000)', 'postAtFrontOfQueue',
+                    'android.os.Process.killProcess(android.os.Process.myPid())',
+                    'session.abortCaptures()', 'session.close()', 'camera.close()',
+                    'mStillSurface = null', 'surface.release()', 'IAuxCamCallback callback = mCallback'):
+            self.assertIn(key, service)
+        self.assertNotIn('killall', service)
+        close = service.split('private void closeSessionOnCameraThread()', 1)[1].split('private void notifyError', 1)[0]
+        self.assertIn('if (camera != null) try { camera.close(); }', close)
+        self.assertLess(close.index('mCaptureSession = null'), close.index('session.close()'))
+
+    def test_native_engine_released_on_pause_and_reinitialized_with_surviving_surface(self):
+        controller = (SRC / 'CameraController.kt').read_text()
+        pause = controller.split('fun pause()', 1)[1].split('fun dispose()', 1)[0]
+        self.assertIn('native.destroyEngine()', pause)
+        self.assertLess(pause.index('foreground = false'), pause.index('service?.closeSession()'))
+        start = controller.split('fun start()', 1)[1].split('fun pause()', 1)[0]
+        self.assertIn('initializePreviewEngine(it)', start)
+        self.assertIn('initializePreviewEngine(it)', controller.split('override fun onGalleryClose()', 1)[1])
+
+    def test_late_portrait_still_cannot_resurrect_persistent_background_gpu_owner(self):
+        native = (ROOT / 'jni/src/NativeBokehBridge.cpp').read_text()
+        still = native.split('Java_com_zenith_auxcam_MainActivity_nativeProcessStillBokeh(', 1)[1].split('extern "C"', 1)[0]
+        self.assertIn('std::unique_ptr<VulkanPipeline> headlessStillPipeline', still)
+        self.assertIn('VulkanPipeline* stillPipeline = gPipeline.get()', still)
+        self.assertIn('headlessStillPipeline->init(nullptr', still)
+        self.assertIn('stillPipeline->processStillBokeh(', still)
+        self.assertNotIn('gPipeline = std::make_unique', still)
+        implementation = (ROOT / 'jni/src/VulkanPipeline.cpp').read_text()
+        destructor = implementation.split('VulkanPipeline::~VulkanPipeline()', 1)[1].split('bool VulkanPipeline::init', 1)[0]
+        self.assertIn('destroy();', destructor)
+
+    def test_sleeker_visuals_keep_accessible_tap_targets(self):
+        controls = (SRC / 'ui/components/Controls.kt').read_text()
+        button = controls.split('fun MatteIconButton(', 1)[1].split('fun ShutterButton(', 1)[0]
+        self.assertIn('size(CameraSpacing.touch)', button)
+        self.assertIn('.size(34.dp)', button)
+        zoom = (SRC / 'ui/components/ZoomChips.kt').read_text()
+        self.assertIn('chipSize: Dp = 48.dp', zoom)
+        self.assertIn('.padding(8.dp)', zoom)
+
+    def test_raw_hdr_log_diagnostics_do_not_pretend_to_enable_raw_video(self):
+        caps = (SRC / 'CameraCapabilities.java').read_text()
+        for key in ('REQUEST_AVAILABLE_CAPABILITIES_RAW', 'ImageFormat.RAW10', 'ImageFormat.RAW12',
+                    'getOutputMinFrameDuration(format, size)', 'REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES',
+                    'DynamicRangeProfiles.HLG10', 'ImageFormat.YCBCR_P010', 'MIMETYPE_VIDEO_HEVC',
+                    'not proof of RAW video throughput', 'not camera Log'):
+            self.assertIn(key, caps)
+        self.assertNotIn('new CaptureRequest.Key', caps)
+
 
 if __name__ == '__main__':
     unittest.main()

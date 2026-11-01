@@ -66,4 +66,43 @@ class CameraZoomTest {
         assertFalse(CameraUiState(mode = CaptureMode.Video, sessionReady = true, zoomBlendPending = true).canUseShutter)
         assertTrue(CameraUiState(mode = CaptureMode.Video, videoRecording = true, zoomBlendPending = true).canUseShutter)
     }
+    @Test fun widerLiveViewStartsAtMatchingCropAndEndsExactlyAtIdentity() {
+        assertEquals(2f, CameraZoom.incomingPreviewScale(.5f, 0f, 1f), 0f)
+        assertEquals(1f, CameraZoom.outgoingSnapshotScale(.5f, 0f, 1f), 0f)
+        assertEquals(1.5f, CameraZoom.incomingPreviewScale(.5f, .5f, 1f), 0f)
+        assertEquals(.75f, CameraZoom.outgoingSnapshotScale(.5f, .5f, 1f), 0f)
+        assertEquals(1f, CameraZoom.incomingPreviewScale(.5f, 1f, 1f), 0f)
+        assertEquals(.5f, CameraZoom.outgoingSnapshotScale(.5f, 1f, 1f), 0f)
+    }
+    @Test fun bothLayersShareAFieldOfViewThroughoutZoomOut() {
+        for (ratio in listOf(.3f, .5f, .6f, .95f)) {
+            var previous = Float.MAX_VALUE
+            repeat(101) { step ->
+                val progress = step / 100f
+                val live = CameraZoom.incomingPreviewScale(ratio, progress, 1f)
+                val old = CameraZoom.outgoingSnapshotScale(ratio, progress, 1f)
+                assertTrue(live >= 1f && live <= previous)
+                assertEquals(ratio, old / live, .00001f)
+                previous = live
+            }
+            assertEquals(1f, previous, 0f)
+        }
+    }
+    @Test fun reversedIntroStartsFromCurrentSnapshotScaleWithoutJumping() {
+        assertEquals(1.4f, CameraZoom.outgoingSnapshotScale(.6f, 0f, 1.4f), .00001f)
+        assertEquals(1.4f / .6f, CameraZoom.incomingPreviewScale(.6f, 0f, 1.4f), .00001f)
+        assertEquals(1f, CameraZoom.incomingPreviewScale(.6f, 1f, 1.4f), 0f)
+    }
+    @Test fun zoomInNeverTemporarilyShrinksTheIncomingLiveView() {
+        repeat(101) {
+            assertEquals(1f, CameraZoom.incomingPreviewScale(2f, it / 100f, 1f), 0f)
+        }
+    }
+    @Test fun handoffGeometryClampsProgressAndRejectsNonfiniteInputs() {
+        assertEquals(2f, CameraZoom.incomingPreviewScale(.5f, -1f, 1f), 0f)
+        assertEquals(1f, CameraZoom.incomingPreviewScale(.5f, 2f, 1f), 0f)
+        assertEquals(1f, CameraZoom.incomingPreviewScale(Float.NaN, Float.NaN, Float.NaN), 0f)
+        assertTrue(CameraZoom.incomingPreviewScale(Float.MIN_VALUE, 0f, Float.MAX_VALUE).isFinite())
+    }
+
 }

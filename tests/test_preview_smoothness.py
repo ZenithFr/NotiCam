@@ -22,7 +22,7 @@ class PreviewSmoothness(unittest.TestCase):
         self.assertIn('mPreviewFpsRange != null', service)
         self.assertIn('float requestedZoom, int previewMaxFps', (SRC / 'IAuxCamService.aidl').read_text())
         self.assertIn('videoMode, requestedZoom, previewMaxFps));', service)
-        self.assertIn('.version(6)', (SRC / 'CameraController.kt').read_text())
+        self.assertIn('.version(7)', (SRC / 'CameraController.kt').read_text())
 
     def test_new_preview_profile_never_sizes_a_still_reader(self):
         controller = (SRC / 'CameraController.kt').read_text()
@@ -57,9 +57,36 @@ class PreviewSmoothness(unittest.TestCase):
         self.assertIn('if (pendingRebuildToken == generation) pendingRebuildToken = null', controller)
         blend = (SRC / 'ui/components/LensBlend.kt').read_text()
         self.assertIn('repeat(2) { withFrameNanos', blend)
-        self.assertIn('alpha.animateTo(0f, tween(320', blend)
+        self.assertIn('progress.animateTo(1f, tween(360', blend)
         self.assertIn('actions.onZoomBlendFinished(state.zoomBlendToken)', blend)
         self.assertIn('LensBlend(state, actions', (SRC / 'ui/CameraScreen.kt').read_text())
+
+    def test_zoom_out_moves_both_layers_on_the_same_clock(self):
+        blend = (SRC / 'ui/components/LensBlend.kt').read_text()
+        self.assertIn('CameraZoom.incomingPreviewScale(ratio, progress.value, snapshotStartScale)', blend)
+        self.assertIn('CameraZoom.outgoingSnapshotScale(ratio, progress.value, snapshotStartScale)', blend)
+        self.assertIn('alpha = 1f - progress.value', blend)
+        self.assertNotIn('delay(80)', blend)
+        # Live content is unconditional: snapshot arrival/removal must not replace
+        # the AndroidView / destroy its SurfaceHolder in the middle of a handoff.
+        self.assertLess(blend.index('liveContent()'), blend.index('if (image != null) {\n            Image'))
+        screen = (SRC / 'ui/CameraScreen.kt').read_text()
+        self.assertIn('LensBlend(state, actions, Modifier.fillMaxSize()) {', screen)
+        self.assertIn('!state.previewTransitioning && !state.captureBusy', screen)
+
+    def test_pinch_stays_active_and_accumulates_during_handoff(self):
+        view = (SRC / 'ui/components/Viewfinder.kt').read_text()
+        self.assertIn('.pointerInput(zoomEnabled)', view)
+        screen = (SRC / 'ui/CameraScreen.kt').read_text()
+        self.assertIn('(state.sessionReady || state.previewTransitioning)', screen)
+        controller = (SRC / 'CameraController.kt').read_text()
+        self.assertIn('applyZoom((queuedZoom ?: state.zoom) * scaleFactor', controller)
+        self.assertIn('applyZoom((queuedZoom ?: state.zoom) * exp(deltaPx / 180f)', controller)
+        self.assertIn('val target = queuedZoom ?: toZoom', controller)
+        self.assertIn('switch(target)', controller)
+        ready = controller.split('if (count == 4) post {', 1)[1].split('if (renderedCounterToken', 1)[0]
+        self.assertLess(ready.index('selectLens(CameraZoom.lensForZoom(destination))'),
+                        ready.index('zoomBlendReady = true'))
 
     def test_unavailable_60_retries_only_preview_policy_and_retains_jpeg(self):
         controller = (SRC / 'CameraController.kt').read_text()

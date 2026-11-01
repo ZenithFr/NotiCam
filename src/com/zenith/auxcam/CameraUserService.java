@@ -49,7 +49,11 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     private CameraDevice mCameraDevice;
     private CameraCaptureSession mCaptureSession;
-    private IAuxCamCallback mCallback;
+    private volatile IAuxCamCallback mCallback;
+    private android.os.IBinder mClientBinder;
+    private final Object mCallbackLock = new Object();
+    private final java.util.concurrent.atomic.AtomicBoolean mDestroying = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final android.os.IBinder.DeathRecipient mClientDeath = this::destroy;
 
     private Surface mColorSurface;
     private Surface mDepthSurface;
@@ -93,6 +97,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     private int mSessionGeneration = 0;
     private int[] mNoiseModes;
     private int[] mEdgeModes;
+    private int[] mRotateAndCropModes;
     private Float mMinFocusDistance = null;
     private float mManualFocusDistance = 0.0f;
     private boolean mManualFocusActive = false;
@@ -254,8 +259,49 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     @Override
     public void setCallback(IAuxCamCallback cb) {
-        mCallback = cb;
-        Log.i(TAG, "Registered IAuxCamCallback: " + cb);
+        synchronized (mCallbackLock) {
+            if (mDestroying.get()) return;
+            if (mClientBinder != null) {
+                try { mClientBinder.unlinkToDeath(mClientDeath, 0); } catch (Exception ignored) { }
+            }
+            mCallback = cb;
+            mClientBinder = cb == null ? null : cb.asBinder();
+            if (mClientBinder != null) try {
+                mClientBinder.linkToDeath(mClientDeath, 0);
+            } catch (RemoteException deadClient) { destroy(); }
+        }
+    }
+
+    /** Shizuku calls this reserved transaction when the final client removes
+     * the service. Client-process death also calls it, including crashes/swipes.
+     * Never kill cameraserver, Shizuku itself, or another app's camera process.
+     */
+    @Override
+    public void destroy() {
+        if (!mDestroying.compareAndSet(false, true)) return;
+        // A HAL call can stall the camera handler. A bounded watchdog still
+        // terminates THIS dedicated user-service process and its Binder owners.
+        Thread watchdog = new Thread(() -> {
+            try { Thread.sleep(2000); } catch (InterruptedException ignored) { }
+            android.os.Process.killProcess(android.os.Process.myPid());
+        }, "CameraExitWatchdog");
+        watchdog.setDaemon(true);
+        watchdog.start();
+        synchronized (mCallbackLock) {
+            if (mClientBinder != null) {
+                try { mClientBinder.unlinkToDeath(mClientDeath, 0); } catch (Exception ignored) { }
+            }
+            mClientBinder = null;
+            mCallback = null;
+        }
+        Handler handler = mCameraHandler;
+        if (handler == null || !handler.postAtFrontOfQueue(() -> {
+            try { closeSessionOnCameraThread(); }
+            finally {
+                if (mCameraThread != null) mCameraThread.quitSafely();
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }
+        })) android.os.Process.killProcess(android.os.Process.myPid());
     }
 
     @Override
@@ -264,7 +310,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             Surface depthSurface, int depthW, int depthH,
             Surface stillSurface, int stillW, int stillH, int stillFormat,
             String colorPhysicalId, Surface recordingSurface, boolean videoMode, float requestedZoom, int previewMaxFps) {
-        if (mCameraHandler == null) return false;
+        if (mCameraHandler == null || mDestroying.get()) return false;
         mCameraHandler.post(() -> openSessionOnCameraThread(colorSurface, colorW, colorH,
                 depthSurface, depthW, depthH, stillSurface, stillW, stillH, stillFormat, colorPhysicalId, recordingSurface, videoMode, requestedZoom, previewMaxFps));
         return true; // accepted; readiness/failure is delivered through the callback
@@ -274,6 +320,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             Surface colorSurface, int colorW, int colorH,
             Surface depthSurface, int depthW, int depthH,
             Surface stillSurface, int stillW, int stillH, int stillFormat, String colorPhysicalId, Surface recordingSurface, boolean videoMode, float requestedZoom, int previewMaxFps) {
+        if (mDestroying.get()) return;
         closeSessionOnCameraThread();
         Log.i(TAG, "openStereoSession requested: Color=[" + colorW + "x" + colorH + ", phys=" + colorPhysicalId + "], " +
                 "Depth=[" + depthW + "x" + depthH + "], Still=[" + stillW + "x" + stillH + "]");
@@ -355,6 +402,19 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     @Override
+    public int[] getHighResolutionJpegSize() {
+        try {
+            CameraManager cm = cameraManager();
+            String id = "3".equals(mCurrentCameraId) ? "3" : "0";
+            CameraCapabilities.Target target = CameraCapabilities.discover(cm, id);
+            mHighResolutionTarget = target;
+            if (target != null) return new int[]{target.size.getWidth(), target.size.getHeight(), target.pixelMode};
+        } catch (Throwable t) {
+            Log.e(TAG, "Failed discovering high-resolution JPEG size", t);
+        }
+        return new int[0];
+    }
+
     public int[] getHighResolutionJpegSize(String lensId) {
         try {
             CameraManager cm = cameraManager();
@@ -365,7 +425,6 @@ public class CameraUserService extends IAuxCamService.Stub {
         return new int[0];
     }
 
-    @Override
     public int[] getRawSensorSize(String lensId) {
         try {
             CameraManager cm = cameraManager();
@@ -465,6 +524,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             Log.i(TAG, "createCaptureSession dispatched to HAL for Camera " + mCurrentCameraId + " (outputs=" + outputs.size() + ")");
         } catch (Throwable t) {
             Log.e(TAG, "Failed to configure capture session for Camera " + mCurrentCameraId, t);
+            closeSessionOnCameraThread();
             notifyError("Failed to configure capture session: " + t.getMessage());
         }
     }
@@ -494,15 +554,17 @@ public class CameraUserService extends IAuxCamService.Stub {
                     mCameraHandler
             );
 
-            if (mCallback != null) {
+            IAuxCamCallback callback = mCallback;
+            if (callback != null) {
                 try {
-                    mCallback.onSessionReady(mCurrentCameraId);
+                    callback.onSessionReady(mCurrentCameraId);
                 } catch (RemoteException e) {
                     Log.w(TAG, "Remote exception notifying onSessionReady", e);
                 }
             }
         } catch (Throwable t) {
             Log.e(TAG, "Failed to start repeating preview request", t);
+            closeSessionOnCameraThread();
             notifyError("Failed to start repeating request: " + t.getMessage());
         }
     }
@@ -520,6 +582,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             mSensorOrientation = orientation == null ? 90 : orientation;
             mNoiseModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES);
             mEdgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES);
+            mRotateAndCropModes = android.os.Build.VERSION.SDK_INT >= 31
+                    ? chars.get(CameraCharacteristics.SCALER_AVAILABLE_ROTATE_AND_CROP_MODES) : null;
             mActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             mMaximumActiveArray = android.os.Build.VERSION.SDK_INT >= 31
                     ? chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) : null;
@@ -581,6 +645,14 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     private void applyCropAndExposure(CaptureRequest.Builder b, boolean fullResolutionStill) {
         try {
+            // JNI/MP4 orientation already follows sensor metadata. Don't let
+            // portrait-app compatibility apply another rotation/aspect crop.
+            if (android.os.Build.VERSION.SDK_INT >= 31 && mRotateAndCropModes != null) {
+                for (int mode : mRotateAndCropModes) if (mode == CaptureRequest.SCALER_ROTATE_AND_CROP_NONE) {
+                    b.set(CaptureRequest.SCALER_ROTATE_AND_CROP, CaptureRequest.SCALER_ROTATE_AND_CROP_NONE);
+                    break;
+                }
+            }
             if (fullResolutionStill) {
                 // Maximum-resolution mode has a different sensor coordinate
                 // domain. Only set SCALER_CROP_REGION if mMaximumActiveArray is explicitly known.
@@ -832,6 +904,13 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     @Override
+    public void triggerStill(long shutterCommandNs, ParcelFileDescriptor dngPfd) {
+        synchronized (mDngLock) {
+            mPendingDngPfd = dngPfd;
+        }
+        triggerStillWithZsl(shutterCommandNs, false, false);
+    }
+
     public void triggerStill(long shutterCommandNs, boolean highQualityNr) {
         triggerStillWithZsl(shutterCommandNs, highQualityNr, true);
     }
@@ -840,14 +919,6 @@ public class CameraUserService extends IAuxCamService.Stub {
     public void triggerStillWithZsl(long shutterCommandNs, boolean highQualityNr, boolean enableZsl) {
         if (mCameraHandler != null) mCameraHandler.post(() ->
                 captureStillOnCameraThread(shutterCommandNs, enableZsl));
-    }
-
-    @Override
-    public void triggerStillWithDng(long shutterCommandNs, ParcelFileDescriptor dngPfd) {
-        synchronized (mDngLock) {
-            mPendingDngPfd = dngPfd;
-        }
-        triggerStillWithZsl(shutterCommandNs, false, false);
     }
 
     private void captureStillOnCameraThread(long shutterCommandNs, boolean enableZsl) {
@@ -897,8 +968,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             }
             applyCropAndExposure(stillBuilder, mHighResolutionStill);
             applyStillFlash(stillBuilder);
-            if (mHighResolutionStill) {
-                stillBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, mRemosaicStatus == 1 ? CaptureRequest.NOISE_REDUCTION_MODE_FAST : CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY);
+            if (mHighResolutionStill && mRemosaicStatus == 1) {
+                stillBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST);
             } else {
                 applyMinimalProcessing(stillBuilder);
             }
@@ -966,9 +1037,10 @@ public class CameraUserService extends IAuxCamService.Stub {
     void onStillCompleted() {
         Log.i("TIMING_FREEZE", "capture_session_completed: " + SystemClock.elapsedRealtimeNanos() + " ns");
         Log.i(TAG, "Still capture completed successfully without interrupting viewfinder stream!");
-        if (mCallback != null) {
+        IAuxCamCallback callback = mCallback;
+        if (callback != null) {
             try {
-                mCallback.onStillCaptured();
+                callback.onStillCaptured();
             } catch (RemoteException e) {
                 Log.w(TAG, "Remote exception notifying onStillCaptured", e);
             }
@@ -1064,9 +1136,10 @@ public class CameraUserService extends IAuxCamService.Stub {
             mColorFrameCount = 0;
             mDepthFrameCount = 0;
 
-            if (mCallback != null) {
+            IAuxCamCallback callback = mCallback;
+            if (callback != null) {
                 try {
-                    mCallback.onStats(colorFps, depthFps, dtP99);
+                    callback.onStats(colorFps, depthFps, dtP99);
                 } catch (RemoteException e) {
                     // Client disconnected
                 }
@@ -1091,11 +1164,16 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     private void closeSessionOnCameraThread() {
-        mSessionGeneration++;
-        mCameraHandler.removeCallbacks(mZoomStep);
-        mCameraHandler.removeCallbacks(mAfResetRunnable);
+        mSessionGeneration++; // Stale onOpened/onConfigured callbacks close themselves.
+        if (mCameraHandler != null) {
+            mCameraHandler.removeCallbacks(mZoomStep);
+            mCameraHandler.removeCallbacks(mAfResetRunnable);
+        }
+        CameraCaptureSession session = mCaptureSession;
+        CameraDevice camera = mCameraDevice;
+        mCaptureSession = null;
+        mCameraDevice = null;
         mPreviewRequestBuilder = null;
-        mRecordingSurface = null;
         synchronized (mDngLock) {
             if (mLatestRawImage != null) { mLatestRawImage.close(); mLatestRawImage = null; }
             if (mPendingDngPfd != null) {
@@ -1108,26 +1186,31 @@ public class CameraUserService extends IAuxCamService.Stub {
             try { mRawImageReader.close(); } catch (Throwable ignored) {}
             mRawImageReader = null;
         }
-        Log.i(TAG, "closeSession() invoked: closing capture session and camera...");
-        try {
-            if (mCaptureSession != null) {
-                try { mCaptureSession.stopRepeating(); } catch (Throwable ignored) {}
-                mCaptureSession.close();
-                mCaptureSession = null;
-            }
-            if (mCameraDevice != null) {
-                mCameraDevice.close();
-                mCameraDevice = null;
-            }
-        } catch (Throwable t) {
-            Log.e(TAG, "Error closing camera session", t);
+        Surface[] surfaces = {mColorSurface, mDepthSurface, mStillSurface, mRecordingSurface};
+        mColorSurface = null; mDepthSurface = null; mStillSurface = null; mRecordingSurface = null;
+        mAfRegion = null; mCropRegion = null;
+        mActiveArray = null; mMaximumActiveArray = null; mCompensationRange = null;
+        mPreviewFpsRange = null; mRotateAndCropModes = null; mNoiseModes = null; mEdgeModes = null;
+        // Each step is independent: session.close throwing must not leak camera.
+        if (session != null) {
+            try { session.stopRepeating(); } catch (Exception ignored) { }
+            try { session.abortCaptures(); } catch (Exception ignored) { }
+            try { session.close(); } catch (Exception e) { Log.w(TAG, "Session close failed", e); }
+        }
+        if (camera != null) try { camera.close(); } catch (Exception e) { Log.w(TAG, "Camera close failed", e); }
+        // These are this remote process's parcelled Surface references, not the
+        // client's SurfaceView/MediaRecorder objects. Release each once.
+        java.util.HashSet<Surface> released = new java.util.HashSet<>();
+        for (Surface surface : surfaces) if (surface != null && released.add(surface)) {
+            try { surface.release(); } catch (Exception ignored) { }
         }
     }
 
     private void notifyError(String msg) {
-        if (mCallback != null) {
+        IAuxCamCallback callback = mCallback;
+        if (callback != null) {
             try {
-                mCallback.onSessionError(msg);
+                callback.onSessionError(msg);
             } catch (RemoteException e) {
                 Log.w(TAG, "Error notifying client", e);
             }
@@ -1156,8 +1239,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             if (mGeneration != mService.mSessionGeneration) { camera.close(); return; }
             Log.w(TAG, "Camera disconnected");
             try { camera.close(); } catch (Throwable ignored) {}
-            mService.mCameraDevice = null;
-            mService.mCaptureSession = null;
+            mService.closeSessionOnCameraThread();
             mService.notifyError("Camera disconnected");
         }
 
@@ -1166,8 +1248,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             if (mGeneration != mService.mSessionGeneration) { camera.close(); return; }
             Log.e(TAG, "Camera device error on " + mService.mCurrentCameraId + ": " + error);
             try { camera.close(); } catch (Throwable ignored) {}
-            mService.mCameraDevice = null;
-            mService.mCaptureSession = null;
+            mService.closeSessionOnCameraThread();
             mService.notifyError("Camera error code: " + error);
         }
     }

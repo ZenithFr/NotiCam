@@ -10,21 +10,32 @@ part of the default capture path today.
 | Mode / feature | Behavior |
 | --- | --- |
 | Photo | Selected sensor’s largest advertised standard 4:3 JPEG (up to 20 MP); quality 100; original HAL bytes preserved. 12 MP YUV/Vulkan processing only with portrait effect on |
-| Video | H.264 MP4 at the largest advertised 16:9 size up to 1080p/30; AAC audio with microphone permission; start/stop and timer |
+| Video | H.264 MP4 at the largest advertised native-sensor-aspect recorder size supported by a hardware surface-input AVC encoder at 30 fps; AAC audio with microphone permission; start/stop and timer |
 | Portrait button | Optional 12 MP depth/matte bokeh inside Photo; displayed aperture is **simulated**, not a movable lens iris |
 | Camera processing | Request noise reduction OFF (or MINIMAL if advertised) and edge enhancement OFF when supported |
 | Lenses | Main `0` (stereo `5` for portrait), ultra-wide `2`, optical tele `3`. The 2× chip selects tele automatically, without another 2× digital crop; no tele-assist setting |
-| Framing | Photos preserve native 4:3. Video is 16:9, with corresponding side masks on the portrait preview; electronic stabilization is off to avoid hidden crop |
+| Framing | Native-aspect framing (4:3 on the target phone); no imposed 16:9 video mask/fallback. Electronic stabilization off; rotate-and-crop NONE when advertised. Native aspect is not a claim of unbinned/full-pixel sensor video |
 | Sensor RAW / DNG | **Not implemented.** The old RAW toggle only dumped a Y plane and has been removed |
 | 50 MP | Separate main-camera JPEG path using advertised ordinary/high-resolution or maximum-resolution sensor-pixel-mode sizes; JPEG quality 100; no upscaling or second JPEG encode |
 | Orientation | Portrait UI; JPEG/recording orientation uses sensor metadata; original JPEG EXIF is preserved and the viewer honors rotation/mirroring |
 | Saving | Pending MediaStore row published only after a valid JPEG/MP4 is written; failed/empty rows are deleted |
-| Viewer | In-app Photos-inspired viewer for NotiCam-owned images/videos: paging, full-image fit, pinch/double-tap zoom, filmstrip, favorites, sharing, confirmed deletion and video playback |
+| Viewer | In-app Photos-inspired viewer for NotiCam-owned images/videos: paging, full-image fit, pinch/double-tap zoom, filmstrip, favorites, sharing, confirmed deletion and rotated-metadata-fit video playback; actions lifted above physical dialog system-bar/cutout insets |
 
 **YUV is not unprocessed sensor RAW.** Camera ISP demosaic, color conversion,
 white balance and potentially other vendor processing still apply. JPEG 100 is
 also not lossless. The app does not yet have a Bayer `RAW_SENSOR` + capture
 metadata + `DngCreator` path, and must not claim otherwise.
+
+**Log / RAW footage:** the recorder is SDR H.264, not Log or RAW. Camera report now
+includes RAW formats/sizes/minimum frame durations, 10-bit/HDR profiles (Android
+13+), P010 sizes and AVC/HEVC encoder capabilities. Shizuku can access permitted
+camera metadata/devices; it cannot manufacture a hidden HAL readout or OEM Log
+mode. See [native video, teardown and RAW/Log feasibility](design/NATIVE_VIDEO_AND_RAW.md).
+
+On pause, camera sessions and native preview resources are released. On controller
+exit or client-process death, only NotiCam's dedicated Shizuku user-service process
+is terminated after orderly cleanup (with a stuck-HAL watchdog). Already queued
+file saves drain in the app process; cameraserver and the app are not killed.
 
 50 MP is a **main camera, 1×, sharp-capture** option, only when an exposed regular
 Camera2 stream supports it. Discovery checks queryable rear main-field-of-view
@@ -50,7 +61,10 @@ phones. Permission to use the privileged camera service is provided by Shizuku.
 - `CameraController.kt`: Shizuku binding, ImageReaders, capture admission, frame matching and storage.
 - `FrameData.kt`: pure buffer-packing, timestamp-matching and matte-orientation rules.
 - `CameraUserService.java`: privileged Camera2 session and controls, serialized on its camera handler.
-- `DualMatteSegmenter.kt`: upright MediaPipe inference; output mapped back into sensor space.
+- `BokehProcessor.kt` / `BokehEngines.kt`: worker-owned selectable MediaPipe, MODNet
+  and recurrent RVM inference, hash validation and on-device runtime checks.
+- `DualMatteSegmenter.kt`: original adaptive/fixed dual MediaPipe path and EMA;
+  output mapped back into sensor space. See [model selection and checks](design/BOKEH_MODELS.md).
 - `jni/src/`: Vulkan/YUV pipeline and a synchronized JNI lifetime boundary.
 - `jni/shaders/`: CoC, matte refinement, gather and composition.
 - `src/com/zenith/auxcam/ui/`: Compose camera UI, thumbnail atmosphere, floating controls, settings and shutter.
@@ -108,6 +122,22 @@ Lens/mode changes invalidate auxiliary frames.
   Serialization favors correctness over the previous unverified interleaving
   performance claims; measure its latency and preview gaps on-device.
 
+## Bokeh model comparison
+
+**Camera controls → Bokeh model** selects MediaPipe Auto (original baseline),
+fixed Dual, Landscape, General, MODNet or RVM MobileNetV3. Selection persists and
+applies through the corner portrait button; it does not alter normal JPEG/50 MP
+capture. **CHECK SELECTED / CHECK ALL** run hash/tensor/alpha checks and a short
+same-frame timing comparison on the phone. Results include load time, median/p95,
+runtime/effective mode and mask statistics, with cancellation and a copyable
+report. A runtime PASS is not an image-quality score or sustained-FPS claim.
+
+Model weights are bundled at build time from pinned, SHA-256-verified downloads;
+no runtime downloads or image uploads. The new FP32 files total ~39 MiB before
+APK compression plus ONNX Runtime. RVM weights are **GPL-3.0-only**; review
+redistribution/source obligations before publishing binaries. See
+[models, limitations, build and device checks](design/BOKEH_MODELS.md).
+
 ## Video and viewer
 
 Choose a lens before recording, select Video and tap the red shutter. Microphone
@@ -142,6 +172,8 @@ Prerequisites:
 - Android SDK platform 35 and suitable Android build tools.
 - NDK `27.1.12297006`; native configuration currently targets Android 35 / arm64.
 - `glslc` on PATH, or `GLSLC=/absolute/path/to/glslc`.
+- Python 3 for pinned model downloads and repository checks.
+- Access to GitHub model URLs on the first build (verified models are then cached).
 - Access to Google Maven, Maven Central and the Gradle plugin repositories.
 
 ```bash

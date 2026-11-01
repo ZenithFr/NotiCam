@@ -67,14 +67,19 @@ there is no separate Pro capture mode.
   lens, so 2× does not mean another 2× crop of the tele sensor. The redundant
   settings toggle and callback are removed. Failed lens configuration must not
   silently crop the main sensor while retaining a 2× badge.
-- **Video:** actual MP4 recording in the Android app, up to 1080p/30, H.264 and
+- **Video:** actual MP4 recording in the Android app, largest advertised native-aspect
+  size supported by a hardware surface-input AVC encoder at 30 fps, H.264 and
   AAC audio with permission. Red start disc morphs to a stop square; recording
   time is real. Lock lens/mode changes during recording and finish on background.
-  The 16:9 recording field is masked inside the stable 4:3 portrait preview.
+  No imposed 16:9 mask or wide-crop fallback. Respect active-array aspect (4:3 on
+  the target phone), not a promise of full-pixel/unbinned sensor readout. Scale
+  bitrate with encoded pixel count, within encoder limits.
 - **Gallery:** in-app full-frame viewer with a large date/title hierarchy,
   selected-thumbnail atmosphere, horizontal paging, pinch/pan/double-tap zoom,
   spring-animated filmstrip selection, floating share/favorite/delete circles
-  and video playback. Only app-owned published media is listed. Delete
+  and actual rotated-metadata-fit video playback. Physical dialog window insets
+  plus a 20 dp lift keep actions clear of navigation/cutouts. Smaller visible
+  circles retain >=48 dp touch targets. Only app-owned published media is listed. Delete
   requires confirmation; share grants URI read access to the chosen app.
 - **Shutter:** disabled while capturing/saving or the session is unavailable;
   admitted photos alone drive its pulse. During active video the stop control

@@ -19,6 +19,21 @@ public final class CameraZoom {
         double dt = Math.max(1L, Math.min(32L, elapsedMs));
         return current * (float) Math.exp(remaining * (1.0 - Math.exp(-dt / 55.0)));
     }
+    /** Match the incoming wider live image to the frozen outgoing field of view,
+     * then return it to identity. The old snapshot and live image share progress.
+     */
+    public static float incomingPreviewScale(float ratio, float progress, float snapshotStartScale) {
+        float r = Float.isFinite(ratio) && ratio > 0f ? Math.max(.3f, Math.min(3.4f, ratio)) : 1f;
+        float p = Float.isFinite(progress) ? Math.max(0f, Math.min(1f, progress)) : 0f;
+        float start = Float.isFinite(snapshotStartScale) ? Math.max(1f, Math.min(3.4f, snapshotStartScale)) : 1f;
+        if (r >= 1f) return 1f;
+        if (p == 1f) return 1f; // Exactly identity before removing the layer.
+        return start / r * (1f - p) + p;
+    }
+    public static float outgoingSnapshotScale(float ratio, float progress, float snapshotStartScale) {
+        float r = Float.isFinite(ratio) && ratio > 0f ? Math.max(.3f, Math.min(3.4f, ratio)) : 1f;
+        return r * incomingPreviewScale(r, progress, snapshotStartScale);
+    }
     public static float digitalRatio(float globalZoom, String physicalId, float maxDigitalZoom) {
         float base = "3".equals(physicalId) ? 2f : "2".equals(physicalId) ? .6f : 1f;
         float global = Float.isFinite(globalZoom) ? globalZoom : base;
