@@ -99,7 +99,9 @@ void main() {
             // y8=0 -> 0.0m and y8=255 -> ~10.0m both mean "no measurement".
             float validDepth = step(0.05, d) * step(d, 9.95);
 
-            float rescue = (1.0 - smoothstep(s1 * 0.9, s1 * 1.5, d)) * validDepth;
+            float rescue = (1.0 - smoothstep(s1 * 0.9, s1 * 1.5, d))
+                         * validDepth
+                         * smoothstep(0.30, 0.80, alpha);
             alpha = max(alpha, rescue);
 
             float veto = smoothstep(s1 * 1.5, s1 * 3.0, d) * validDepth;
