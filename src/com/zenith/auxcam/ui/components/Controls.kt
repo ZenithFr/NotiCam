@@ -535,12 +535,14 @@ fun CameraSettings(
     ) {
         Text("Camera controls", style = CameraType.Title, color = CameraColors.Label)
         Spacer(Modifier.height(8.dp))
-        Text("${state.resolution.label} · 4:3 · JPEG 100", style = CameraType.Value, color = CameraColors.Label)
+        Text(if (state.raw) "RAW (DNG) · 4:3 · 16-bit DNG" else "${state.resolution.label} · 4:3 · JPEG 100", style = CameraType.Value, color = CameraColors.Label)
         Spacer(Modifier.height(8.dp))
         Text(
-            if (state.resolution == Resolution.High)
-                "Full-resolution main-camera JPEG. No upscaling or second JPEG encode. Portrait effect uses 12 MP."
-            else "Tap the person icon for the portrait effect. 50 MP uses the main camera at 1×. Sensor RAW is not available.",
+            if (state.raw)
+                "Uncompressed RAW sensor Bayer capture saved as Adobe DNG. Portrait depth is disabled in RAW mode."
+            else if (state.resolution == Resolution.High)
+                "Full-resolution 50 MP capture on 1× and 2× telephoto. No upscaling or second JPEG encode. Portrait effect uses 12 MP."
+            else "Standard 12 MP capture. Tap the person icon for portrait depth effect. 50 MP available at 1× and 2×.",
             style = CameraType.Caption,
             color = CameraColors.LabelSecondary,
         )
@@ -672,6 +674,12 @@ fun CameraSettings(
                 label = if (state.timerSeconds == 0) "TIMER" else "${state.timerSeconds}s",
                 active = state.timerSeconds > 0,
                 onClick = { actions.onTimerCycle() },
+                modifier = Modifier.weight(1f),
+            )
+            TogglePill(
+                label = "RAW (DNG)",
+                active = state.raw,
+                onClick = { actions.onRawToggle() },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -900,7 +908,7 @@ fun TopBar(
         Box(Modifier.size(64.dp, 48.dp), contentAlignment = Alignment.Center) {
             if (state.mode == CaptureMode.Photo) {
                 Text(
-                    text = if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel,
+                    text = if (state.raw) "RAW" else if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel,
                     style = CameraType.Value,
                     color = CameraColors.Label,
                     modifier = Modifier.cameraGlass(RoundedCornerShape(24.dp))

@@ -1,5 +1,6 @@
 package com.zenith.auxcam;
 
+import android.os.ParcelFileDescriptor;
 import android.view.Surface;
 import com.zenith.auxcam.IAuxCamCallback;
 
@@ -12,8 +13,9 @@ interface IAuxCamService {
         String colorPhysicalId, in Surface recordingSurface, boolean videoMode, float requestedZoom, int previewMaxFps);
 
     /** width, height, pixel mode; empty when not exposed. */
-    int[] getHighResolutionJpegSize();
+    int[] getHighResolutionJpegSize(String lensId);
     int[] getStandardJpegSize(String lensId);
+    int[] getRawSensorSize(String lensId);
     /** width, height, sensor orientation for the selected recorder stream. */
     int[] getVideoSize(String lensId);
     /** width, height, min FPS, max FPS; full-field 4:3 preview independent of still size. */
@@ -22,6 +24,7 @@ interface IAuxCamService {
 
     void triggerStill(long shutterCommandNs, boolean highQualityNr);
     void triggerStillWithZsl(long shutterCommandNs, boolean highQualityNr, boolean enableZsl);
+    void triggerStillWithDng(long shutterCommandNs, in ParcelFileDescriptor dngPfd);
     void closeSession();
 
     // ── Live camera controls (Apple Camera chrome) ──────────────────────────

@@ -151,7 +151,7 @@ fun GalleryScreen(onClose: () -> Unit) {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 14.dp)) {
                         Text(current.name.substringBeforeLast('.'), style = CameraType.Heading,
                             color = CameraColors.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(if (current.video) "Video · MP4" else "Photo · JPEG",
+                        Text(if (current.video) "Video · MP4" else if (current.name.endsWith(".dng", ignoreCase = true)) "RAW · DNG" else "Photo · JPEG",
                             style = CameraType.Caption, color = CameraColors.LabelSecondary)
                     }
                     LazyRow(Modifier.fillMaxWidth().height(62.dp), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {

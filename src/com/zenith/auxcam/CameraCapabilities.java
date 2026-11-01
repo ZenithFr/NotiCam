@@ -62,41 +62,59 @@ final class CameraCapabilities {
         return ids;
     }
     static Target discover(CameraManager cm) throws Exception {
-        double mainFov = fieldOfViewRatio(cm.getCameraCharacteristics("0"));
-        // Prefer main, then other queryable rear main-FOV IDs. A telephoto
-        // 50 MP output must not masquerade as a 1x main-camera image.
-        java.util.LinkedHashSet<String> ids = candidateIds(cm);
-        for (String id : ids) try {
-            CameraCharacteristics c = cm.getCameraCharacteristics(id);
+        return discover(cm, "0");
+    }
+
+    static Target discover(CameraManager cm, String preferredLensId) throws Exception {
+        String targetId = preferredLensId != null ? preferredLensId : "0";
+        try {
+            CameraCharacteristics c = cm.getCameraCharacteristics(targetId);
             Integer facing = c.get(CameraCharacteristics.LENS_FACING);
-            if (facing == null || facing != CameraCharacteristics.LENS_FACING_BACK) continue;
-            double fov = fieldOfViewRatio(c);
-            if (!"0".equals(id) && (mainFov == 0 || fov == 0 || Math.abs(fov / mainFov - 1) > .15)) continue;
-            Size s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP), true);
-            if (s != null) return new Target(id, s, CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT, "Camera2 default/high-resolution map");
-            if (Build.VERSION.SDK_INT >= 31 && c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) != null) {
-                s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION), true);
-                if (s != null) return new Target(id, s, CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Camera2 maximum-resolution map");
-            }
-            try {
-                CameraCharacteristics.Key<int[]> ntKey = new CameraCharacteristics.Key<>("nothing.scaler.availableStreamConfigurations", int[].class);
-                int[] ntSizes = c.get(ntKey);
-                if (ntSizes != null) {
-                    for (int i = 0; i + 3 < ntSizes.length; i += 4) {
-                        int fmt = ntSizes[i];
-                        int w = ntSizes[i + 1];
-                        int h = ntSizes[i + 2];
-                        int io = ntSizes[i + 3];
-                        if ((fmt == 33 || fmt == ImageFormat.JPEG) && io == 0 && is50Mp(new Size(w, h))) {
-                            return new Target(id, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
+            if (facing != null && facing == CameraCharacteristics.LENS_FACING_BACK) {
+                Size s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP), true);
+                if (s != null) return new Target(targetId, s, CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT, "Camera2 default/high-resolution map");
+                if (Build.VERSION.SDK_INT >= 31 && c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION) != null) {
+                    s = jpegSize(c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION), true);
+                    if (s != null) return new Target(targetId, s, CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Camera2 maximum-resolution map");
+                }
+                try {
+                    CameraCharacteristics.Key<int[]> ntKey = new CameraCharacteristics.Key<>("nothing.scaler.availableStreamConfigurations", int[].class);
+                    int[] ntSizes = c.get(ntKey);
+                    if (ntSizes != null) {
+                        for (int i = 0; i + 3 < ntSizes.length; i += 4) {
+                            int fmt = ntSizes[i];
+                            int w = ntSizes[i + 1];
+                            int h = ntSizes[i + 2];
+                            int io = ntSizes[i + 3];
+                            if ((fmt == 33 || fmt == ImageFormat.JPEG) && io == 0 && is50Mp(new Size(w, h))) {
+                                return new Target(targetId, new Size(w, h), CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION, "Nothing camera 50 MP stream map");
+                            }
                         }
                     }
+                } catch (Throwable ignored) {}
+            }
+        } catch (Exception ignored) { /* Not supported on this lens */ }
+        return null;
+    }
+
+    static Size rawSize(CameraManager cm, String lensId) {
+        try {
+            String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
+            CameraCharacteristics c = cm.getCameraCharacteristics(id);
+            StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            if (map != null) {
+                Size[] sizes = map.getOutputSizes(ImageFormat.RAW_SENSOR);
+                if (sizes != null && sizes.length > 0) {
+                    Size best = sizes[0];
+                    for (Size s : sizes) {
+                        if ((long) s.getWidth() * s.getHeight() > (long) best.getWidth() * best.getHeight()) {
+                            best = s;
+                        }
+                    }
+                    return best;
                 }
-            } catch (Throwable ignored) {}
-            // Vendor output tables and extension sizes are diagnostic only.
-            // Without documented remosaic/session controls, requesting a larger
-            // JPEG could merely upscale a binned sensor readout.
-        } catch (Exception ignored) { /* Another queryable ID may still work. */ }
+            }
+        } catch (Throwable ignored) {}
         return null;
     }
     /** Normal Camera2 session, never constrained high-speed (which would drop full-quality stills).
