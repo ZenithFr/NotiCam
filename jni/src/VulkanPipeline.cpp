@@ -122,17 +122,13 @@ struct AlphaPushConstants {
 };
 
 struct GateStatsData {
-    uint32_t gatedCount;
     uint32_t totalCount;
-    uint32_t gateSum;
     uint32_t alphaBeforeSum;
     uint32_t alphaAfterSum;
+    uint32_t subjectRescuedCount;
+    uint32_t bgVetoedCount;
     uint32_t preHist[10];
     uint32_t postHist[10];
-    uint32_t invalid;
-    uint32_t nearCount;
-    uint32_t ramp;
-    uint32_t farCount;
 };
 
 void VulkanPipeline::setDisableGuided(bool disable) {
@@ -1566,6 +1562,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             uint32_t totalPixels = mPreviewW * mPreviewH;
             uint32_t changedPixels = 0;
             uint32_t changedOver4 = 0;
+            uint64_t sumDiff = 0;
             int maxDiff = 0;
             int minX = (int)mPreviewW, minY = (int)mPreviewH, maxX = -1, maxY = -1;
             uint32_t lumaBands[4] = {0, 0, 0, 0};
@@ -1577,6 +1574,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                     int dg = std::abs((int)pass1Rgba[idx + 1] - (int)pBytes[idx + 1]);
                     int db = std::abs((int)pass1Rgba[idx + 2] - (int)pBytes[idx + 2]);
                     int dMax = std::max({dr, dg, db});
+                    sumDiff += dMax;
                     if (dMax > 0) {
                         changedPixels++;
                         if (dMax > maxDiff) maxDiff = dMax;
@@ -1594,8 +1592,10 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             }
 
             double pctChanged = 100.0 * (double)changedPixels / (double)totalPixels;
-            LOGI("WIRE_GATE_DIFF: pixelsChanged=%u/%u (%.2f%%) maxDiff=%d/255 countOver4=%u bbox=[%d,%d,%d,%d] lumaBands=[0-63:%u, 64-127:%u, 128-191:%u, 192-255:%u]",
-                 changedPixels, totalPixels, pctChanged, maxDiff, changedOver4,
+            double meanDiffTotal = (double)sumDiff / (double)totalPixels;
+            double meanDiffChanged = (changedPixels > 0) ? ((double)sumDiff / (double)changedPixels) : 0.0;
+            LOGI("WIRE_GATE_DIFF: pixelsChanged=%u/%u (%.2f%%) meanDiffTotal=%.2f meanDiffChanged=%.2f maxDiff=%d/255 countOver4=%u bbox=[%d,%d,%d,%d] lumaBands=[0-63:%u, 64-127:%u, 128-191:%u, 192-255:%u]",
+                 changedPixels, totalPixels, pctChanged, meanDiffTotal, meanDiffChanged, maxDiff, changedOver4,
                  (minX <= maxX ? minX : 0), (minY <= maxY ? minY : 0), (minX <= maxX ? maxX : 0), (minY <= maxY ? maxY : 0),
                  lumaBands[0], lumaBands[1], lumaBands[2], lumaBands[3]);
 
@@ -1711,29 +1711,19 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             sLastGateStatsLog = nowGateStats;
             auto* stats = reinterpret_cast<const GateStatsData*>(mGateStatsMapped);
             if (stats->totalCount > 0) {
-                double gatedPct = (double)stats->gatedCount / (double)stats->totalCount;
-                double meanGate = ((double)stats->gateSum / 1000.0) / (double)stats->totalCount;
+                double subjectRescuedPct = (double)stats->subjectRescuedCount / (double)stats->totalCount;
+                double bgVetoedPct = (double)stats->bgVetoedCount / (double)stats->totalCount;
                 double alphaMassBefore = (double)stats->alphaBeforeSum / 1000.0;
                 double alphaMassAfter = (double)stats->alphaAfterSum / 1000.0;
-                double ratio = (alphaMassBefore > 0.0001) ? (alphaMassAfter / alphaMassBefore) : 1.0;
-                LOGI("ALPHA_GATE_STATS: gatedPct=%.4f meanGate=%.4f alphaMassBefore=%.2f alphaMassAfter=%.2f ratio=%.4f",
-                     gatedPct, meanGate, alphaMassBefore, alphaMassAfter, ratio);
+                double massRatio = (alphaMassBefore > 0.0001) ? (alphaMassAfter / alphaMassBefore) : 1.0;
+                LOGI("ALPHA_FUSION_STATS: subjectRescuedPct=%.4f bgVetoedPct=%.4f massRatio=%.4f s1=%.2fm",
+                     subjectRescuedPct, bgVetoedPct, massRatio, s1);
                 LOGI("ALPHA_PRE_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
                      stats->preHist[0], stats->preHist[1], stats->preHist[2], stats->preHist[3], stats->preHist[4],
                      stats->preHist[5], stats->preHist[6], stats->preHist[7], stats->preHist[8], stats->preHist[9]);
                 LOGI("ALPHA_POST_HIST b0=%u b1=%u b2=%u b3=%u b4=%u b5=%u b6=%u b7=%u b8=%u b9=%u",
                      stats->postHist[0], stats->postHist[1], stats->postHist[2], stats->postHist[3], stats->postHist[4],
                      stats->postHist[5], stats->postHist[6], stats->postHist[7], stats->postHist[8], stats->postHist[9]);
-
-                uint32_t totalSub = stats->nearCount + stats->ramp + stats->farCount + stats->invalid;
-                if (totalSub > 0) {
-                    double nearPct = (100.0 * stats->nearCount) / totalSub;
-                    double rampPct = (100.0 * stats->ramp) / totalSub;
-                    double farPct = (100.0 * stats->farCount) / totalSub;
-                    double invalidPct = (100.0 * stats->invalid) / totalSub;
-                    LOGI("DEPTH_AT_SUBJECT: n=%u near=%.1f%% ramp=%.1f%% far=%.1f%% invalid=%.1f%% s1=%.2fm",
-                         totalSub, nearPct, rampPct, farPct, invalidPct, s1);
-                }
             }
         }
 

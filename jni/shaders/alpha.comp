@@ -14,17 +14,13 @@ layout(binding = 2, r8) writeonly uniform image2D uOutAlpha;
 layout(binding = 3) uniform sampler2D uDepth;
 
 layout(std430, binding = 4) buffer GateStats {
-    uint gatedCount;
     uint totalCount;
-    uint gateSum;
     uint alphaBeforeSum;
     uint alphaAfterSum;
+    uint subjectRescuedCount;
+    uint bgVetoedCount;
     uint preHist[10];
     uint postHist[10];
-    uint invalid;
-    uint nearCount;
-    uint ramp;
-    uint farCount;
 } stats;
 
 layout(push_constant) uniform AlphaPushConstants {
@@ -85,41 +81,46 @@ void main() {
         }
     }
 
-    float alphaBefore = alpha;
-
     if (pc.stubAlphaMode == 0) {
-        // Lift-only low-light recovery. Never suppresses mid-alpha.
-        //   alpha 0.0 - 0.5  ->  unchanged
-        //   alpha 0.5 - 1.0  ->  pulled toward 1.0, monotone
+        // Lift-only low-light recovery (unchanged)
         float lift = max(0.0, (alpha - 0.5) * 2.0);
         alpha = clamp(alpha + (1.0 - alpha) * lift * lift, 0.0, 1.0);
-    }
 
-    // DEPTH GATE REMOVED pending discriminator run. Depth gate removed.
+        float alphaPreFusion = alpha;
 
-    if (pc.recordStats != 0) {
-        atomicAdd(stats.totalCount, 1);
-        atomicAdd(stats.alphaBeforeSum, uint(alphaBefore * 1000.0));
-        atomicAdd(stats.alphaAfterSum, uint(alpha * 1000.0));
+        if (pc.gateBypass == 0) {
+            // --- Depth-primary mask fusion ---
+            // Depth becomes the tie-breaker on subject/background.
+            // Rescue: inside s1, force sharp (low-light AI confidence collapse).
+            // Veto:   beyond 1.5*s1, kill AI over-claim (blur bleed, wires).
+            vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
+            float d = texture(uDepth, depthUv).r;
 
-        int bPre = clamp(int(alphaBefore * 10.0), 0, 9);
-        atomicAdd(stats.preHist[bPre], 1);
-        int bPost = clamp(int(alpha * 10.0), 0, 9);
-        atomicAdd(stats.postHist[bPost], 1);
-    }
+            // y8=0 -> 0.0m and y8=255 -> ~10.0m both mean "no measurement".
+            float validDepth = step(0.05, d) * step(d, 9.95);
 
-    if (pc.alphaDiag != 0 && pc.stubAlphaMode == 0 && alpha >= 0.9) {
-        vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
-        float d = texture(uDepth, depthUv).r;
-        // DPE invalid depth (y8 == 0) is stored as 10.0m in gridDepth
-        if (d < 0.05 || d >= 9.95) {
-            atomicAdd(stats.invalid, 1);
-        } else if (d < s1 * 1.2) {
-            atomicAdd(stats.nearCount, 1);
-        } else if (d < s1 * 2.5) {
-            atomicAdd(stats.ramp, 1);
-        } else {
-            atomicAdd(stats.farCount, 1);
+            float rescue = (1.0 - smoothstep(s1 * 0.9, s1 * 1.5, d)) * validDepth;
+            alpha = max(alpha, rescue);
+
+            float veto = smoothstep(s1 * 1.5, s1 * 3.0, d) * validDepth;
+            alpha = alpha * (1.0 - veto);
+        }
+
+        if (pc.recordStats != 0) {
+            atomicAdd(stats.totalCount, 1);
+            atomicAdd(stats.alphaBeforeSum, uint(alphaPreFusion * 1000.0));
+            atomicAdd(stats.alphaAfterSum, uint(alpha * 1000.0));
+
+            if (alpha > alphaPreFusion + 0.001) {
+                atomicAdd(stats.subjectRescuedCount, 1);
+            } else if (alpha < alphaPreFusion - 0.001) {
+                atomicAdd(stats.bgVetoedCount, 1);
+            }
+
+            int bPre = clamp(int(alphaPreFusion * 10.0), 0, 9);
+            atomicAdd(stats.preHist[bPre], 1);
+            int bPost = clamp(int(alpha * 10.0), 0, 9);
+            atomicAdd(stats.postHist[bPost], 1);
         }
     }
 
