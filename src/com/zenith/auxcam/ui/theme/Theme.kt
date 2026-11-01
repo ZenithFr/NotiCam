@@ -24,16 +24,16 @@ import androidx.compose.ui.unit.sp
  * see-through matte film, hairline separators and an SF-style type ramp.
  */
 object CameraColors {
-    /** iOS systemYellow (dark appearance) — selection only. */
-    val Yellow = Color(0xFFFFD60A)
+    /** CMF-inspired warm accent, reserved for selection and camera identity. */
+    val Yellow = Color(0xFFFF794F)
     /** iOS systemRed — recording only. */
     val Red = Color(0xFFFF453A)
     /** iOS systemGreen — reserved for future "ready" states. */
     val Green = Color(0xFF30D158)
 
     val Label = Color.White
-    val LabelSecondary = Color(0xA6FFFFFF)
-    val LabelTertiary = Color(0x66FFFFFF)
+    val LabelSecondary = Color(0xC2FFFFFF)
+    val LabelTertiary = Color(0x94FFFFFF)
     val LabelQuaternary = Color(0x40FFFFFF)
     val OnLight = Color.Black
 
@@ -55,14 +55,14 @@ object CameraColors {
      * film would wash the picture out. Darkening keeps the scene visible through
      * the panel while white labels stay legible against it.
      */
-    val MatteScrim = Color(0x24000000)
+    val MatteScrim = Color(0xF2181B1F)
 
     /** Internal hairline *between rows inside* a panel. Never a surface rim. */
     val Separator = Color(0x1FFFFFFF)
     val SliderTrack = Color(0x3DFFFFFF)
     val SliderFill = Color.White
     val Scrim = Color(0x99000000)
-    val Black = Color.Black
+    val Black = Color(0xFF090B0D)
 }
 
 /** 8-pt spacing grid. */
@@ -158,8 +158,8 @@ object CameraType {
     val Section = TextStyle(
         fontFamily = sf,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 11.sp,
-        letterSpacing = 1.3.sp,
+        fontSize = 12.sp,
+        letterSpacing = 2.2.sp,
     )
 
     val Value = TextStyle(

@@ -48,6 +48,7 @@ android {
     }
 
     sourceSets {
+        getByName("test") { java.setSrcDirs(listOf("tests/kotlin")) }
         getByName("main") {
             manifest.srcFile("AndroidManifest.xml")
             java.setSrcDirs(listOf("src"))
@@ -97,6 +98,7 @@ android {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     // Shizuku + TensorFlow Lite ship as local jars (no network needed).
     implementation(fileTree("libs") { include("*.jar") })
 
@@ -164,3 +166,10 @@ val compileShaders = tasks.register("compileShaders") {
 tasks.named("preBuild") {
     dependsOn(compileShaders)
 }
+
+val verifySources = tasks.register<Exec>("verifySources") {
+    group = "verification"
+    description = "Checks UI source references and capture regression contracts"
+    commandLine("bash", "build.sh", "check")
+}
+tasks.named("check") { dependsOn(verifySources) }

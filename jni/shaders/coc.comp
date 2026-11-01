@@ -53,7 +53,7 @@ void main() {
         // Internal gain = (targetFarFieldPx / previewWidth) / coc_radius_inf_norm
         // Far-field blur remains invariant as subject moves (S1 changes)
         float refWidth = (pc.previewWidth > 0.0) ? pc.previewWidth : 720.0;
-        float target_radius_norm = ((pc.targetFarFieldPx > 0.0) ? pc.targetFarFieldPx : 15.0) / refWidth;
+        float target_radius_norm = max(pc.targetFarFieldPx, 0.0) / refWidth;
         coc_radius_norm = target_radius_norm * ratio;
     }
 

@@ -40,7 +40,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,8 +67,6 @@ import com.zenith.auxcam.CameraController
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
-import com.zenith.auxcam.FrameRatio
-import com.zenith.auxcam.Resolution
 import com.zenith.auxcam.ui.effects.matte
 import com.zenith.auxcam.ui.effects.rememberMatteGrain
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
@@ -78,8 +75,6 @@ import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
 import com.zenith.auxcam.ui.theme.CameraType
-import kotlinx.coroutines.launch
-import kotlin.math.roundToInt
 
 /**
  * Matte icon button.
@@ -513,20 +508,16 @@ fun ProSheet(
             .matte(grain, RoundedCornerShape(CameraSpacing.panelRadius))
             .padding(horizontal = 20.dp, vertical = 18.dp),
     ) {
-        // ── Framing: 1:1 · 4:3 · 16:9 · Full ────────────────────────────────
-        Text("FRAMING", style = CameraType.Section, color = CameraColors.LabelTertiary)
+        Text("CAPTURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
         Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FrameRatio.entries.forEach { ratio ->
-                SegmentPill(
-                    label = ratio.label,
-                    selected = state.frameRatio == ratio,
-                    onClick = { actions.onFrameRatioSelected(ratio) },
-                    modifier = Modifier.weight(1f),
-                )
-            }
-        }
-
+        Text("12 MP · NATIVE 4:3 · JPEG 100", style = CameraType.Value, color = CameraColors.Label)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Photo and Pro keep the scene sharp. Only Portrait adds software blur. " +
+                "Sensor RAW and 50 MP capture are not available yet. YUV still includes camera ISP processing.",
+            style = CameraType.Caption,
+            color = CameraColors.LabelSecondary,
+        )
         Spacer(Modifier.height(16.dp))
 
         // ── Aperture: Portrait and Pro only ────────────────────────────────
@@ -627,9 +618,9 @@ fun ProSheet(
         Row(modifier = Modifier.fillMaxWidth()) {
             Text("∞", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
             Spacer(Modifier.weight(1f))
-            Text("2.0M", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Text("FAR", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
             Spacer(Modifier.weight(1f))
-            Text("0.5M", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
+            Text("NEAR", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
             Spacer(Modifier.weight(1f))
             Text("MACRO", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
         }
@@ -645,12 +636,6 @@ fun ProSheet(
 
         // ── Capture options ────────────────────────────────────────────────
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TogglePill(
-                label = state.resolution.label,
-                active = state.resolution == Resolution.High,
-                onClick = { actions.onResolutionToggle() },
-                modifier = Modifier.weight(1f),
-            )
             TogglePill(
                 label = "GRID",
                 active = state.grid,
@@ -968,7 +953,7 @@ fun QuickFocusRow(
     }
 }
 
-/** Top chrome: flash, status, Pro. Laid out with a Box so the pill stays centred. */
+/** Persistent camera identity and controls; status never sits beneath buttons. */
 @Composable
 fun TopBar(
     state: CameraUiState,
@@ -976,180 +961,42 @@ fun TopBar(
     modifier: Modifier = Modifier,
     onInteraction: () -> Unit = {},
 ) {
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .height(56.dp)
-            .padding(horizontal = CameraSpacing.gutter),
+    Row(
+        modifier = modifier.fillMaxWidth().height(72.dp)
+            .padding(horizontal = CameraSpacing.gutterWide),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Row(
-            modifier = Modifier.align(Alignment.CenterStart),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            MatteIconButton(
-                icon = when (state.flash) {
-                    FlashMode.Off -> NotiIcons.FlashOff
-                    FlashMode.Auto -> NotiIcons.FlashAuto
-                    FlashMode.On -> NotiIcons.FlashOn
-                },
-                contentDescription = "Flash",
-                onClick = {
-                    onInteraction()
-                    actions.onFlashClick()
-                },
-            )
-
-            // RAW lives beside the flash now, not inside the settings sheet.
-            RawBadge(
-                active = state.raw,
-                onClick = {
-                    onInteraction()
-                    actions.onRawToggle()
-                },
+        Column(modifier = Modifier.weight(1f)) {
+            Text("NOTICAM", style = CameraType.Section, color = CameraColors.Yellow)
+            Spacer(Modifier.height(5.dp))
+            Text(
+                text = if (state.mode == CaptureMode.Portrait) "DEPTH / SOFTWARE BOKEH" else "12 MP / MINIMAL PROCESSING",
+                style = CameraType.Caption,
+                color = CameraColors.LabelSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-
-        StatusPill(
-            text = state.status,
-            modifier = Modifier.align(Alignment.Center),
+        MatteIconButton(
+            icon = when (state.flash) {
+                FlashMode.Off -> NotiIcons.FlashOff
+                FlashMode.Auto -> NotiIcons.FlashAuto
+                FlashMode.On -> NotiIcons.FlashOn
+            },
+            contentDescription = "Flash: ${state.flash.name}",
+            onClick = { onInteraction(); actions.onFlashClick() },
         )
-
         MatteIconButton(
             icon = if (state.proSheetOpen) NotiIcons.Close else NotiIcons.Sliders,
-            contentDescription = "Pro controls",
-            onClick = {
-                onInteraction()
-                actions.onProToggle()
-            },
+            contentDescription = if (state.proSheetOpen) "Close settings" else "Camera settings",
+            onClick = { onInteraction(); actions.onProToggle() },
             selected = state.proSheetOpen,
-            modifier = Modifier.align(Alignment.CenterEnd),
         )
     }
 }
 
-/**
- * RAW toggle: a compact capsule next to the flash button.
- *
- * Wordmarks read faster than an icon here ("RAW" is already the industry
- * shorthand), and the active state uses the same white fill as the other
- * selected controls.
- */
-@Composable
-fun RawBadge(
-    active: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val haptics = rememberCameraHaptics()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.92f else 1f,
-        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
-        label = "raw-press",
-    )
-    val background by animateColorAsState(
-        targetValue = if (active) Color.White else CameraColors.Matte,
-        animationSpec = tween(180),
-        label = "raw-bg",
-    )
-    val foreground by animateColorAsState(
-        targetValue = if (active) Color.Black else CameraColors.LabelSecondary,
-        animationSpec = tween(180),
-        label = "raw-fg",
-    )
-
-    // The "vanity" moment: pressing RAW briefly morphs the badge into a bayer
-    // colour-filter-array icon — the rainbow sensor grid from the camera manuals.
-    val bayer = remember { Animatable(0f) }
-    val scope = rememberCoroutineScope()
-    val grain = rememberMatteGrain()
-
-    Box(
-        modifier = modifier
-            .height(30.dp)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                clip = false
-            }
-            .background(background, RoundedCornerShape(15.dp))
-            .matte(grain, RoundedCornerShape(15.dp), strength = 0.7f)
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                onClick = {
-                    haptics.select()
-                    onClick()
-                    scope.launch {
-                        bayer.snapTo(0f)
-                        bayer.animateTo(1f, tween(260, easing = FastOutSlowInEasing))
-                        bayer.animateTo(0f, tween(300, easing = FastOutSlowInEasing))
-                    }
-                },
-            )
-            .padding(horizontal = 11.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "RAW",
-            style = CameraType.Caption,
-            color = foreground,
-            modifier = Modifier.graphicsLayer { alpha = 1f - bayer.value },
-        )
-
-        // Bayer mosaic: 2x2 RGGB blocks repeated, tinted like the manual diagrams,
-        // scaling in from the centre and dissolving back into the wordmark.
-        if (bayer.value > 0.001f) {
-            Canvas(
-                Modifier
-                    .size(30.dp)
-                    .graphicsLayer {
-                        val s = 0.55f + 0.45f * bayer.value
-                        scaleX = s
-                        scaleY = s
-                        alpha = bayer.value
-                    },
-            ) {
-                val cells = 4
-                val cell = size.minDimension / cells
-                val colors = listOf(
-                    Color(0xFFFF5A5F), Color(0xFF3DDC84),
-                    Color(0xFF3DDC84), Color(0xFF4C9AFF),
-                )
-                for (row in 0 until cells) {
-                    for (col in 0 until cells) {
-                        val tint = colors[(row * cells + col) % colors.size]
-                        drawRect(
-                            color = tint.copy(alpha = 0.85f),
-                            topLeft = Offset(col * cell + 1f, row * cell + 1f),
-                            size = Size(cell - 2f, cell - 2f),
-                        )
-                    }
-                }
-                // Micro-lens grid on top, the way the sensor diagrams show it.
-                for (i in 0..cells) {
-                    val p = i * cell
-                    drawLine(
-                        color = Color.Black.copy(alpha = 0.25f),
-                        start = Offset(p, 0f),
-                        end = Offset(p, size.height),
-                        strokeWidth = 1f,
-                    )
-                    drawLine(
-                        color = Color.Black.copy(alpha = 0.25f),
-                        start = Offset(0f, p),
-                        end = Offset(size.width, p),
-                        strokeWidth = 1f,
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** Bottom chrome: Pro sheet, mode carousel and the shutter row. */
+/** Capture modes, gallery and the single-flight shutter. */
 @Composable
 fun BottomBar(
     state: CameraUiState,
@@ -1194,7 +1041,7 @@ fun BottomBar(
 
             ShutterButton(
                 recording = false,
-                enabled = state.sessionReady,
+                enabled = state.sessionReady && !state.captureBusy,
                 pulse = state.capturePulse,
                 onClick = { actions.onShutterClick() },
                 modifier = Modifier.onGloballyPositioned { coords ->

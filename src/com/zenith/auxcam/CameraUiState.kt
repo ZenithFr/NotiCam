@@ -9,8 +9,8 @@ enum class CaptureMode(val label: String) {
     Portrait("Portrait"),
     Pro("Pro");
 
-    /** Pro captures with high-quality noise reduction; the others use fast NR. */
-    val highQualityNr: Boolean get() = this == Pro
+    /** Phase one never requests extra denoising or sharpening. */
+    val highQualityNr: Boolean get() = false
 }
 
 /** Flash request state, mapped 1:1 onto `CONTROL_AE_MODE`. */
@@ -87,6 +87,7 @@ data class CameraUiState(
     val status: String = "",
     val telemetry: String = "",
     val sessionReady: Boolean = false,
+    val captureBusy: Boolean = false,
 
     /** Increments on every shutter press; drives the bloom + ring pulse. */
     val capturePulse: Int = 0,
@@ -134,9 +135,9 @@ data class CameraUiState(
     val frameAspect: Float?
         get() = frameRatio.aspect?.let { if (DeviceProfile.PREVIEW_ROTATION_90) 1f / it else it }
 
-    /** Aperture control is meaningful in Portrait and Pro only. */
+    /** Simulated aperture applies only to optional Portrait processing. */
     val apertureVisible: Boolean
-        get() = mode == CaptureMode.Portrait || mode == CaptureMode.Pro
+        get() = mode == CaptureMode.Portrait
 
     val focalLabel: String
         get() = String.format("%.0f MM", DeviceProfile.FOCAL_MAIN_MM * zoom)
@@ -149,9 +150,9 @@ data class CameraUiState(
             if (!manualFocus) return if (aeAfLocked) "LOCKED" else "AUTO"
             if (focusFraction <= 0.03f) return "∞"
             if (focusFraction >= 0.97f) return "MACRO"
-            val distM = 0.1f + (1f - focusFraction) * 4.9f
-            return if (distM >= 1.0f) String.format(java.util.Locale.US, "%.1fM", distM)
-                   else String.format(java.util.Locale.US, "%.0fCM", distM * 100f)
+            // The HAL maps this fraction to lens diopters; without its actual
+            // minimum-focus metadata a metre label would be fabricated.
+            return String.format(java.util.Locale.US, "%.0f%%", focusFraction * 100f)
         }
 
     val quickFocusVisible: Boolean

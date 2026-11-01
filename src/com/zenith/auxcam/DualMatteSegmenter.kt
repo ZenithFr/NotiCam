@@ -144,6 +144,7 @@ class DualMatteSegmenter(private val context: Context) {
     var currentMode: TierMode = TierMode.DUAL
         private set
 
+    private var preparedMode = TierMode.DUAL
     private var lastDispatchTimeMs = 0L
     private val prevHistogram = FloatArray(16)
     private var hasPrevHistogram = false
@@ -490,7 +491,8 @@ class DualMatteSegmenter(private val context: Context) {
     fun preprocessFrame(image: Image): Boolean {
         if (!isInitialized.get()) return false
 
-        val isDual = (currentMode == TierMode.DUAL)
+        preparedMode = currentMode
+        val isDual = (preparedMode == TierMode.DUAL)
 
         // L.7 (a) / Item 4: Interpreter presence check (require general only when isDual)
         if (interpLandscape == null || (isDual && interpGeneral == null)) {
@@ -540,7 +542,7 @@ class DualMatteSegmenter(private val context: Context) {
      */
     fun runInference(): Boolean {
         if (!isInitialized.get()) return false
-        val isDual = (currentMode == TierMode.DUAL)
+        val isDual = (preparedMode == TierMode.DUAL)
         if (interpLandscape == null || (isDual && interpGeneral == null)) return false
 
         // 3. Inference on Landscape
@@ -750,7 +752,12 @@ class DualMatteSegmenter(private val context: Context) {
      */
     fun getLatestAlphaMatte(dst: ByteArray) {
         synchronized(alphaLock) {
-            System.arraycopy(outputAlphaBytes, 0, dst, 0, Math.min(dst.size, outputAlphaBytes.size))
+            // Models see an upright image. Vulkan samples in sensor coordinates,
+            // so undo that rotation exactly once when publishing the matte.
+            for (i in 0 until minOf(dst.size, outputAlphaBytes.size)) {
+                val index = FrameData.sensorMatteIndex(i % 256, i / 256, 256, DeviceProfile.PREVIEW_ROTATION_90)
+                dst[i] = outputAlphaBytes[index]
+            }
         }
     }
 
@@ -819,19 +826,16 @@ class DualMatteSegmenter(private val context: Context) {
         val invScale = if (!isFloat && scale > 0f) 1.0f / (scale * 255.0f) else 1.0f
 
         for (dy in 0 until dstH) {
-            val sy = (dy * srcH) / dstH
-            val uvY = sy / 2
-            val yOffset = sy * yRowStride
-            val uOffsetBase = uvY * uRowStride
-            val vOffsetBase = uvY * vRowStride
-
             for (dx in 0 until dstW) {
-                val sx = (dx * srcW) / dstW
+                // Same mapping as composite.comp: upright (u,v) -> sensor
+                // (v,1-u). A sideways person is not a valid segmentation input.
+                val sx = if (DeviceProfile.PREVIEW_ROTATION_90) (dy * srcW) / dstH else (dx * srcW) / dstW
+                val sy = if (DeviceProfile.PREVIEW_ROTATION_90) srcH - 1 - (dx * srcH) / dstW else (dy * srcH) / dstH
                 val uvX = sx / 2
-
-                val yVal = yBuf.get(yOffset + sx).toInt() and 0xFF
-                val uVal = (uBuf.get(uOffsetBase + uvX * uPixelStride).toInt() and 0xFF) - 128
-                val vVal = (vBuf.get(vOffsetBase + uvX * vPixelStride).toInt() and 0xFF) - 128
+                val uvY = sy / 2
+                val yVal = yBuf.get(yBuf.position() + sy * yRowStride + sx * yPlane.pixelStride).toInt() and 0xFF
+                val uVal = (uBuf.get(uBuf.position() + uvY * uRowStride + uvX * uPixelStride).toInt() and 0xFF) - 128
+                val vVal = (vBuf.get(vBuf.position() + uvY * vRowStride + uvX * vPixelStride).toInt() and 0xFF) - 128
 
                 // BT.601 YUV -> RGB conversion
                 val r = (yVal + 1.402f * vVal).coerceIn(0f, 255f)
@@ -839,9 +843,11 @@ class DualMatteSegmenter(private val context: Context) {
                 val b = (yVal + 1.772f * uVal).coerceIn(0f, 255f)
 
                 if (isFloat) {
-                    outBuf.putFloat((r / 127.5f) - 1.0f)
-                    outBuf.putFloat((g / 127.5f) - 1.0f)
-                    outBuf.putFloat((b / 127.5f) - 1.0f)
+                    // MediaPipe Selfie Segmentation's input contract is [0,1],
+                    // not MobileNet's commonly used [-1,1] normalization.
+                    outBuf.putFloat(r / 255.0f)
+                    outBuf.putFloat(g / 255.0f)
+                    outBuf.putFloat(b / 255.0f)
                 } else {
                     val qR = Math.round(r * invScale + zero).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()
                     val qG = Math.round(g * invScale + zero).coerceIn(Byte.MIN_VALUE.toInt(), Byte.MAX_VALUE.toInt()).toByte()

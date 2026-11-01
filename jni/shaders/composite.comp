@@ -15,7 +15,7 @@ layout(binding = 3, rgba8) writeonly uniform image2D uOutPresent;
 layout(push_constant) uniform CompositePushConstants {
     uint outWidth;       // present surface width in px
     uint outHeight;      // present surface height in px
-    int rotate90;        // 1 = present the landscape sensor upright (portrait)
+    int rotate90;        // bit 0: rotate upright; bit 1: bypass bokeh
     uint yOffset;        // vertical tile offset in px
 } pc;
 
@@ -36,7 +36,7 @@ void main() {
     // two branches below are no-ops.
     ivec2 srcTexels = textureSize(uOriginalColor, 0);
     float srcAspect = float(max(srcTexels.x, 1)) / float(max(srcTexels.y, 1));
-    if (pc.rotate90 != 0) {
+    if ((pc.rotate90 & 1) != 0) {
         srcAspect = 1.0 / srcAspect;
     }
     float outAspect = outSize.x / outSize.y;
@@ -65,7 +65,7 @@ void main() {
     }
 
     // ── Orientation ─────────────────────────────────────────────────────────
-    if (pc.rotate90 != 0) {
+    if ((pc.rotate90 & 1) != 0) {
         // Map upright (portrait) screen coordinates [0..1]² onto the landscape
         // sensor frame, rotating it 90° CLOCKWISE so the phone's "up" becomes the
         // sensor's "up":
@@ -77,6 +77,10 @@ void main() {
     }
 
     vec4 sharpRgba = texture(uOriginalColor, uv);
+    if ((pc.rotate90 & 2) != 0) {
+        imageStore(uOutPresent, coord, vec4(sharpRgba.rgb, 1.0));
+        return;
+    }
     vec4 blurredRgba = texture(uBlurredColor, uv);
     float alpha = texture(uAlpha, uv).r;
 

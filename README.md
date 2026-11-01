@@ -1,171 +1,107 @@
-# AuxCam Portrait Engine (Android)
+# NotiCam
 
-A production-grade, zero-copy native Vulkan portrait bokeh camera engine engineered for
-**one phone: the CMF Phone 2 Pro** (MediaTek Dimensity 7300 Pro, Mali-G615 MC2, 1080 × 2392
-@ 120 Hz). The capture UI is **Jetpack Compose**; the AIDL/Shizuku/Vulkan engine is unchanged.
+An experimental, CMF Phone 2 Pro–focused Android camera. The priority is **the
+best source image with as little additional processing as the hardware allows**.
+A later phase will explore adaptive, specialized-AI post-processing; it is not
+part of the default capture path today.
 
----
+## Current capture contract
 
-## ⚡ Overview
+| Mode / feature | Behavior |
+| --- | --- |
+| Photo | Sharp 4080 × 3072 YUV → RGB → JPEG, quality 100; no app bokeh |
+| Pro | The same sharp output, with exposure and manual-focus controls; no extra NR/sharpening |
+| Portrait | Optional depth/matte bokeh; displayed aperture is **simulated**, not a movable lens iris |
+| Camera processing | Request noise reduction OFF (or MINIMAL if advertised) and edge enhancement OFF when supported |
+| Lenses | Device-specific main/stereo `5`, ultra-wide `2`, tele `3`; tele assist is an explicit setting |
+| Framing | Native sensor 4:3 only; custom crops are not implemented |
+| Sensor RAW / DNG | **Not implemented.** The old RAW toggle only dumped a Y plane and has been removed |
+| 50 MP | **Not supported by the fixed-size native readback.** The misleading toggle has been removed |
+| Orientation | Portrait preview; sensor-landscape JPEG with 90° EXIF orientation |
+| Saving | Pending MediaStore row published only after successful encoding; failed rows are deleted |
 
-AuxCam unlocks synchronized multi-camera ISP streaming directly through a privileged Camera2 User Service (managed via Shizuku), piping hardware-synchronized color and disparity buffers directly into a custom Vulkan 1.3 compute pipeline with zero-copy `AHardwareBuffer` imports.
+**YUV is not unprocessed sensor RAW.** Camera ISP demosaic, color conversion,
+white balance and potentially other vendor processing still apply. JPEG 100 is
+also not lossless. The app does not yet have a Bayer `RAW_SENSOR` + capture
+metadata + `DngCreator` path, and must not claim otherwise.
 
-### 🌟 Key Capabilities
-- **Synchronized Triple-Stream Camera Session**:
-  - **Stream 0 (Preview Color)**: $1440 \times 1080$ `YUV_420_888` (`USAGE_GPU_SAMPLED_IMAGE`)
-  - **Stream 1 (Hardware Disparity)**: $448 \times 288$ `Y8` stereo depth map (`USAGE_GPU_SAMPLED_IMAGE | USAGE_CPU_READ_OFTEN`)
-  - **Stream 2 (Full-Res Still)**: $4080 \times 3072$ `YUV_420_888` 4K Still capture
-- **Zero-Copy Vulkan 1.3 Compute Pipeline**:
-  - `VkSamplerYcbcrConversion` with immutable sampler for direct YUV $\to$ RGB conversion in shader.
-  - **Circle of Confusion (CoC)** Pass: Physically grounded thin-lens optical defocus modeling with near-field suppression.
-  - **32-Tap Poisson-Disk Gather** Pass: Hardware-accelerated depth-aware bokeh gather filter.
-  - **Composite & Presentation** Pass: Alpha blending and direct swapchain presentation (`vkQueuePresentKHR`) at $120\text{ Hz} / 30\text{ fps}$ display cadence.
-- **Ultra-Low Latency Performance**:
-  - Viewfinder steady-state $p_{50} = \mathbf{22\text{ ms}}$ ($\le 33.3\text{ ms}$ real-time $30\text{ fps}$ budget).
-  - 4K Still Bokeh composite completion in $\mathbf{181\text{ ms}}$ (well within $\le 500\text{ ms}$ UX shutter gate).
+Auxiliary-lens stream combinations, flash timing and vendor behavior require
+on-device verification. This project is not a general-purpose camera for other
+phones. Permission to use the privileged camera service is provided by Shizuku.
 
----
+## Architecture
 
-## 🎛️ Capture UI (Apple Camera language, Jetpack Compose)
+- `MainActivity.kt`: Compose host, lifecycle bridge, JNI entry points and APK asset extraction.
+- `CameraController.kt`: Shizuku binding, ImageReaders, capture admission, frame matching and storage.
+- `FrameData.kt`: pure buffer-packing, timestamp-matching and matte-orientation rules.
+- `CameraUserService.java`: privileged Camera2 session and controls, serialized on its camera handler.
+- `DualMatteSegmenter.kt`: upright MediaPipe inference; output mapped back into sensor space.
+- `jni/src/`: Vulkan/YUV pipeline and a synchronized JNI lifetime boundary.
+- `jni/shaders/`: CoC, matte refinement, gather and composition.
+- `src/com/zenith/auxcam/ui/`: Compose camera UI, warm accent, persistent status, settings and shutter.
 
-The viewfinder chrome is Compose end to end: tokens, components and the full
-interaction map live in [`design/DESIGN.md`](design/DESIGN.md); a clickable mock of
-the shipping layout lives in [`design/index.html`](design/index.html).
+The UI keeps chrome outside the viewfinder. Capture is single-flight through
+saving, not just until a camera buffer arrives. Depth is selected by sensor
+timestamp within 100 ms; mattes older than 500 ms are discarded. These are
+bounded best-effort matches, **not a claim of hardware-synchronized still depth**.
+Lens/mode changes invalidate auxiliary frames.
 
-| | Before | After |
-|---|---|---|
-| **Stack** | `Activity` + `FrameLayout` + hand-written `View` subclasses | `ComponentActivity` → `CameraController` → `CameraScreen`; one immutable `CameraUiState` |
-| **Theme** | Nothing OS: full-width `#D00B0B0E` bars, acrylic cards, red accents | iOS dark: flat see-through matte film, no rims, one accent (`#FFD60A`) |
-| **Layout** | Absolute chrome painted over the preview | `Column`: top bar → `weight(1f)` frame → chips → ƒ row → bottom bar. **Nothing can overlap the 4:3 framebuffer** |
-| **Preview geometry** | 4:3 landscape view (sideways), swapchain frozen at first size → stretched image | `composite.comp` rotates the sensor frame 90° CW → 3:4 portrait, upright; frame measured to `previewAspect`, swapchain recreated on extent change, aspect-fit as a second guarantee |
-| **Motion** | `ValueAnimator` + interpolators, several controls clipped mid-animation | One `CameraMotion` vocabulary: crisp press / springy release, slide-in Pro menu, travelling zoom-chip indicator, arc zoom wheel with detents, `clip = false` everywhere it can matter |
-| **Haptics** | Single `VIRTUAL_KEY` blip, then full-strength vibrator effects | `CameraHaptics`: soft `performHapticFeedback` vocabulary (segment ticks, context clicks, confirm) with an amplitude-limited one-shot only as a last resort |
-| **Icons** | 24 vector drawables + PNG-tinted bitmaps | Nine hand-built `ImageVector`s (24-unit grid, 1.7 stroke) — resolution independent, can never be resampled or cropped |
-| **Shutter** | Static layered drawable | `ShutterButton`: ring/gap/disc, spring compression, capture pulse drawn *inside* its own 96 dp box |
-| **Flash / Zoom / Aperture** | Inert badges | Flash cycles `CONTROL_AE_MODE`; RAW sits beside the flash; 0.6×/1×/2× chips, a pinch on the scene or a drag along the chip row (the two zoom gestures) drive `SCALER_CROP_REGION`; continuous ƒ slider drives the CoC pass |
-| **Focus** | Static yellow square | Spring-in AE/AF reticle + hardware focus scan at the tap point |
-| **Settings** | Chevron drawer with dead buttons | Sheet sliding down from the top bar: continuous ƒ and ±4 EV sliders, Grid / Timer, live telemetry (no title, no Done — tap outside) |
-| **Gallery** | Always-empty tile | Real bokeh frame decoded from the capture, plus a shutter→gallery flight |
+### Portrait repair notes
 
-Highlights of the implementation:
+- Float model input is RGB `[0, 1]`, matching the upstream
+  [MediaPipe Selfie Segmentation graph](https://github.com/google-ai-edge/mediapipe/blob/master/mediapipe/modules/selfie_segmentation/selfie_segmentation_gpu.pbtxt).
+  The previous code used `[-1, 1]`.
+- Models now receive an upright image; their matte is transformed back to the
+  sensor orientation expected by Vulkan.
+- Prepared inference tier is held across preprocessing/inference so a thermal
+  tier change cannot make inference consume an unprepared general-model tensor.
+- Preview and still CoC use the same 720-pixel reference width. Zero blur really
+  means zero, and Photo/Pro composition directly selects the sharp original.
+- Missing depth no longer creates a fabricated central oval. A real matte can
+  support matte-only blur; with neither signal, output stays sharp.
+- The current uploaded matte is sampled, not the previous double-buffer image.
+- Still gather retains 32 taps; preview uses 16. Artificial highlight boost is off.
+- Native preview drops a frame rather than racing a still or engine teardown.
+  Serialization favors correctness over the previous unverified interleaving
+  performance claims; measure its latency and preview gaps on-device.
 
-- **`src/com/zenith/auxcam/MainActivity.kt`** — `ComponentActivity`, edge-to-edge window flags, the four JNI entry points, `setContent { NotiCamTheme { CameraScreen(...) } }`.
-- **`CameraController.kt`** — owns the engine, the Shizuku binding, the `ImageReader`s and the single source of truth (`CameraUiState`); implements the `CameraActions` interface the composables call.
-- **`ui/theme/Theme.kt`** — `CameraColors`, `CameraSpacing`, `CameraType`.
-- **`ui/components/`** — `ShutterButton`, `Viewfinder`, `Controls` (top bar, mode carousel, sliders, Pro sheet, gallery tile, bottom bar), `ZoomChips` (travelling indicator), `ZoomDial` (arc wheel).
-- **`ui/feedback/Haptics.kt`** — the soft haptic vocabulary.
-- **`ui/effects/Matte.kt`** — the matte grain: one GPU-tiled 64×64 noise bitmap, no sheen, no rim, no blur.
-- **`ui/theme/Theme.kt` → `CameraMotion`** — every spring and tween in the app.
-- **`ui/icons/NotiIcons.kt`** — the icon set.
-- **`DeviceProfile.kt`** — every CMF Phone 2 Pro constant (display, sensor streams, lens ladder, camera id).
-- **`CameraUserService`** — AIDL surface (`setFlashMode`, `setEvCompensation`, `setZoom`, `focusAt`, `setPhysicalLens`) mapping 1:1 onto Camera2 controls.
-- **`tools/verify_ui.py`** — resource graph, brace/string balance, project-import resolution, Compose member cross-checks, composable imports; runs in `build.sh` and in Gradle's `check`.
+## Build
 
----
+This is a **single root Gradle application module**, using the original
+`src/`, `res/`, `assets/`, `jni/` layout. `app/` is not a Gradle module.
 
-## 🏗️ Architecture
+Prerequisites:
 
-```
-Camera HAL (Stream 0 & Stream 1)
-   │
-   ├── Stream 0 (1440x1080 YUV AHB) ──► VkSamplerYcbcrConversion (Zero-Copy)
-   └── Stream 1 (448x288 Y8 AHB)    ──► Host-Visible Staging Buffer
-                                                │
-                                                ▼
-                                    ┌──────────────────────┐
-                                    │   Vulkan 1.3 Graph   │
-                                    │ 1. CoC Pass (Compute)│
-                                    │ 2. 32-tap Gather     │
-                                    │ 3. Viewport Composite│
-                                    └──────────┬───────────┘
-                                               │
-                                               ▼
-                                      Swapchain Image
-                                               │
-                                               ▼
-                                      SurfaceView (Screen)
-```
+- JDK 17 and Gradle 8.9 (there is currently no committed Gradle wrapper).
+- Android SDK platform 35 and suitable Android build tools.
+- NDK `27.1.12297006`; native configuration currently targets Android 35 / arm64.
+- `glslc` on PATH, or `GLSLC=/absolute/path/to/glslc`.
+- Access to Google Maven, Maven Central and the Gradle plugin repositories.
 
----
-
-## 📦 Project Structure
-
-```
-auxcam-app/
-├── settings.gradle.kts        # Gradle + AGP 8.7.3 + Kotlin 2.0.21 + Compose
-├── build.gradle.kts           # app module: compileSdk 35, minSdk 28, arm64-v8a only
-├── AndroidManifest.xml        # Camera & Shizuku permissions, Vulkan 1.3 feature gate
-├── build.sh                   # Fallback shell build (NDK + AAPT2 + D8 + Apksigner)
-├── src/                       # Kotlin (Compose UI) + Java (service) + AIDL
-│   └── com/zenith/auxcam/
-│       ├── MainActivity.kt            # Compose host + JNI entry points
-│       ├── CameraScreen.kt            # the column: chrome outside the 4:3 frame
-│       ├── CameraController.kt        # engine + state owner (CameraActions)
-│       ├── CameraUiState.kt           # @Immutable snapshot
-│       ├── DeviceProfile.kt           # CMF Phone 2 Pro constants
-│       ├── ui/theme/Theme.kt          # CameraColors / CameraSpacing / CameraType
-│       ├── ui/icons/NotiIcons.kt      # nine ImageVectors
-│       ├── ui/components/             # ShutterButton, Viewfinder, Controls, ZoomDial
-│       ├── CameraUserService.java     # privileged Camera2 user service
-│       ├── IAuxCamService.aidl
-│       └── IAuxCamCallback.aidl
-├── jni/                       # C++ native Vulkan bokeh engine
-│   ├── Android.mk
-│   ├── Application.mk
-│   ├── src/
-│   │   ├── VulkanPipeline.cpp
-│   │   ├── YuvConverter.cpp
-│   │   ├── NativeBokehBridge.cpp
-│   │   └── NpuWorker.cpp
-│   └── shaders/               # GLSL compute shaders
-│       ├── coc.comp
-│       ├── gather.comp
-│       ├── composite.comp
-│       └── convert.comp
-├── res/                       # window theme only — everything visual is Compose
-│   └── values/                # themes.xml (black, edge-to-edge), strings.xml
-├── design/                    # DESIGN.md + clickable UI mock (index.html)
-├── tools/verify_ui.py         # resource graph + Kotlin/Compose sanity gate
-├── assets/                    # Precompiled SPIR-V shaders & assets
-├── libs/                      # JAR dependencies (Shizuku, TensorFlow Lite)
-├── lib/                       # Native compiled shared libraries (arm64-v8a)
-├── tests/                     # CoC unit test and hazard verification
-└── release/                   # Prebuilt, signed production APK
-    └── auxcam_aligned.apk
-```
-
----
-
-## 🛠️ Building & Installing
-
-### Prerequisites
-- Android SDK (`build-tools 34.0.0+`, `platforms/android-35`)
-- Android NDK (`r27b+`) — the Vulkan engine is built by `jni/Android.mk`
-- JDK 17+
-- `glslc` (Vulkan shader compiler) — `compileShaders` runs before `preBuild`
-
-### Build Command
 ```bash
 export ANDROID_HOME=/path/to/android-sdk
-export ANDROID_NDK_HOME=/path/to/android-ndk
+export JAVA_HOME=/path/to/jdk-17
+# Optional: export GLSLC=/path/to/glslc
 
-./gradlew assembleDebug        # or: ./gradlew installDebug
-# shaders only:  ./gradlew compileShaders     (-PskipShaders to bypass)
-# verify UI:     python3 tools/verify_ui.py
+./build.sh check                 # source contracts / optical math; shaders if glslc exists
+./build.sh                      # Gradle assembleDebug
+# Or with Gradle directly:
+gradle testDebugUnitTest         # buffer, matching, orientation unit tests
+gradle check                     # Android checks + repository source checks
+gradle assembleDebug
+adb install -r build/outputs/apk/debug/NotiCam-debug.apk
 ```
 
-The legacy `./build.sh` (NDK + AAPT2 + D8 + Apksigner, no Gradle) still works and
-runs `tools/verify_ui.py` first.
+Check the actual filename under `build/outputs/apk/debug/` before installing.
+The build script respects your environment; it no longer overwrites SDK/JDK
+paths with a developer's home-directory paths. Gradle compiles compute shaders
+before building the APK. `-PskipShaders` is only appropriate when you already
+have matching generated SPIR-V files locally; those files are not committed.
+Shaders are refreshed atomically from the installed APK at launch, including
+updates whose byte length happens to be unchanged.
 
-### Installation
-```bash
-adb install -r app/build/outputs/apk/debug/app-debug.apk
-```
+## Verification and remaining work
 
----
-
-## 📱 Device Setup & Permissions
-1. Ensure **Shizuku** is running and authorized on the device.
-2. Launch **NotiCam**; grant the Shizuku permission prompt.
-3. The app connects to the privileged `CameraUserService` running under the shell UID to access physical stereo Camera ID `5` on the CMF Phone 2 Pro (the only device this build is tuned for; anything else gets a visible warning in the top bar).
-4. Live viewfinder immediately begins streaming real-time portrait bokeh.
+See [the stabilization checklist](design/STABILIZATION.md) for tests performed,
+known limitations, a physical-device test matrix and suggested next milestones.
+The existing `design/index.html` is a historical mock, not the current Compose UI.
