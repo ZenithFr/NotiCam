@@ -59,13 +59,8 @@ void main() {
         return;
     }
 
-    // Radius-adaptive taps (H.1c):
-    // r <= 8 px: keep 32 taps (fine detail)
-    // r > 8 px: 16 taps with wider bilinear footprint (cuts bandwidth & latency in half)
-    uint actualTaps = pc.numTaps;
-    if (centerRadius > 8.0) {
-        actualTaps = min(pc.numTaps, 16u);
-    }
+    // Still quality must not fall to 16 taps as the blur radius increases.
+    uint actualTaps = max(pc.numTaps, 1u);
 
     vec3 accumColor = vec3(0.0);
     float accumWeight = 0.0;

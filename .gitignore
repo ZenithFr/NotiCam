@@ -38,3 +38,6 @@ Thumbs.db
 *.swp
 *~
 
+# Local validation environments
+.cache/
+__pycache__/

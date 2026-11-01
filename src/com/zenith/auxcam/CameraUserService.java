@@ -66,6 +66,9 @@ public class CameraUserService extends IAuxCamService.Stub {
     private Range<Integer> mCompensationRange;
     private String mPhysicalId;
     private String mCurrentCameraId = CAMERA_ID;
+    private int mSessionGeneration = 0;
+    private int[] mNoiseModes;
+    private int[] mEdgeModes;
     private Float mMinFocusDistance = null;
     private float mManualFocusDistance = 0.0f;
     private boolean mManualFocusActive = false;
@@ -212,7 +215,17 @@ public class CameraUserService extends IAuxCamService.Stub {
             Surface depthSurface, int depthW, int depthH,
             Surface stillSurface, int stillW, int stillH,
             String colorPhysicalId) {
+        if (mCameraHandler == null) return false;
+        mCameraHandler.post(() -> openSessionOnCameraThread(colorSurface, colorW, colorH,
+                depthSurface, depthW, depthH, stillSurface, stillW, stillH, colorPhysicalId));
+        return true; // accepted; readiness/failure is delivered through the callback
+    }
 
+    private void openSessionOnCameraThread(
+            Surface colorSurface, int colorW, int colorH,
+            Surface depthSurface, int depthW, int depthH,
+            Surface stillSurface, int stillW, int stillH, String colorPhysicalId) {
+        closeSessionOnCameraThread();
         Log.i(TAG, "openStereoSession requested: Color=[" + colorW + "x" + colorH + ", phys=" + colorPhysicalId + "], " +
                 "Depth=[" + depthW + "x" + depthH + "], Still=[" + stillW + "x" + stillH + "]");
 
@@ -243,18 +256,18 @@ public class CameraUserService extends IAuxCamService.Stub {
         CameraManager cm = (CameraManager) shellContext.getSystemService(Context.CAMERA_SERVICE);
         if (cm == null) {
             notifyError("CameraManager unavailable");
-            return false;
+            return;
         }
 
         loadCameraCharacteristics(cm);
 
         try {
             cm.openCamera(mCurrentCameraId, new DeviceStateCallback(this, colorPhysicalId), mCameraHandler);
-            return true;
+            return;
         } catch (Throwable t) {
             Log.e(TAG, "Failed to open Camera " + mCurrentCameraId, t);
             notifyError("Failed to open Camera " + mCurrentCameraId + ": " + t.getMessage());
-            return false;
+            return;
         }
     }
 
@@ -317,7 +330,7 @@ public class CameraUserService extends IAuxCamService.Stub {
 
             if (mCallback != null) {
                 try {
-                    mCallback.onSessionReady();
+                    mCallback.onSessionReady(mCurrentCameraId);
                 } catch (RemoteException e) {
                     Log.w(TAG, "Remote exception notifying onSessionReady", e);
                 }
@@ -334,6 +347,8 @@ public class CameraUserService extends IAuxCamService.Stub {
     private void loadCameraCharacteristics(CameraManager cm) {
         try {
             CameraCharacteristics chars = cm.getCameraCharacteristics(mCurrentCameraId);
+            mNoiseModes = chars.get(CameraCharacteristics.NOISE_REDUCTION_AVAILABLE_NOISE_REDUCTION_MODES);
+            mEdgeModes = chars.get(CameraCharacteristics.EDGE_AVAILABLE_EDGE_MODES);
             mActiveArray = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
             mCompensationRange = chars.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE);
             Float maxZoom = chars.get(CameraCharacteristics.SCALER_AVAILABLE_MAX_DIGITAL_ZOOM);
@@ -366,7 +381,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             mCropRegion = null;
             return;
         }
-        float z = Math.max(1.0f, Math.min(mMaxDigitalZoom, mZoomRatio));
+        float baseZoom = "3".equals(mCurrentCameraId) ? 2.0f : ("2".equals(mCurrentCameraId) ? 0.6f : 1.0f);
+        float z = Math.max(1.0f, Math.min(mMaxDigitalZoom, mZoomRatio / baseZoom));
         int w = Math.round(mActiveArray.width() / z);
         int h = Math.round(mActiveArray.height() / z);
         w = Math.max(2, w - (w % 2));
@@ -392,9 +408,6 @@ public class CameraUserService extends IAuxCamService.Stub {
             if (mCropRegion != null) {
                 b.set(CaptureRequest.SCALER_CROP_REGION, mCropRegion);
             }
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                b.set(CaptureRequest.CONTROL_ZOOM_RATIO, mZoomRatio);
-            }
             if (mCompensationRange != null) {
                 b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, clampedEvSteps());
             }
@@ -405,6 +418,7 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     private void applyPreviewControls(CaptureRequest.Builder b) {
         applyCropAndExposure(b);
+        applyMinimalProcessing(b);
         try {
             b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
             b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
@@ -509,19 +523,10 @@ public class CameraUserService extends IAuxCamService.Stub {
         mCameraHandler.post(new Runnable() {
             @Override
             public void run() {
-                // If zoom is ultra-wide (<0.9x), switch to Ultra-wide camera ("2")
-                if (ratio < 0.9f && !"2".equals(mCurrentCameraId)) {
-                    mZoomRatio = 1.0f;
-                    restartWithCamera("2");
-                    return;
-                } else if (ratio >= 0.9f && "2".equals(mCurrentCameraId)) {
-                    // Revert to main stereo camera "5"
-                    mZoomRatio = ratio;
-                    restartWithCamera(CAMERA_ID);
-                    return;
-                }
-
-                mZoomRatio = Math.max(0.6f, Math.min(mMaxDigitalZoom, ratio));
+                if (!Float.isFinite(ratio)) return;
+                // Lens choice belongs to the controller. Zoom here is a crop
+                // relative to that lens, not a second implicit camera switch.
+                mZoomRatio = Math.max(0.6f, Math.min(10.0f, ratio));
                 recomputeCropRegion();
                 Log.i(TAG, "Zoom -> " + mZoomRatio + "x on Camera " + mCurrentCameraId + ", crop=" + mCropRegion);
                 refreshRepeatingRequest();
@@ -681,6 +686,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             Log.w(TAG, "Camera switch teardown: " + t);
         }
 
+        mSessionGeneration++;
+        mPreviewRequestBuilder = null;
         mCurrentCameraId = targetCameraId;
         mAfRegion = null;
 
@@ -730,6 +737,11 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     @Override
     public void triggerStillWithZsl(long shutterCommandNs, boolean highQualityNr, boolean enableZsl) {
+        if (mCameraHandler != null) mCameraHandler.post(() ->
+                captureStillOnCameraThread(shutterCommandNs, enableZsl));
+    }
+
+    private void captureStillOnCameraThread(long shutterCommandNs, boolean enableZsl) {
         if (mCameraDevice == null || mCaptureSession == null || mStillSurface == null) {
             Log.e(TAG, "Cannot trigger still capture: session not ready");
             notifyError("Session not ready for still capture");
@@ -738,7 +750,7 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         mShutterCommandNs = (shutterCommandNs > 0) ? shutterCommandNs : SystemClock.elapsedRealtimeNanos();
         Log.i("TIMING_FREEZE", "capture_request_submitted: " + SystemClock.elapsedRealtimeNanos() + " ns");
-        Log.i(TAG, "TIMING t0 (shutter_command): " + mShutterCommandNs + " ns. Dispatching STILL_CAPTURE request (highQualityNr=" + highQualityNr + ", enableZsl=" + enableZsl + ")...");
+        Log.i(TAG, "TIMING t0 (shutter_command): " + mShutterCommandNs + " ns. Dispatching STILL_CAPTURE request (minimalProcessing=true, enableZsl=" + enableZsl + ")...");
         try {
             CaptureRequest.Builder stillBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             stillBuilder.addTarget(mStillSurface);
@@ -759,19 +771,29 @@ public class CameraUserService extends IAuxCamService.Stub {
             }
             applyCropAndExposure(stillBuilder);
             applyStillFlash(stillBuilder);
-            if (highQualityNr) {
-                stillBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY);
-                stillBuilder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_HIGH_QUALITY);
-            } else {
-                stillBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST);
-                stillBuilder.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_FAST);
-            }
+            applyMinimalProcessing(stillBuilder);
 
             mCaptureSession.capture(stillBuilder.build(), new StillCaptureCallback(this), mCameraHandler);
         } catch (Throwable t) {
             Log.e(TAG, "Failed to dispatch still capture request", t);
             notifyError("Still capture failed: " + t.getMessage());
         }
+    }
+
+    private static boolean supports(int[] modes, int mode) {
+        if (modes != null) for (int available : modes) if (available == mode) return true;
+        return false;
+    }
+
+    // YUV is still ISP processed, not Bayer RAW. Request the least additional
+    // processing advertised by the HAL, without sending unsupported OFF modes.
+    private void applyMinimalProcessing(CaptureRequest.Builder b) {
+        if (supports(mNoiseModes, CaptureRequest.NOISE_REDUCTION_MODE_OFF))
+            b.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_OFF);
+        else if (supports(mNoiseModes, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL))
+            b.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL);
+        if (supports(mEdgeModes, CaptureRequest.EDGE_MODE_OFF))
+            b.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
     }
 
     void onStillCompleted() {
@@ -891,10 +913,28 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     @Override
     public void closeSession() {
+        if (mCameraHandler == null) return;
+        if (android.os.Looper.myLooper() == mCameraHandler.getLooper()) {
+            closeSessionOnCameraThread();
+            return;
+        }
+        java.util.concurrent.CountDownLatch closed = new java.util.concurrent.CountDownLatch(1);
+        mCameraHandler.post(() -> {
+            try { closeSessionOnCameraThread(); } finally { closed.countDown(); }
+        });
+        try {
+            if (!closed.await(3, java.util.concurrent.TimeUnit.SECONDS)) Log.w(TAG, "Camera close timed out");
+        } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    private void closeSessionOnCameraThread() {
+        mSessionGeneration++;
+        mCameraHandler.removeCallbacks(mAfResetRunnable);
+        mPreviewRequestBuilder = null;
         Log.i(TAG, "closeSession() invoked: closing capture session and camera...");
         try {
             if (mCaptureSession != null) {
-                mCaptureSession.stopRepeating();
+                try { mCaptureSession.stopRepeating(); } catch (Throwable ignored) {}
                 mCaptureSession.close();
                 mCaptureSession = null;
             }
@@ -920,19 +960,23 @@ public class CameraUserService extends IAuxCamService.Stub {
     static class DeviceStateCallback extends CameraDevice.StateCallback {
         private final CameraUserService mService;
         private final String mColorPhysicalId;
+        private final int mGeneration;
 
         DeviceStateCallback(CameraUserService service, String colorPhysicalId) {
             mService = service;
             mColorPhysicalId = colorPhysicalId;
+            mGeneration = service.mSessionGeneration;
         }
 
         @Override
         public void onOpened(CameraDevice camera) {
+            if (mGeneration != mService.mSessionGeneration) { camera.close(); return; }
             mService.onDeviceOpened(camera, mColorPhysicalId);
         }
 
         @Override
         public void onDisconnected(CameraDevice camera) {
+            if (mGeneration != mService.mSessionGeneration) { camera.close(); return; }
             Log.w(TAG, "Camera disconnected");
             try { camera.close(); } catch (Throwable ignored) {}
             mService.mCameraDevice = null;
@@ -942,6 +986,7 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         @Override
         public void onError(CameraDevice camera, int error) {
+            if (mGeneration != mService.mSessionGeneration) { camera.close(); return; }
             Log.e(TAG, "Camera device error on " + mService.mCurrentCameraId + ": " + error);
             try { camera.close(); } catch (Throwable ignored) {}
             mService.mCameraDevice = null;
@@ -957,18 +1002,22 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     static class SessionStateCallback extends CameraCaptureSession.StateCallback {
         private final CameraUserService mService;
+        private final int mGeneration;
 
         SessionStateCallback(CameraUserService service) {
             mService = service;
+            mGeneration = service.mSessionGeneration;
         }
 
         @Override
         public void onConfigured(CameraCaptureSession session) {
+            if (mGeneration != mService.mSessionGeneration) { session.close(); return; }
             mService.onSessionConfigured(session);
         }
 
         @Override
         public void onConfigureFailed(CameraCaptureSession session) {
+            if (mGeneration != mService.mSessionGeneration) { session.close(); return; }
             Log.e(TAG, "Session configuration failed on Camera " + mService.mCurrentCameraId);
             mService.notifyError("CameraCaptureSession configuration failed");
             if (!CAMERA_ID.equals(mService.mCurrentCameraId)) {
@@ -987,7 +1036,7 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         @Override
         public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
-            mService.onCaptureResult(result);
+            if (session == mService.mCaptureSession) mService.onCaptureResult(result);
         }
     }
 

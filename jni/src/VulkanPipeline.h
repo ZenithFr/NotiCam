@@ -4,6 +4,7 @@
 #include <android/native_window.h>
 #include <android/hardware_buffer.h>
 #include <memory>
+#include <algorithm>
 #include "YuvConverter.h"
 #include "NpuWorker.h"
 #include <mutex>

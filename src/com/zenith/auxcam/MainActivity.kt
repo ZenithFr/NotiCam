@@ -114,6 +114,11 @@ class MainActivity : ComponentActivity(), NativeBridge {
         controller.start()
     }
 
+    override fun onStop() {
+        controller.pause()
+        super.onStop()
+    }
+
     override fun onDestroy() {
         controller.dispose()
         super.onDestroy()
@@ -122,7 +127,8 @@ class MainActivity : ComponentActivity(), NativeBridge {
     // ══════════════════════ NativeBridge → JNI ═══════════════════════════════
 
     override fun initEngine(surface: Surface, width: Int, height: Int): Boolean =
-        nativeInitEngine(surface, width, height)
+        try { nativeInitEngine(surface, width, height) }
+        catch (e: UnsatisfiedLinkError) { Log.e(TAG, "Native engine unavailable", e); false }
 
     override fun renderFrame(
         buffer: HardwareBuffer,
@@ -278,15 +284,13 @@ class MainActivity : ComponentActivity(), NativeBridge {
             val shaderList = assets.list("shaders") ?: return
             for (name in shaderList) {
                 val outFile = java.io.File(shaderDir, name)
-                val assetLen = try { assets.open("shaders/$name").use { it.available().toLong() } } catch (_: Throwable) { -1L }
-                if (!outFile.exists() || outFile.length() == 0L || (assetLen > 0 && outFile.length() != assetLen)) {
-                    assets.open("shaders/$name").use { input ->
-                        outFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
-                    }
-                    Log.i(TAG, "Extracted asset shader: $name (${outFile.length()} bytes)")
+                // Length is not a content hash: shader edits often preserve
+                // byte count. Always refresh atomically from this installed APK.
+                val temporary = java.io.File(shaderDir, "$name.tmp")
+                assets.open("shaders/$name").use { input ->
+                    temporary.outputStream().use { output -> input.copyTo(output) }
                 }
+                check(temporary.renameTo(outFile)) { "Cannot replace shader $name" }
             }
 
             val modelDir = java.io.File(filesDir, "models")

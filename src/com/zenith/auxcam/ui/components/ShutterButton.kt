@@ -22,6 +22,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.Role
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
@@ -82,11 +85,13 @@ fun ShutterButton(
     Box(
         modifier = modifier
             .size(CameraSpacing.shutterTouch)
+            .semantics { contentDescription = if (enabled) "Take photo" else "Camera busy or unavailable" }
             .clickable(
                 interactionSource = interaction,
                 // No ripple: the ring/disc compression is the feedback.
                 indication = null,
                 enabled = enabled,
+                role = Role.Button,
                 onClick = {
                     haptics.capture()
                     onClick()

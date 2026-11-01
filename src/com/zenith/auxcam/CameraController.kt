@@ -40,7 +40,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import rikka.shizuku.Shizuku
 import java.io.File
 import java.io.FileOutputStream
-import android.media.MediaScannerConnection
 import java.io.RandomAccessFile
 import java.nio.channels.FileChannel
 import java.text.SimpleDateFormat
@@ -48,6 +47,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.TimeUnit
 import kotlin.math.exp
 import kotlin.math.roundToInt
 
@@ -195,8 +195,12 @@ class CameraController(
     val uiState: State<CameraUiState> get() = _uiState
 
     private val state: CameraUiState get() = _uiState.value
-    private inline fun update(block: (CameraUiState) -> CameraUiState) {
-        _uiState.value = block(_uiState.value)
+    private fun update(block: (CameraUiState) -> CameraUiState) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            _uiState.value = block(_uiState.value)
+        } else {
+            main.post { if (!disposed) _uiState.value = block(_uiState.value) }
+        }
     }
 
     // ── Camera plumbing ─────────────────────────────────────────────────────
@@ -211,10 +215,23 @@ class CameraController(
     private var stillReader: ImageReader? = null
 
     private var service: IAuxCamService? = null
-    private var surfaceHolder: SurfaceHolder? = null
+    private var serviceArgs: Shizuku.UserServiceArgs? = null
+    private var serviceBinding = false
+    @Volatile private var surfaceHolder: SurfaceHolder? = null
+    @Volatile private var engineReady = false
+    @Volatile private var disposed = false
+    @Volatile private var foreground = false
+    private var timerRunning = false
+    @Volatile private var captureState: CameraUiState? = null
+    private val captureTimeout = Runnable {
+        if (stillCaptureInProgress.getAndSet(false)) {
+            captureState = null
+            update { it.copy(captureBusy = false, status = "Capture timed out — try again") }
+        }
+    }
     private val stillCaptureInProgress = AtomicBoolean(false)
     private var matteSegmenter: DualMatteSegmenter? = null
-    private val latestMatte = ByteArray(256 * 256)
+    @Volatile private var latestMatte = ByteArray(256 * 256)
     @Volatile
     private var hasRealMatte = false
     private val matteExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
@@ -230,6 +247,16 @@ class CameraController(
 
     @Volatile
     private var latestDepth: ByteArray? = null
+    private val depthFrames = java.util.ArrayDeque<FrameData.DepthFrame>()
+    @Volatile private var frameGeneration = 0
+    @Volatile private var matteTimestampNs = 0L
+
+    private fun depthFor(timestamp: Long): ByteArray? = synchronized(depthFrames) {
+        if (currentLens == "0") FrameData.closestDepth(depthFrames, timestamp) else null
+    }
+
+    private fun matteFor(timestamp: Long): ByteArray? =
+        if (hasRealMatte && kotlin.math.abs(timestamp - matteTimestampNs) <= FrameData.MATTE_MAX_AGE_NS) latestMatte else null
 
     private var shutterClickNs = 0L
     private var shutterDispatchNs = 0L
@@ -251,9 +278,8 @@ class CameraController(
     private var lastSentZoom = 1f
     private var lastSentEvSteps = 0
     private val physicalLenses = mutableListOf<String>()
-    private var currentLens = "0"
+    @Volatile private var currentLens = "0"
     private var onTele = false
-    private var teleLensId: String? = "3"
     private var viewfinderGeometry = ViewfinderGeometry.defaultPortrait()
 
     private var started = false
@@ -273,6 +299,7 @@ class CameraController(
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
+        serviceBinding = false
         service = null
         update { it.copy(status = "Reconnecting…", sessionReady = false) }
     }
@@ -280,7 +307,11 @@ class CameraController(
     // ═══════════════════════════ LIFECYCLE ══════════════════════════════════
 
     fun start() {
-        if (started) return
+        foreground = true
+        if (started) {
+            if (!state.sessionReady) startStereoSession()
+            return
+        }
         started = true
 
         discoverLenses()
@@ -310,7 +341,7 @@ class CameraController(
         val filter = IntentFilter("com.zenith.auxcam.CAPTURE_STILL")
         try {
             if (Build.VERSION.SDK_INT >= 33) {
-                activity.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED)
+                activity.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
             } else {
                 @Suppress("UnspecifiedRegisterReceiverFlag")
                 activity.registerReceiver(receiver, filter)
@@ -330,10 +361,20 @@ class CameraController(
         }
     }
 
+    fun pause() {
+        foreground = false
+        timerRunning = false
+        main.removeCallbacks(timerTick)
+        try { service?.closeSession() } catch (e: RemoteException) { Log.w(TAG, "pause session", e) }
+        update { it.copy(sessionReady = false, captureBusy = stillCaptureInProgress.get(), status = "Camera paused") }
+    }
+
     fun dispose() {
+        if (disposed) return
+        disposed = true
+        foreground = false
+        engineReady = false
         main.removeCallbacksAndMessages(null)
-        io.shutdown()
-        matteExecutor.shutdown()
 
         captureReceiver?.let {
             try {
@@ -355,26 +396,38 @@ class CameraController(
         }
         thermalListener = null
 
+        try { service?.closeSession() } catch (e: RemoteException) { Log.w(TAG, "closeSession failed", e) }
+        service = null
+        colorReader?.setOnImageAvailableListener(null, null)
+        depthReader?.setOnImageAvailableListener(null, null)
+        stillReader?.setOnImageAvailableListener(null, null)
+        stopReaderThread()
+        stillThread?.quitSafely()
+        try { stillThread?.join() } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
+        stillThread = null
+        stillHandler = null
         colorReader?.close()
         depthReader?.close()
         stillReader?.close()
         colorReader = null
         depthReader = null
         stillReader = null
-
+        matteExecutor.shutdown()
+        // Inference owns its interpreter until the worker has finished.
         try {
-            service?.closeSession()
-        } catch (e: RemoteException) {
-            Log.w(TAG, "closeSession failed")
-        }
-        service = null
-
-        stopReaderThread()
+            if (matteExecutor.awaitTermination(5, TimeUnit.SECONDS)) matteSegmenter?.close()
+        } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
+        io.shutdown() // let an already queued save finish
 
         Shizuku.removeRequestPermissionResultListener(permissionListener)
         Shizuku.removeBinderReceivedListener(binderReceivedListener)
         Shizuku.removeBinderDeadListener(binderDeadListener)
 
+        serviceArgs?.let {
+            try { Shizuku.unbindUserService(it, this, true) }
+            catch (e: Exception) { Log.w(TAG, "Service unbind failed", e) }
+        }
+        serviceArgs = null
         native.destroyEngine()
         started = false
     }
@@ -410,8 +463,10 @@ class CameraController(
         viewfinderGeometry.assertMatchesSurface(width, height)
         Log.i(TAG, "ViewfinderGeometry derived: surface=${width}x${height}, working=${viewfinderGeometry.workingWidth}x${viewfinderGeometry.workingHeight}, cocRef=${viewfinderGeometry.cocReferenceWidth}")
         val ok = native.initEngine(holder.surface, width, height)
+        engineReady = ok
         Log.i(TAG, "nativeInitEngine -> $ok")
-        if (service != null) startStereoSession()
+        if (!ok) update { it.copy(status = "Camera engine unavailable", sessionReady = false) }
+        if (ok && service != null) startStereoSession()
     }
 
     override fun onPreviewSurfaceChanged(holder: SurfaceHolder) {
@@ -427,6 +482,7 @@ class CameraController(
     }
 
     override fun onPreviewSurfaceDestroyed(holder: SurfaceHolder) {
+        engineReady = false
         surfaceHolder = null
     }
 
@@ -452,23 +508,34 @@ class CameraController(
     }
 
     private fun bindUserService() {
+        if (disposed || serviceBinding || service != null) return
+        serviceBinding = true
         update { it.copy(status = "Binding service…") }
         val args = Shizuku.UserServiceArgs(
             ComponentName(activity.packageName, CameraUserService::class.java.name),
         )
             .daemon(false)
-            .version(2)
+            .version(3)
             .processNameSuffix("auxcam_privileged")
-        Shizuku.bindUserService(args, this)
+        serviceArgs = args
+        try { Shizuku.bindUserService(args, this) }
+        catch (e: Exception) {
+            serviceBinding = false
+            update { it.copy(status = "Could not bind camera service") }
+            Log.e(TAG, "Service binding failed", e)
+        }
     }
 
     override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+        serviceBinding = false
+        if (disposed) return
         service = binder?.let { IAuxCamService.Stub.asInterface(it) }
         update { it.copy(status = "Opening session…") }
         startStereoSession()
     }
 
     override fun onServiceDisconnected(name: ComponentName?) {
+        serviceBinding = false
         service = null
         update { it.copy(status = "Disconnected", sessionReady = false) }
     }
@@ -523,6 +590,7 @@ class CameraController(
     }
 
     private fun startStereoSession() {
+        if (!foreground || disposed || !engineReady) return
         val svc = service ?: return
         val holder = surfaceHolder ?: return
         val color = colorReader ?: return
@@ -535,7 +603,7 @@ class CameraController(
 
         try {
             svc.setCallback(object : IAuxCamCallback.Stub() {
-                override fun onSessionReady() { post { this@CameraController.onSessionReady() } }
+                override fun onSessionReady(cameraId: String?) { post { this@CameraController.onSessionReady(cameraId) } }
                 override fun onSessionError(msg: String?) { post { this@CameraController.onSessionError(msg) } }
                 override fun onStillCaptured() { post { this@CameraController.onStillCaptured() } }
                 override fun onStats(colorFps: Float, depthFps: Float, dt: Float) {
@@ -564,13 +632,24 @@ class CameraController(
     }
 
     private fun post(block: () -> Unit) {
-        main.post(block)
+        main.post { if (!disposed) block() }
     }
 
-    private fun onSessionReady() {
+    private fun onSessionReady(cameraId: String?) {
+        if (!foreground || disposed) return
         lensSwitching = false
+        val actualLens = if (cameraId == DeviceProfile.CAMERA_ID) "0" else cameraId ?: "0"
+        if (actualLens != currentLens) {
+            currentLens = actualLens
+            invalidateAuxiliaryFrames()
+        }
+        onTele = currentLens == "3"
+        if (onTele) native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
+        else native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
+        val actualZoom = if (currentLens == "2") 0.6f else if (currentLens == "3") state.zoom.coerceAtLeast(2f) else state.zoom.coerceAtLeast(1f)
         update {
             it.copy(
+                zoom = actualZoom,
                 status = "Ready",
                 sessionReady = true,
                 lensIndex = physicalLenses.indexOf(currentLens).coerceAtLeast(0),
@@ -580,7 +659,10 @@ class CameraController(
     }
 
     private fun onSessionError(msg: String?) {
-        update { it.copy(status = "Session error", sessionReady = false) }
+        timerRunning = false
+        main.removeCallbacks(timerTick)
+        finishCapture(msg ?: "Camera error")
+        update { it.copy(status = msg ?: "Session error", sessionReady = false) }
         Toast.makeText(activity, msg ?: "Camera error", Toast.LENGTH_LONG).show()
         if (lensSwitching) {
             lensSwitching = false
@@ -594,7 +676,7 @@ class CameraController(
     }
 
     private fun onStillCaptured() {
-        update { it.copy(status = "Saved to Photos") }
+        // Camera2 completion means a buffer arrived, not that storage succeeded.
     }
 
     private fun onStats(colorFps: Float, depthFps: Float, dt: Float) {
@@ -652,7 +734,7 @@ class CameraController(
             val nowMs = SystemClock.elapsedRealtime()
             val cadenceAllow = (nowMs - lastMatteDispatchMs >= 83L) // <= 12 Hz ceiling
 
-            if (seg != null && seg.isAvailable && cadenceAllow) {
+            if (state.mode == CaptureMode.Portrait && seg != null && seg.isAvailable && cadenceAllow) {
                 if (isMatteWorkerBusy.get()) {
                     matteDropCount5s++
                     native.notifyMatteDrop()
@@ -663,37 +745,33 @@ class CameraController(
                     }
                 } else if (isMatteWorkerBusy.compareAndSet(false, true)) {
                     lastMatteDispatchMs = nowMs
-                    val hwBuffer = try { image.hardwareBuffer } catch (t: Throwable) { null }
-                    if (hwBuffer != null) {
-                        native.acquireHardwareBuffer(hwBuffer)
-                        try {
-                            if (seg.preprocessFrame(image)) {
-                                matteExecutor.execute {
-                                    try {
-                                        if (seg.runInference()) {
-                                            seg.getLatestAlphaMatte(latestMatte)
+                    val generation = frameGeneration
+                    val sensorTimestamp = image.timestamp
+                    // preprocessFrame copies into model-owned tensors before
+                    // returning; the inference worker never needs a camera AHB.
+                    try {
+                        if (seg.preprocessFrame(image)) {
+                            matteExecutor.execute {
+                                try {
+                                    if (seg.runInference()) {
+                                        val matte = ByteArray(256 * 256)
+                                        seg.getLatestAlphaMatte(matte)
+                                        if (generation == frameGeneration && !disposed) {
+                                            latestMatte = matte
+                                            matteTimestampNs = sensorTimestamp
                                             hasRealMatte = true
                                         }
-                                    } catch (t: Throwable) {
-                                        Log.w(TAG, "Worker inference error: ${t.message}")
-                                    } finally {
-                                        native.releaseHardwareBuffer(hwBuffer)
-                                        hwBuffer.close()
-                                        isMatteWorkerBusy.set(false)
                                     }
+                                } catch (t: Throwable) {
+                                    Log.w(TAG, "Worker inference error: ${t.message}")
+                                } finally {
+                                    isMatteWorkerBusy.set(false)
                                 }
-                            } else {
-                                native.releaseHardwareBuffer(hwBuffer)
-                                hwBuffer.close()
-                                isMatteWorkerBusy.set(false)
                             }
-                        } catch (t: Throwable) {
-                            native.releaseHardwareBuffer(hwBuffer)
-                            hwBuffer.close()
-                            isMatteWorkerBusy.set(false)
-                        }
-                    } else {
+                        } else isMatteWorkerBusy.set(false)
+                    } catch (t: Throwable) {
                         isMatteWorkerBusy.set(false)
+                        Log.w(TAG, "Matte preprocessing failed", t)
                     }
                 }
             }
@@ -716,15 +794,15 @@ class CameraController(
             val holder = surfaceHolder
             if (buffer != null) {
                 try {
-                    if (holder != null && holder.surface.isValid) {
-                        val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
+                    if (engineReady && foreground && holder != null && holder.surface.isValid) {
+                        val targetFarFieldPx = if (state.mode == CaptureMode.Portrait) fStopToTargetFarFieldPx(state.fStop, currentLens) else 0f
                         val tEng0 = SystemClock.elapsedRealtimeNanos()
                         native.renderFrame(
                             buffer,
-                            latestDepth,
+                            depthFor(image.timestamp),
                             DeviceProfile.DEPTH_WIDTH,
                             DeviceProfile.DEPTH_HEIGHT,
-                            if (hasRealMatte) latestMatte else null,
+                            matteFor(image.timestamp),
                             256,
                             256,
                             state.fStop,
@@ -760,10 +838,14 @@ class CameraController(
     private fun onDepthImage(reader: ImageReader) {
         val image = reader.acquireLatestImage() ?: return
         try {
-            val buffer = image.planes[0].buffer
-            val bytes = ByteArray(buffer.remaining())
-            buffer.get(bytes)
+            // Y8 rows may be padded. JNI expects tightly packed width × height bytes.
+            val plane = image.planes[0]
+            val bytes = FrameData.packPlane(plane.buffer, image.width, image.height, plane.rowStride, plane.pixelStride)
             latestDepth = bytes
+            synchronized(depthFrames) {
+                depthFrames.addLast(FrameData.DepthFrame(image.timestamp, bytes))
+                while (depthFrames.size > 8) depthFrames.removeFirst()
+            }
         } catch (t: Throwable) {
             Log.e(TAG, "depth read failed: ${t.message}")
         } finally {
@@ -775,8 +857,12 @@ class CameraController(
         val t2 = SystemClock.elapsedRealtimeNanos()
         Log.i("TIMING_FREEZE", "capture_buffer_received: $t2 ns")
         val image = reader.acquireLatestImage() ?: return
+        val frozen = captureState ?: run { image.close(); return }
+        main.removeCallbacks(captureTimeout)
+        val frozenW = image.width
+        val frozenH = image.height
         var outPath: String? = null
-        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         var t4 = 0L
         val shutterNs = shutterClickNs
         try {
@@ -793,32 +879,32 @@ class CameraController(
                 if (!dir.exists()) dir.mkdirs()
                 outPath = File(dir, "AUXCAM_$stamp.rgba").absolutePath
 
-                if (state.raw) dumpRawPlanes(image, dir, stamp)
+                // Sensor RAW is not available from this YUV stream.
                 // 50MP vs 12MP is decided by the capture request the service
                 // builds; log the intent here so a mismatch is visible.
                 Log.i(TAG, "capture resolution=${state.resolution.label}")
 
-                val targetFarFieldPx = fStopToTargetFarFieldPx(state.fStop, currentLens)
+                val targetFarFieldPx = if (frozen.mode == CaptureMode.Portrait) fStopToTargetFarFieldPx(frozen.fStop, currentLens) else 0f
                 val timestamps = LongArray(4)
-                native.processStill(
+                val processed = try { native.processStill(
                     buffer,
-                    latestDepth,
+                    depthFor(image.timestamp),
                     DeviceProfile.DEPTH_WIDTH,
                     DeviceProfile.DEPTH_HEIGHT,
-                    latestMatte,
+                    if (frozen.mode == CaptureMode.Portrait) matteFor(image.timestamp) else null,
                     256,
                     256,
-                    state.fStop,
+                    frozen.fStop,
                     targetFarFieldPx,
                     outPath,
                     timestamps,
-                )
+                ) } finally { buffer.close() }
+                check(processed) { "Native capture processing failed" }
                 val fenceCompleteNs = timestamps[1]
                 t4 = if (fenceCompleteNs > 0L) fenceCompleteNs else SystemClock.elapsedRealtimeNanos()
                 val t3Gpu = if (timestamps[3] > 0L) timestamps[3] else t3
                 Log.i("TIMING_FREEZE", "composite_complete: $t4 ns")
                 gpuElapsedNs = timestamps[0]
-                buffer.close()
 
                 val dispatchNs = shutterDispatchNs
                 val dT1 = (dispatchNs - shutterNs) / 1_000_000
@@ -865,16 +951,19 @@ class CameraController(
             }
         } catch (t: Throwable) {
             Log.e(TAG, "still processing failed", t)
+            outPath?.let { File(it).delete() }
+            outPath = null
         } finally {
-            stillCaptureInProgress.set(false)
             image.close()
         }
 
         // L.4: Freeze requested dimensions and expected byte length at capture request time
-        val (frozenW, frozenH) = DeviceProfile.stillSize(state.resolution)
         val expectedBytes = frozenW.toLong() * frozenH.toLong() * 4L
 
-        outPath?.let { path ->
+        val path = outPath
+        if (path == null) {
+            finishCapture("Capture failed — try again")
+        } else {
             io.execute {
                 saveStillToMediaStore(path, stamp, shutterNs, t4, frozenW, frozenH, expectedBytes)
             }
@@ -893,6 +982,7 @@ class CameraController(
         val rgbaFile = File(rgbaPath)
         if (!rgbaFile.exists()) {
             Log.e(TAG, "saveStillToMediaStore: RGBA file missing at $rgbaPath")
+            finishCapture("Capture output missing")
             return
         }
 
@@ -911,13 +1001,13 @@ class CameraController(
                     actualBytes - expectedBytes
                 )
             )
+            rgbaFile.delete()
+            finishCapture("Capture size mismatch — photo not saved")
             return
         }
 
         // 1. Build thumbnail for the viewfinder UI
-        buildThumbnail(rgbaPath)?.let { bitmap ->
-            post { onThumbnailReady(bitmap) }
-        }
+        val thumbnail = buildThumbnail(rgbaPath, frozenW, frozenH)
 
         // 2. MediaStore insertion
         val srcW = frozenW
@@ -930,6 +1020,7 @@ class CameraController(
         }
 
         var destUri: Uri? = null
+        var saved = false
         try {
             destUri = activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
             if (destUri == null) {
@@ -937,43 +1028,38 @@ class CameraController(
                 return
             }
 
-            // 3. Compress RGBA buffer to JPEG quality 98
+            // 3. Encode the sharp/bokeh output without adding a sharpening or denoising pass.
             val bitmap = Bitmap.createBitmap(srcW, srcH, Bitmap.Config.ARGB_8888)
-            RandomAccessFile(rgbaFile, "r").use { raf ->
-                val channel = raf.channel
-                val map = channel.map(FileChannel.MapMode.READ_ONLY, 0, rgbaFile.length())
-                bitmap.copyPixelsFromBuffer(map)
-            }
-
-            val quality = if (forceJpeg98) 98 else CAPTURE_JPEG_QUALITY
-            activity.contentResolver.openOutputStream(destUri)?.use { outStream ->
-                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, outStream)
-                outStream.flush()
-            }
             try {
-                val edgeGatedFile = File("/sdcard/Pictures/NotiCam/edge_gated.png")
-                edgeGatedFile.parentFile?.mkdirs()
-                FileOutputStream(edgeGatedFile).use { fos ->
-                    bitmap.compress(Bitmap.CompressFormat.PNG, 100, fos)
-                    fos.flush()
+                RandomAccessFile(rgbaFile, "r").use { raf ->
+                    val channel = raf.channel
+                    val map = channel.map(FileChannel.MapMode.READ_ONLY, 0, rgbaFile.length())
+                    bitmap.copyPixelsFromBuffer(map)
                 }
-            } catch (t: Throwable) {
-                Log.w(TAG, "Failed to save /sdcard/Pictures/NotiCam/edge_gated.png: ${t.message}")
-            }
-            bitmap.recycle()
-
-            // 4. Set EXIF orientation (sensor orientation is 90 deg)
-            try {
-                activity.contentResolver.openFileDescriptor(destUri, "rw")?.use { pfd ->
-                    val exif = ExifInterface(pfd.fileDescriptor)
-                    exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_ROTATE_90.toString())
-                    exif.saveAttributes()
+                val quality = if (forceJpeg98) 98 else CAPTURE_JPEG_QUALITY
+                val output = checkNotNull(activity.contentResolver.openOutputStream(destUri)) { "Cannot open photo output" }
+                output.use { outStream ->
+                    check(bitmap.compress(Bitmap.CompressFormat.JPEG, quality, outStream)) { "JPEG encoding failed" }
+                    outStream.flush()
                 }
-            } catch (te: Throwable) {
-                Log.w(TAG, "Failed to write EXIF attributes: ${te.message}")
+            } finally {
+                bitmap.recycle()
+            }
+            // EXIF orientation is required: the pixel buffer is sensor-landscape.
+            val descriptor = checkNotNull(activity.contentResolver.openFileDescriptor(destUri, "rw")) {
+                "Cannot open photo metadata"
+            }
+            descriptor.use { pfd ->
+                val exif = ExifInterface(pfd.fileDescriptor)
+                exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_ROTATE_90.toString())
+                exif.saveAttributes()
             }
 
+            val published = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+            check(activity.contentResolver.update(destUri, published, null, null) > 0) { "Cannot publish photo" }
+            saved = true
             latestPhotoUri = destUri
+            post { thumbnail?.let { onThumbnailReady(it) } }
             val t5 = SystemClock.elapsedRealtimeNanos()
             val fileSize = try {
                 activity.contentResolver.openFileDescriptor(destUri, "r")?.use { it.statSize } ?: -1L
@@ -995,17 +1081,11 @@ class CameraController(
         } catch (t: Throwable) {
             Log.e(TAG, "Failed to encode/persist JPEG to MediaStore", t)
         } finally {
-            destUri?.let { uri ->
-                try {
-                    val clearPending = ContentValues().apply {
-                        put(MediaStore.Images.Media.IS_PENDING, 0)
-                    }
-                    activity.contentResolver.update(uri, clearPending, null, null)
-                    Log.i(TAG, "MediaStore row IS_PENDING set to 0 for $uri")
-                } catch (t: Throwable) {
-                    Log.e(TAG, "Failed to clear IS_PENDING on $uri", t)
-                }
+            if (!saved) destUri?.let { uri ->
+                try { activity.contentResolver.delete(uri, null, null) }
+                catch (t: Throwable) { Log.e(TAG, "Failed to remove incomplete photo", t) }
             }
+            finishCapture(if (saved) "Saved to Photos" else "Could not save photo — check storage")
             if (!DEBUG_DUMP_RGBA) {
                 try {
                     rgbaFile.delete()
@@ -1014,29 +1094,16 @@ class CameraController(
         }
     }
 
-    private fun dumpRawPlanes(image: android.media.Image, dir: File, stamp: String) {
-        try {
-            val yBuffer = image.planes[0].buffer
-            val yBytes = ByteArray(yBuffer.remaining())
-            yBuffer.get(yBytes)
-            File(dir, "AUXCAM_${stamp}_raw_y.bin").writeBytes(yBytes)
-            latestDepth?.let { File(dir, "AUXCAM_${stamp}_depth.y8").writeBytes(it) }
-        } catch (t: Throwable) {
-            Log.w(TAG, "raw dump note: ${t.message}")
-        }
-    }
-
     /**
      * Samples the engine's raw RGBA dump straight off disk. A full-res 4K frame is
      * ~50 MB, so we seek row by row and only ever keep a 168 × 126 thumbnail —
      * the heap never sees the full bitmap.
      */
-    private fun buildThumbnail(rgbaPath: String): ImageBitmap? {
+    private fun buildThumbnail(rgbaPath: String, srcW: Int, srcH: Int): ImageBitmap? {
         var raf: RandomAccessFile? = null
         return try {
             val file = File(rgbaPath)
-            val (srcW, srcH) = DeviceProfile.stillSize(state.resolution)
-            if (!file.exists() || file.length() < srcW.toLong() * srcH * 2L) return null
+            if (!file.exists() || file.length() < srcW.toLong() * srcH * 4L) return null
 
             raf = RandomAccessFile(file, "r")
             val pixels = IntArray(THUMB_W * THUMB_H)
@@ -1085,7 +1152,15 @@ class CameraController(
 
     // ═══════════════════════════ CAPTURE ═════════════════════════════════════
 
+    private fun finishCapture(message: String) {
+        main.removeCallbacks(captureTimeout)
+        stillCaptureInProgress.set(false)
+        captureState = null
+        post { update { it.copy(captureBusy = false, status = message) } }
+    }
+
     private fun triggerCapture(highQuality: Boolean, enableZsl: Boolean) {
+        if (!foreground || !state.sessionReady || disposed) return
         val svc = service ?: run {
             Log.e(TAG, "triggerCapture failed: service is null")
             update { it.copy(status = "Camera not ready") }
@@ -1102,13 +1177,15 @@ class CameraController(
         }
         lastShutterTriggerNs = nowNs
         Log.i(TAG, "triggerCapture: highQuality=$highQuality, enableZsl=$enableZsl")
-        main.postDelayed({ stillCaptureInProgress.set(false) }, 4000L) // Safety watchdog
+        captureState = state
+        main.postDelayed(captureTimeout, 10_000L)
         maxPreviewGapNsDuringCapture = 0L
         capturePreviewFrames = 0
         shutterClickNs = SystemClock.elapsedRealtimeNanos()
         Log.i("TIMING_FREEZE", "shutter_press: $shutterClickNs ns")
         update {
             it.copy(
+                captureBusy = true,
                 capturePulse = it.capturePulse + 1,
                 status = "Capturing…",
             )
@@ -1118,19 +1195,38 @@ class CameraController(
             shutterDispatchNs = SystemClock.elapsedRealtimeNanos()
             Log.i("TIMING_FREEZE", "shutter_dispatched: $shutterDispatchNs ns")
         } catch (e: RemoteException) {
-            stillCaptureInProgress.set(false)
+            finishCapture("Capture request failed")
             Log.e(TAG, "triggerStill failed", e)
         }
     }
 
-    private fun startTimerCapture(remaining: Int) {
-        if (remaining <= 0) {
-            triggerCapture(state.mode.highQualityNr, true)
-            return
+    private var timerRemaining = 0
+    private val timerTick = object : Runnable {
+        override fun run() {
+            if (!timerRunning || !foreground) return
+            if (!state.sessionReady) {
+                timerRunning = false
+                update { it.copy(captureBusy = false, status = "Camera not ready") }
+                return
+            }
+            if (timerRemaining <= 0) {
+                timerRunning = false
+                update { it.copy(captureBusy = false) }
+                triggerCapture(false, true)
+            } else {
+                update { it.copy(status = "${timerRemaining}s", captureBusy = true) }
+                timerRemaining--
+                haptic()
+                main.postDelayed(this, 1000L)
+            }
         }
-        update { it.copy(status = "${remaining}s") }
-        haptic()
-        main.postDelayed({ startTimerCapture(remaining - 1) }, 1000L)
+    }
+
+    private fun startTimerCapture(remaining: Int) {
+        if (timerRunning || stillCaptureInProgress.get() || !state.sessionReady) return
+        timerRunning = true
+        timerRemaining = remaining
+        timerTick.run()
     }
 
     // ═══════════════════════════ ACTIONS ═════════════════════════════════════
@@ -1162,7 +1258,8 @@ class CameraController(
     }
 
     override fun onModeSelected(mode: CaptureMode) {
-        if (mode == state.mode) return
+        if (mode == state.mode || state.captureBusy) return
+        invalidateAuxiliaryFrames()
         update { it.copy(mode = mode) }
         haptic()
     }
@@ -1206,68 +1303,48 @@ class CameraController(
         if (state.zoomDialVisible) armDialHide()
     }
 
+    private fun invalidateAuxiliaryFrames() {
+        hasRealMatte = false
+        frameGeneration++
+        synchronized(depthFrames) { depthFrames.clear() }
+        latestDepth = null
+    }
+
     private fun applyZoom(requested: Float, force: Boolean) {
-        val clamped = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
-        if (!force && kotlin.math.abs(clamped - state.zoom) < 0.005f) return
-
-        val prevZoom = state.zoom
-        update { it.copy(zoom = clamped) }
-
-        // Lens switching:
-        // Ultra-wide (<0.9x): switch to ultra-wide lens "2"
-        // Telephoto (>=2.0x with telephoto enabled): switch to tele lens "3"
-        // Otherwise: main camera "0" / "5"
-        if (clamped < 0.9f) {
-            if (onTele) onTele = false
-            try {
-                service?.setPhysicalLens("2")
-            } catch (e: RemoteException) {
-                Log.w(TAG, "switch to UW failed")
-            }
-        } else if (state.telephoto && clamped >= TELE_THRESHOLD) {
-            if (!onTele) switchToTele()
-        } else {
-            if (onTele) switchToMain()
-            else if (prevZoom < 0.9f) {
-                try {
-                    service?.setPhysicalLens("0")
-                } catch (e: RemoteException) {
-                    Log.w(TAG, "revert from UW failed")
-                }
-            }
+        if (!requested.isFinite() || state.captureBusy || !foreground || disposed) return
+        val zoom = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
+        if (!force && kotlin.math.abs(zoom - state.zoom) < 0.005f) return
+        val lens = when {
+            zoom < 0.9f -> "2"
+            state.telephoto && zoom >= TELE_THRESHOLD -> "3"
+            else -> "0"
         }
-
-        // Pinch produces dozens of events per gesture — only forward real changes.
-        if (force || kotlin.math.abs(clamped - lastSentZoom) > 0.02f) {
-            lastSentZoom = clamped
-            try {
-                service?.setZoom(clamped)
-            } catch (e: RemoteException) {
-                Log.w(TAG, "setZoom failed")
-            }
+        update { it.copy(zoom = zoom) }
+        if (lens != currentLens) selectLens(lens)
+        if (force || kotlin.math.abs(zoom - lastSentZoom) > 0.02f) {
+            lastSentZoom = zoom
+            try { service?.setZoom(zoom) } catch (e: RemoteException) { Log.w(TAG, "setZoom failed", e) }
         }
     }
 
-    private fun switchToTele() {
-        onTele = true
-        try {
-            service?.setPhysicalLens("3")
-            Log.i(TAG, "tele lens 3 engaged")
-        } catch (e: RemoteException) {
-            Log.w(TAG, "tele switch failed")
-            onTele = false
+    private fun selectLens(lens: String) {
+        if (state.captureBusy || lens == currentLens) return
+        currentLens = lens
+        onTele = lens == "3"
+        lensSwitching = true
+        invalidateAuxiliaryFrames()
+        if (onTele) native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
+        else native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
+        update { it.copy(sessionReady = false, status = "Switching lens…") }
+        try { service?.setPhysicalLens(lens) }
+        catch (e: RemoteException) {
+            lensSwitching = false
+            update { it.copy(status = "Lens switch failed") }
         }
     }
 
-    private fun switchToMain() {
-        onTele = false
-        try {
-            service?.setPhysicalLens("0")
-            Log.i(TAG, "main lens engaged")
-        } catch (e: RemoteException) {
-            Log.w(TAG, "main lens revert failed")
-        }
-    }
+    private fun switchToTele() = selectLens("3")
+    private fun switchToMain() = selectLens("0")
 
     /**
      * Brings the radial wheel up and re-arms its timer.
@@ -1298,12 +1375,14 @@ class CameraController(
     }
 
     override fun onApertureChanged(fStop: Float) {
+        if (!fStop.isFinite()) return
         val clamped = fStop.coerceIn(FSTOPS.first(), FSTOPS.last())
         if (kotlin.math.abs(clamped - state.fStop) < 0.001f) return
         update { it.copy(fStop = clamped) }
     }
 
     override fun onEvChanged(ev: Float) {
+        if (!ev.isFinite()) return
         val clamped = ev.coerceIn(-4f, 4f)
         if (kotlin.math.abs(clamped - state.ev) < 0.01f) return
         update { it.copy(ev = clamped) }
@@ -1320,36 +1399,13 @@ class CameraController(
     }
 
     override fun onResolutionToggle() {
-        val next = state.resolution.next()
-        update { it.copy(resolution = next, status = "${next.label} mode") }
-        haptic()
-        // The still stream is sized when the readers are created, so the session
-        // has to be rebuilt for 50 MP to actually take effect.
-        io.execute {
-            post { recreateStillReaderAndSession() }
-        }
-    }
-
-    private fun recreateStillReaderAndSession() {
-        try {
-            stillReader?.close()
-            val (w, h) = DeviceProfile.stillSize(state.resolution)
-            stillReader = ImageReader.newInstance(
-                w,
-                h,
-                ImageFormat.YUV_420_888,
-                2,
-                HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE,
-            ).also { reader ->
-                reader.setOnImageAvailableListener({ r -> onStillImage(r) }, stillHandler ?: readerHandler)
-            }
-            startStereoSession()
-        } catch (t: Throwable) {
-            Log.w(TAG, "still reader recreate failed: ${t.message}")
-        }
+        // Native readback is currently fixed at 4080 × 3072. Never advertise a
+        // 50 MP capture that is silently downsampled or rejected after shutter.
+        update { it.copy(status = "50 MP unavailable in the current capture pipeline") }
     }
 
     override fun onTelephotoToggle() {
+        if (state.captureBusy || !state.sessionReady) return
         val next = !state.telephoto
         update { it.copy(telephoto = next) }
         haptic()
@@ -1361,14 +1417,11 @@ class CameraController(
     }
 
     override fun onFrameRatioCycle() {
-        update { it.copy(frameRatio = it.frameRatio.next()) }
-        haptic()
+        update { it.copy(status = "Capture uses the native 4:3 sensor frame") }
     }
 
     override fun onFrameRatioSelected(ratio: FrameRatio) {
-        if (state.frameRatio == ratio) return
-        update { it.copy(frameRatio = ratio) }
-        haptic()
+        update { it.copy(frameRatio = FrameRatio.FourThree, status = "Capture uses the native 4:3 sensor frame") }
     }
 
     override fun onFocusLock() {
@@ -1392,6 +1445,7 @@ class CameraController(
     }
 
     override fun onManualFocusChanged(fraction: Float) {
+        if (!fraction.isFinite()) return
         val clamped = fraction.coerceIn(0f, 1f)
         update { it.copy(manualFocus = true, focusFraction = clamped) }
         try {
@@ -1417,8 +1471,7 @@ class CameraController(
     }
 
     override fun onRawToggle() {
-        update { it.copy(raw = !it.raw) }
-        haptic()
+        update { it.copy(raw = false, status = "Sensor RAW / DNG is not supported yet") }
     }
 
     override fun onTimerCycle() {
@@ -1432,6 +1485,7 @@ class CameraController(
     }
 
     override fun onShutterClick() {
+        if (state.captureBusy || !state.sessionReady) return
         Log.i(TAG, "onShutterClick called, sessionReady=${state.sessionReady}")
         if (state.timerSeconds > 0) {
             startTimerCapture(state.timerSeconds)
@@ -1508,40 +1562,14 @@ class CameraController(
     }
 
     override fun onSwitchLens() {
-        if (physicalLenses.size < 2) return
-        val nextIndex = (physicalLenses.indexOf(currentLens) + 1).mod(physicalLenses.size)
-        currentLens = physicalLenses[nextIndex]
-        lensSwitching = true
-        lastSentZoom = 1f
-        // Optical constants: 1x Wide (5.56mm, 8.16mm, f/1.88) vs 2x Tele (11.12mm, 5.80mm, f/2.40)
-        if (nextIndex == 1) {
-            native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
-        } else {
-            native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
-        }
-        update {
-            it.copy(
-                zoom = 1f,
-                lensIndex = nextIndex,
-                status = "Lens ${nextIndex + 1}/${physicalLenses.size}",
-            )
-        }
+        if (state.captureBusy || !state.sessionReady) return
+        val lens = if (currentLens == "0") "2" else if (currentLens == "2") "3" else "0"
+        val zoom = if (lens == "2") 0.6f else if (lens == "3") 2f else 1f
+        update { it.copy(telephoto = lens == "3", zoom = zoom) }
+        selectLens(lens)
+        lastSentZoom = zoom
+        try { service?.setZoom(zoom) } catch (e: RemoteException) { Log.w(TAG, "lens zoom failed", e) }
         haptic()
-        try {
-            service?.setPhysicalLens(currentLens)
-        } catch (e: RemoteException) {
-            Log.w(TAG, "setPhysicalLens failed: fallback to 1x")
-            lensSwitching = false
-            currentLens = physicalLenses[0]
-            native.setCameraOpticalParams(5.56f, 8.16f, 1.88f)
-            update {
-                it.copy(
-                    zoom = 1f,
-                    lensIndex = 0,
-                    status = "1x (Wide)",
-                )
-            }
-        }
     }
 
     /**
@@ -1640,15 +1668,14 @@ class CameraController(
             Log.w(TAG, "discoverLenses: ${t.message}")
         }
 
+        // These are the device IDs used by the privileged CMF service, not
+        // indices into lexically sorted physical IDs of a logical camera.
+        if (DeviceProfile.isTargetDevice()) {
+            physicalLenses.clear()
+            physicalLenses.addAll(listOf("0", "2", "3"))
+        }
         val defaultIndex = physicalLenses.indexOf("0")
-        currentLens = if (defaultIndex >= 0) "0" else physicalLenses.firstOrNull() ?: "0"
-
-        // The CMF Phone 2 Pro exposes main + ultra-wide + tele behind camera id 5.
-        // Pick the tele as the highest physical id that is not the active one; the
-        // fallback keeps tele-assist inert on devices that only have two lenses.
-        teleLensId = physicalLenses
-            .filter { it != currentLens }
-            .maxOrNull()
+        currentLens = "0"
         update {
             it.copy(
                 lensCount = physicalLenses.size.coerceAtLeast(1),

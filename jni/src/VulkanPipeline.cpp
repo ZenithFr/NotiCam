@@ -1011,7 +1011,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             }
         }
         float validFrac = (totalDepthPx > 0) ? (static_cast<float>(validBytes) / totalDepthPx) : 0.0f;
-        const char* branch = hasDepthSignal ? "real-depth" : "ellipse";
+        const char* branch = hasDepthSignal ? "real-depth" : "matte-or-sharp";
 
         uint32_t keyerAlphaLt005 = 0;
         for (uint32_t i = 0; i < alphaLowSize; ++i) {
@@ -1331,24 +1331,18 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             sLastFocusLogHold = tsNowFocus;
             LOGI("FOCUS s1=%.2fm confidentPct=0.00 source=hold", mOpticalParams.s1FocusM);
         }
-        for (uint32_t y = 0; y < mStillH; ++y) {
-            for (uint32_t x = 0; x < mStillW; ++x) {
-                float dx = (x - cx);
-                float dy = (y - cy) * 1.3f;
-                float dist = std::sqrt(dx * dx + dy * dy);
-                float normDist = dist / radiusFg;
-                float alpha = 1.0f - std::min(1.0f, std::max(0.0f, (normDist - 0.75f) / 0.25f));
-                float z_m = (alpha > 0.5f) ? 0.6f : (0.6f + (1.0f - alpha) * 2.9f);
-                depthDst[y * mStillW + x] = z_m;
-                alphaDst[y * mStillW + x] = static_cast<uint8_t>(alpha * 255.0f);
-            }
-        }
+        // No disparity: matte-only background blur if a real matte exists;
+        // otherwise presentation bypasses bokeh. Never invent a central subject.
+        std::fill(depthDst, depthDst + mStillW * mStillH, 10.0f);
+        std::fill(alphaDst, alphaDst + mStillW * mStillH, 0);
     }
     vkUnmapMemory(mDevice, mUploadStagingMem);
 
     // 4. Update descriptor sets
     uint32_t currentPubIdx = mPublishedAlphaIdx.load(std::memory_order_acquire);
-    VkImageView curViewAlphaLow = (currentPubIdx == 0) ? mViewAlphaA : mViewAlphaB;
+    // Bind the image receiving THIS frame's upload, not the last published
+    // image. Sampling a previous matte with new depth causes moving-edge halos.
+    VkImageView curViewAlphaLow = (currentPubIdx == 0) ? mViewAlphaB : mViewAlphaA;
     if (curViewAlphaLow == VK_NULL_HANDLE) curViewAlphaLow = mViewAlphaLow;
 
     VkDescriptorImageInfo descYuv{ VK_NULL_HANDLE, importedView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
@@ -1592,10 +1586,10 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
     uint32_t dW = (depthW > 0) ? depthW : 448u;
     uint32_t dH = (depthH > 0) ? depthH : 288u;
-    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, (float)mStillW };
-    AlphaPushConstants pcAlpha{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u), 0u, 0u, 0u, 2u, dW, dH };
-    GatherPushConstants pcGather{ mStillW, mStillH, 32, 1.2f, 40.0f, 0 };
-    CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, kPreviewRotate90, 0 };
+    CocPushConstants pcCoc{ mStillW, mStillH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1, targetFarFieldPx, 720.0f };
+    AlphaPushConstants pcAlpha{ mPreviewW, mPreviewH, s1, (hasRealAlpha ? 0u : 1u), 0, (isDisableGuided ? 1u : 0u), (hasDepthSignal ? 0u : 1u), 0u, 0u, 2u, dW, dH };
+    GatherPushConstants pcGather{ mStillW, mStillH, 16, 1.0f, 0.0f, 0 };
+    CompositePushConstants pcComp{ mSwapchainExtent.width, mSwapchainExtent.height, (kPreviewRotate90 | ((targetFarFieldPx == 0.0f || (!hasDepthSignal && !hasRealAlpha)) ? 2 : 0)), 0 };
 
     VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
 
@@ -2891,6 +2885,14 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         }
     }
 
+    AHardwareBuffer_Desc captureDesc{};
+    AHardwareBuffer_describe(colorBuffer, &captureDesc);
+    if (captureDesc.width != mFullW || captureDesc.height != mFullH) {
+        LOGE("Unsupported still dimensions: %ux%u (expected %ux%u)",
+             captureDesc.width, captureDesc.height, mFullW, mFullH);
+        return false;
+    }
+
     auto tStart = std::chrono::high_resolution_clock::now();
 
     // 1. Zero-copy import of 4080x3072 YUV AHardwareBuffer
@@ -3047,20 +3049,8 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
             }
         }
     } else {
-        for (uint32_t y = 0; y < mStillGatherH; ++y) {
-            for (uint32_t x = 0; x < mStillGatherW; ++x) {
-                float dx = (x - cx);
-                float dy = (y - cy) * 1.3f;
-                float dist = std::sqrt(dx * dx + dy * dy);
-                float normDist = dist / radiusFg;
-                float alpha = 1.0f - std::min(1.0f, std::max(0.0f, (normDist - 0.75f) / 0.25f));
-                float z_m = (alpha > 0.5f) ? 0.6f : (0.6f + (1.0f - alpha) * 2.9f);
-                depthDst[y * mStillGatherW + x] = z_m;
-                if (!hasRealAlpha) {
-                    alphaDst[y * mStillGatherW + x] = static_cast<uint8_t>(alpha * 255.0f);
-                }
-            }
-        }
+        std::fill(depthDst, depthDst + mStillGatherW * mStillGatherH, 10.0f);
+        if (!hasRealAlpha) std::fill(alphaDst, alphaDst + mStillGatherW * mStillGatherH, 0);
     }
     vkUnmapMemory(mDevice, mUploadStagingMemStill);
 
@@ -3176,9 +3166,9 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     uint32_t gxWork = (mStillGatherW + 15) / 16;
     uint32_t gyWork = (mStillGatherH + 15) / 16;
 
-    CocPushConstants pcCoc{ mStillGatherW, mStillGatherH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1Still, targetFarFieldPx, (float)mStillGatherW };
-    GatherPushConstants pcGather{ mStillGatherW, mStillGatherH, 32, 1.2f, 40.0f, 0 };
-    CompositePushConstants pcComp{ mFullW, mFullH, 0, 0 };
+    CocPushConstants pcCoc{ mStillGatherW, mStillGatherH, mOpticalParams.focalLengthMm, fStop, mOpticalParams.sensorWidthMm, s1Still, targetFarFieldPx, 720.0f };
+    GatherPushConstants pcGather{ mStillGatherW, mStillGatherH, 32, 1.0f, 0.0f, 0 };
+    CompositePushConstants pcComp{ mFullW, mFullH, (targetFarFieldPx == 0.0f || (!hasDepthSignal && !hasRealAlpha)) ? 2 : 0, 0 };
 
     VkMemoryBarrier memBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr, VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT };
 
@@ -3307,7 +3297,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         }
 
         // 1. Guided Filter Alpha Pass on this tile (edgeRefine = 0 for still)
-        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u), 0u, 0u, 0u, 0u, (depthW > 0 ? depthW : 448u), (depthH > 0 ? depthH : 288u) };
+        AlphaPushConstants pcAlphaSlice{ mFullW, mFullH, s1Still, (hasRealAlpha ? 0u : 1u), s * compSliceH, (sDisableGuided ? 1u : 0u), (hasDepthSignal ? 0u : 1u), 0u, 0u, 0u, (depthW > 0 ? depthW : 448u), (depthH > 0 ? depthH : 288u) };
         vkCmdBindPipeline(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipeAlpha);
         vkCmdBindDescriptorSets(cCmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPlAlpha, 0, 1, &mSetAlphaStill, 0, nullptr);
         vkCmdPushConstants(cCmd, mPlAlpha, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(AlphaPushConstants), &pcAlphaSlice);
@@ -3393,25 +3383,32 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     LOGI("GPU Timestamps: CoC=%.2f ms, 32-tap Gather=%.2f ms, 4K GuidedFilter=%.2f ms, 4K Comp+StreamingCopy=%.2f ms | Total Compute=%.2f ms | Fence Wait=%ld ms",
          dCoc, dGather, dGuidedTotal, dCompAndCopy, dTotalCompute, submitToFenceMs);
 
-    // 4. If outFilePath provided, write 50.1 MB buffer to storage and close (UX Gate)
+    // Persist the complete readback or report failure. write() may be short.
     auto tFileClosed = tBufferComplete;
+    bool outputOk = true;
     if (outFilePath != nullptr && strlen(outFilePath) > 0) {
         void* mappedOut = nullptr;
-        VkResult resMap = vkMapMemory(mDevice, mReadbackMem, 0, mFullW * mFullH * 4, 0, &mappedOut);
-        if (resMap != VK_SUCCESS || mappedOut == nullptr) {
-            LOGE("vkMapMemory failed on mReadbackMem: %d", resMap);
+        const size_t size = static_cast<size_t>(mFullW) * mFullH * 4;
+        VkResult resMap = vkMapMemory(mDevice, mReadbackMem, 0, size, 0, &mappedOut);
+        outputOk = resMap == VK_SUCCESS && mappedOut != nullptr;
+        if (outputOk) {
+            int fd = open(outFilePath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            outputOk = fd >= 0;
+            size_t written = 0;
+            while (outputOk && written < size) {
+                ssize_t n = write(fd, static_cast<const uint8_t*>(mappedOut) + written, size - written);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) { outputOk = false; break; }
+                written += static_cast<size_t>(n);
+            }
+            if (fd >= 0 && close(fd) != 0) outputOk = false;
+            vkUnmapMemory(mDevice, mReadbackMem);
         }
-        int fd = open(outFilePath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-        if (fd >= 0 && mappedOut != nullptr) {
-            write(fd, mappedOut, mFullW * mFullH * 4);
-            close(fd);
-            tFileClosed = std::chrono::high_resolution_clock::now();
-            long writeMs = std::chrono::duration_cast<std::chrono::milliseconds>(tFileClosed - tBufferComplete).count();
-            LOGI("Wrote %ux%u RGBA (%zu bytes) to %s in %ld ms", mFullW, mFullH, (size_t)(mFullW * mFullH * 4), outFilePath, writeMs);
-        } else {
-            LOGE("Failed to open %s for writing: %s", outFilePath, strerror(errno));
+        if (!outputOk) {
+            LOGE("Incomplete still output: %s", outFilePath);
+            unlink(outFilePath);
         }
-        vkUnmapMemory(mDevice, mReadbackMem);
+        tFileClosed = std::chrono::high_resolution_clock::now();
     }
 
     // 5. Release imported image
@@ -3427,7 +3424,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         outTimestamps[3] = bootNsSubmit;         // t3: GPU Command Buffer Submitted
     }
 
-    return true;
+    return outputOk;
 }
 
 void VulkanPipeline::destroy() {
