@@ -79,6 +79,7 @@ import com.zenith.auxcam.CameraController
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
+import com.zenith.auxcam.Resolution
 import com.zenith.auxcam.ui.effects.cameraMatte
 import com.zenith.auxcam.ui.effects.matte
 import com.zenith.auxcam.ui.effects.rememberMatteGrain

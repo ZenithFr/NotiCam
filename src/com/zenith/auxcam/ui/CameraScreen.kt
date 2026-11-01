@@ -128,7 +128,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                         },
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
                     )
-                    AnimatedVisibility(
+                    androidx.compose.animation.AnimatedVisibility(
                         visible = state.mode == CaptureMode.Photo,
                         enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.86f, animationSpec = CameraMotion.slide()),
                         exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.86f),
@@ -156,7 +156,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                         ZoomChips(zoom = state.zoom, onSelect = actions::onZoomSelected,
                             stops = DeviceProfile.ZOOM_STOPS, enabled = state.sessionReady && !state.captureBusy)
                     }
-                    AnimatedVisibility(
+                    androidx.compose.animation.AnimatedVisibility(
                         visible = state.zoomActive,
                         enter = fadeIn(tween(140)) + scaleIn(initialScale = 0.88f, animationSpec = CameraMotion.slide()),
                         exit = fadeOut(tween(180)) + scaleOut(targetScale = 0.94f),
