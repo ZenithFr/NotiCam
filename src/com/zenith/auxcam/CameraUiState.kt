@@ -5,12 +5,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 
 /** Capture modes exposed by the carousel. */
 enum class CaptureMode(val label: String) {
-    Photo("Photo"),
-    Portrait("Portrait"),
-    Pro("Pro");
-
-    /** Phase one never requests extra denoising or sharpening. */
-    val highQualityNr: Boolean get() = false
+    Video("Video"),
+    Photo("Photo");
 }
 
 /** Flash request state, mapped 1:1 onto `CONTROL_AE_MODE`. */
@@ -46,6 +42,10 @@ enum class FrameRatio(val label: String, val aspect: Float?) {
 @Immutable
 data class CameraUiState(
     val mode: CaptureMode = CaptureMode.Photo,
+    val bokehEnabled: Boolean = false,
+    /** The privileged main camera's advertised full-resolution JPEG size. */
+    val highResolutionWidth: Int = 0,
+    val highResolutionHeight: Int = 0,
     val flash: FlashMode = FlashMode.Off,
     val zoom: Float = 1f,
 
@@ -82,7 +82,7 @@ data class CameraUiState(
     /** 0.0 = infinity, 1.0 = closest / macro. */
     val focusFraction: Float = 0f,
 
-    val proSheetOpen: Boolean = false,
+    val settingsOpen: Boolean = false,
 
     val status: String = "",
     val telemetry: String = "",
@@ -101,6 +101,15 @@ data class CameraUiState(
     val focusNonce: Int = 0,
     val zoomDialVisible: Boolean = false,
 ) {
+    val bokehActive: Boolean
+        get() = mode == CaptureMode.Photo && bokehEnabled && resolution == Resolution.Standard
+
+    val supportsHighResolution: Boolean
+        get() = CaptureOutput.is50MpSize(highResolutionWidth, highResolutionHeight)
+
+    val canTakePhoto: Boolean
+        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy
+
     /** Aperture shown by the sliders: 0 = open (1.4), 1 = closed (16). */
     val apertureFraction: Float
         get() {
@@ -137,13 +146,13 @@ data class CameraUiState(
 
     /** Simulated aperture applies only to optional Portrait processing. */
     val apertureVisible: Boolean
-        get() = mode == CaptureMode.Portrait
+        get() = bokehActive
 
     val focalLabel: String
         get() = String.format("%.0f MM", DeviceProfile.FOCAL_MAIN_MM * zoom)
 
     val quickApertureVisible: Boolean
-        get() = mode == CaptureMode.Portrait && !proSheetOpen
+        get() = bokehActive && !settingsOpen
 
     val focusLabel: String
         get() {
@@ -156,5 +165,5 @@ data class CameraUiState(
         }
 
     val quickFocusVisible: Boolean
-        get() = manualFocus || (mode == CaptureMode.Pro && !proSheetOpen)
+        get() = manualFocus && mode == CaptureMode.Photo
 }

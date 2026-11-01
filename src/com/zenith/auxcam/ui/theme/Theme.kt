@@ -24,8 +24,8 @@ import androidx.compose.ui.unit.sp
  * see-through matte film, hairline separators and an SF-style type ramp.
  */
 object CameraColors {
-    /** CMF-inspired warm accent, reserved for selection and camera identity. */
-    val Yellow = Color(0xFFFF794F)
+    /** Camera yellow: selected mode, focus and active optical controls. */
+    val Yellow = Color(0xFFFFD60A)
     /** iOS systemRed — recording only. */
     val Red = Color(0xFFFF453A)
     /** iOS systemGreen — reserved for future "ready" states. */
@@ -47,6 +47,8 @@ object CameraColors {
      * invisible there.
      */
     val Matte = Color(0x14FFFFFF)
+    /** Borderless, neutral matte control fill, readable over the live scene. */
+    val ControlSurface = Color(0xD92A2B2E)
 
     /**
      * Flat shade over the live scene — 14 % black.
@@ -62,7 +64,7 @@ object CameraColors {
     val SliderTrack = Color(0x3DFFFFFF)
     val SliderFill = Color.White
     val Scrim = Color(0x99000000)
-    val Black = Color(0xFF090B0D)
+    val Black = Color(0xFF000000)
 }
 
 /** 8-pt spacing grid. */
@@ -80,8 +82,8 @@ object CameraSpacing {
     val gutter = 16.dp
     val gutterWide = 24.dp
     val capsuleHeight = 34.dp
-    val panelRadius = 26.dp
-    val shutterVisual = 72.dp
+    val panelRadius = 32.dp
+    val shutterVisual = 78.dp
     /** The shutter composable is larger than its disc so the capture pulse ring
      *  always has room to expand — this is what stops the animation clipping. */
     val shutterTouch = 96.dp
@@ -131,6 +133,9 @@ object CameraMotion {
     /** Snapping the wheel onto a lens stop. */
     fun <T> detent(): SpringSpec<T> = spring(dampingRatio = 1f, stiffness = Spring.StiffnessMedium)
 
+    /** Quick, critically damped retargeting for readouts and slider taps. */
+    fun <T> fluid(): SpringSpec<T> = spring(dampingRatio = 1f, stiffness = 650f)
+
     /** Short opacity transitions. Fades are always faster than moves. */
     fun fade(durationMillis: Int = 140): TweenSpec<Float> = tween(durationMillis)
 
@@ -144,8 +149,8 @@ object CameraType {
     val Mode = TextStyle(
         fontFamily = sf,
         fontWeight = FontWeight.SemiBold,
-        fontSize = 12.sp,
-        letterSpacing = 0.9.sp,
+        fontSize = 14.sp,
+        letterSpacing = 0.5.sp,
     )
 
     val Lens = TextStyle(

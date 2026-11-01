@@ -76,6 +76,19 @@ object NotiIcons {
         close()
     }
 
+    /** A person in a frame: optional portrait depth effect, not a capture mode. */
+    val Portrait: ImageVector = builder("Portrait").apply {
+        strokePath {
+            circle(12f, 8.2f, 2.7f)
+            moveTo(6.8f, 19f)
+            curveTo(6.8f, 12f, 17.2f, 12f, 17.2f, 19f)
+            moveTo(7f, 3f); lineTo(3f, 3f); lineTo(3f, 8f)
+            moveTo(17f, 3f); lineTo(21f, 3f); lineTo(21f, 8f)
+            moveTo(3f, 16f); lineTo(3f, 21f); lineTo(7f, 21f)
+            moveTo(21f, 16f); lineTo(21f, 21f); lineTo(17f, 21f)
+        }
+    }.build()
+
     /** Filled bolt: flash on. */
     val FlashOn: ImageVector = builder("FlashOn").apply {
         fillPath { bolt() }

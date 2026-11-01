@@ -8,8 +8,10 @@ interface IAuxCamService {
     boolean openStereoSession(
         in Surface colorSurface, int colorW, int colorH,
         in Surface depthSurface, int depthW, int depthH,
-        in Surface stillSurface, int stillW, int stillH,
+        in Surface stillSurface, int stillW, int stillH, int stillFormat,
         String colorPhysicalId);
+
+    int[] getHighResolutionJpegSize();
 
     void triggerStill(long shutterCommandNs, boolean highQualityNr);
     void triggerStillWithZsl(long shutterCommandNs, boolean highQualityNr, boolean enableZsl);

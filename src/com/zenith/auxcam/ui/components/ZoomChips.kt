@@ -1,9 +1,8 @@
 package com.zenith.auxcam.ui.components
 
-import androidx.compose.animation.core.Spring
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -38,10 +37,9 @@ import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraType
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 /**
- * 1× / 2× / 5× selector with an Apple-style travelling indicator.
+ * 0.6× / 1× / 2× selector with an Apple-style travelling indicator.
  *
  * Instead of every chip individually fading its own background (which reads as
  * three unrelated blinks), a single white disc *slides* between positions on a
@@ -50,7 +48,7 @@ import kotlin.math.roundToInt
  *
  * `zoom` is the live engine value, so pinching the viewfinder moves the disc too
  * — the control never lies about what the camera is doing. While the pinch sits
- * between two stops the disc fades out and the nearest label brightens, which
+ * between two stops the disc becomes a faint traveling guide and the nearest label brightens, which
  * avoids the "flicker between two chips" artefact.
  */
 @Composable
@@ -63,10 +61,11 @@ fun ZoomChips(
     chipSize: Dp = 44.dp,
     gap: Dp = 6.dp,
 ) {
+    if (stops.isEmpty()) return
     val haptics = rememberCameraHaptics()
-
-    val nearest = stops.indices.minByOrNull { abs(stops[it] - zoom) } ?: 0
-    val onStop = abs(stops[nearest] - zoom) < 0.08f
+    val safeZoom = zoom.coerceAtLeast(stops.first())
+    val nearest = stops.indices.minByOrNull { abs(kotlin.math.ln(safeZoom / stops[it])) } ?: 0
+    val onStop = abs(kotlin.math.ln(safeZoom / stops[nearest])) < 0.08f
 
     val discScale by animateFloatAsState(
         targetValue = if (onStop) 1f else 0.84f,
@@ -74,13 +73,21 @@ fun ZoomChips(
         label = "chip-disc-scale",
     )
     val discAlpha by animateFloatAsState(
-        targetValue = if (onStop) 1f else 0f,
+        targetValue = if (onStop) 1f else 0.16f,
         animationSpec = CameraMotion.fade(if (onStop) 120 else 180),
         label = "chip-disc-alpha",
     )
+    // Follow the live zoom continuously between stops in log space. Only the
+    // presentation is smoothed; camera commands are never delayed or replayed.
+    val position = if (stops.size > 1) {
+        val lower = stops.indexOfLast { it <= zoom }.coerceIn(0, stops.size - 2)
+        val fraction = (kotlin.math.ln(zoom.coerceAtLeast(stops.first()) / stops[lower]) /
+            kotlin.math.ln(stops[lower + 1] / stops[lower])).coerceIn(0f, 1f)
+        lower + fraction
+    } else 0f
     val discX by animateDpAsState(
-        targetValue = (chipSize + gap) * nearest,
-        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMediumLow),
+        targetValue = (chipSize + gap) * position,
+        animationSpec = CameraMotion.fluid(),
         label = "chip-disc-x",
     )
 
@@ -158,6 +165,10 @@ private fun ZoomChip(
         animationSpec = CameraMotion.fade(180),
         label = "chip-label-alpha",
     )
+    val labelColor by animateColorAsState(
+        targetValue = if (selected) CameraColors.OnLight else CameraColors.Label,
+        animationSpec = CameraMotion.select(), label = "zoom-label-color",
+    )
 
     Box(
         modifier = Modifier
@@ -185,15 +196,14 @@ private fun ZoomChip(
             Text(
                 text = label,
                 style = CameraType.Lens,
-                color = if (selected) CameraColors.OnLight else CameraColors.Label.copy(alpha = labelAlpha),
+                color = labelColor.copy(alpha = labelAlpha),
             )
             if (caption != null) {
                 Text(
                     text = caption,
                     style = CameraType.Lens,
                     fontSize = 8.sp,
-                    color = if (selected) CameraColors.OnLight.copy(alpha = 0.7f)
-                    else CameraColors.Label.copy(alpha = labelAlpha * 0.6f),
+                    color = labelColor.copy(alpha = labelAlpha * 0.7f),
                 )
             }
         }

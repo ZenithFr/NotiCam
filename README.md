@@ -10,20 +10,26 @@ part of the default capture path today.
 | Mode / feature | Behavior |
 | --- | --- |
 | Photo | Sharp 4080 × 3072 YUV → RGB → JPEG, quality 100; no app bokeh |
-| Pro | The same sharp output, with exposure and manual-focus controls; no extra NR/sharpening |
-| Portrait | Optional depth/matte bokeh; displayed aperture is **simulated**, not a movable lens iris |
+| Video | Selectable preview only; recording is explicitly unavailable until the video phase |
+| Portrait button | Optional 12 MP depth/matte bokeh inside Photo; displayed aperture is **simulated**, not a movable lens iris |
 | Camera processing | Request noise reduction OFF (or MINIMAL if advertised) and edge enhancement OFF when supported |
 | Lenses | Device-specific main/stereo `5`, ultra-wide `2`, tele `3`; tele assist is an explicit setting |
 | Framing | Native sensor 4:3 only; custom crops are not implemented |
 | Sensor RAW / DNG | **Not implemented.** The old RAW toggle only dumped a Y plane and has been removed |
-| 50 MP | **Not supported by the fixed-size native readback.** The misleading toggle has been removed |
-| Orientation | Portrait preview; sensor-landscape JPEG with 90° EXIF orientation |
+| 50 MP | Separate main-camera JPEG path using advertised ordinary/high-resolution or maximum-resolution sensor-pixel-mode sizes; JPEG quality 100; no upscaling or second JPEG encode |
+| Orientation | Portrait preview; 12 MP sensor-landscape JPEG with 90° EXIF; 50 MP preserves the HAL JPEG and its orientation metadata |
 | Saving | Pending MediaStore row published only after successful encoding; failed rows are deleted |
 
 **YUV is not unprocessed sensor RAW.** Camera ISP demosaic, color conversion,
 white balance and potentially other vendor processing still apply. JPEG 100 is
 also not lossless. The app does not yet have a Bayer `RAW_SENSOR` + capture
 metadata + `DngCreator` path, and must not claim otherwise.
+
+50 MP is a **main camera, 1×, sharp-capture** option. Turning on the portrait
+effect or changing zoom/lenses returns to 12 MP. The app validates the encoded
+JPEG dimensions against the selected HAL size before publication. A rejected
+50 MP stream combination rolls back to 12 MP; unsupported devices never get an
+upscaled image labeled 50 MP.
 
 Auxiliary-lens stream combinations, flash timing and vendor behavior require
 on-device verification. This project is not a general-purpose camera for other
@@ -40,7 +46,17 @@ phones. Permission to use the privileged camera service is provided by Shizuku.
 - `jni/shaders/`: CoC, matte refinement, gather and composition.
 - `src/com/zenith/auxcam/ui/`: Compose camera UI, warm accent, persistent status, settings and shutter.
 
-The UI keeps chrome outside the viewfinder. Capture is single-flight through
+The iOS-inspired UI has only Photo/Video modes, a yellow selection accent,
+rounded scene framing, borderless matte controls and a modal settings sheet. The
+portrait-effect button lives in the viewfinder corner, not in the mode selector.
+This is an original approximation of the requested design direction, not a
+pixel-verified copy of an iOS 27 screenshot or Apple assets. Flat fills replace
+glass rims and sheen. Traveling mode/zoom indicators, direct-drag sliders, capture
+pulses, a real busy indicator and a successful-save thumbnail handoff provide
+motion without animating camera commands or resizing the Vulkan surface. The
+separate lens-cycle button is gone; zoom stops, pinch and scrub still select lenses.
+
+Capture is single-flight through
 saving, not just until a camera buffer arrives. Depth is selected by sensor
 timestamp within 100 ms; mattes older than 500 ms are discarded. These are
 bounded best-effort matches, **not a claim of hardware-synchronized still depth**.
@@ -56,7 +72,7 @@ Lens/mode changes invalidate auxiliary frames.
 - Prepared inference tier is held across preprocessing/inference so a thermal
   tier change cannot make inference consume an unprepared general-model tensor.
 - Preview and still CoC use the same 720-pixel reference width. Zero blur really
-  means zero, and Photo/Pro composition directly selects the sharp original.
+  means zero, and Photo without the portrait effect selects the sharp original.
 - Missing depth no longer creates a fabricated central oval. A real matte can
   support matte-only blur; with neither signal, output stays sharp.
 - The current uploaded matte is sampled, not the previous double-buffer image.
@@ -104,4 +120,6 @@ updates whose byte length happens to be unchanged.
 
 See [the stabilization checklist](design/STABILIZATION.md) for tests performed,
 known limitations, a physical-device test matrix and suggested next milestones.
-The existing `design/index.html` is a historical mock, not the current Compose UI.
+`design/index.html` is a new interactive design companion to the Compose UI. Run
+`python3 tools/preview_server.py` to review it. It uses a clearly labeled sample
+image and simulated capabilities, not a live camera or an Android emulator.
