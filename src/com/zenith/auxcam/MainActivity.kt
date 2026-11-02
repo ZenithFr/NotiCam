@@ -78,8 +78,7 @@ class MainActivity : ComponentActivity(), NativeBridge {
             } else null
         }
         if (emaIntent != null) {
-            DualMatteSegmenter.sEmaAlpha = emaIntent
-            Log.i("MainActivity", "EMA alpha set from intent: $emaIntent")
+            Log.i("MainActivity", "EMA alpha intent ignored (retired): $emaIntent")
         }
 
         controller = CameraController(this, this)
@@ -104,8 +103,7 @@ class MainActivity : ComponentActivity(), NativeBridge {
         }
         if (intent.hasExtra("ema_alpha")) {
             val ema = try { intent.getFloatExtra("ema_alpha", 0.25f) } catch (e: Exception) { intent.getStringExtra("ema_alpha")?.toFloatOrNull() ?: 0.25f }
-            DualMatteSegmenter.sEmaAlpha = ema
-            Log.i("MainActivity", "onNewIntent: EMA alpha set to $ema")
+            Log.i("MainActivity", "onNewIntent: EMA alpha intent ignored (retired): $ema")
         }
     }
 

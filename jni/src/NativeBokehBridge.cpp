@@ -2,7 +2,7 @@
 #include <android/native_window_jni.h>
 #include <android/hardware_buffer_jni.h>
 #include <android/log.h>
-#include <NeuralNetworks.h>
+#include <android/NeuralNetworks.h>
 #include <string>
 #include <vector>
 #include <memory>

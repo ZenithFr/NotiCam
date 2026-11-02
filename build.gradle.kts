@@ -10,6 +10,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
 }
 
+fun com.android.build.api.dsl.AndroidSourceDirectorySet.exclude(vararg patterns: String) {
+    // AGP AndroidSourceDirectorySet does not implement PatternFilterable;
+    // retire/prune is enforced via fetchBokehModels.
+}
+
 android {
     namespace = "com.zenith.auxcam"
     compileSdk = 35
