@@ -41,6 +41,15 @@ interface IAuxCamService {
     void setManualFocus(float distanceFraction) = 15;
     /** Reset focus back to continuous autofocus. */
     void resetFocus() = 16;
+    /** Versioned current-session sensor ranges; no inferred capabilities. */
+    long[] getSensorControlCapabilities() = 17;
+    /** Atomic requested exposure/WB update; result is asynchronous and token-tagged. */
+    void setSensorControls(int token, boolean manualExposure, int iso, long exposureNs, int awbMode) = 18;
+    /** Actual advertised RAW_SENSOR dimensions; empty when not exposed. */
+    int[] getRawSensorSize(String lensId) = 19;
+    /** 1–4 individual DNG outputs, not merged footage. Completion is token-tagged. */
+    void triggerRawBurst(int token, long shutterCommandNs, in ParcelFileDescriptor[] outputs) = 20;
+    void cancelRawCapture(int token) = 21;
     /** Reserved Shizuku removal transaction. Closes camera and exits only this sidecar. */
     void destroy() = 16777114;
 }

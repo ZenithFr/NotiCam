@@ -139,25 +139,27 @@ final class CameraCapabilities {
         return null;
     }
 
+    /** Largest advertised RAW_SENSOR stream within the app's single-frame payload budget. */
     static Size rawSize(CameraManager cm, String lensId) {
         try {
             String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
             CameraCharacteristics c = cm.getCameraCharacteristics(id);
+            int[] capabilities = c.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+            boolean raw = false;
+            if (capabilities != null) for (int capability : capabilities)
+                if (capability == CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW) raw = true;
+            if (!raw) return null;
             StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+            Size best = null;
             if (map != null) {
                 Size[] sizes = map.getOutputSizes(ImageFormat.RAW_SENSOR);
-                if (sizes != null && sizes.length > 0) {
-                    Size best = sizes[0];
-                    for (Size s : sizes) {
-                        if ((long) s.getWidth() * s.getHeight() > (long) best.getWidth() * best.getHeight()) {
-                            best = s;
-                        }
-                    }
-                    return best;
+                if (sizes != null) for (Size size : sizes) {
+                    if (RawFrameMatcher.maxFramesForSize(size.getWidth(), size.getHeight()) == 0) continue;
+                    if (best == null || (long) size.getWidth() * size.getHeight() > (long) best.getWidth() * best.getHeight()) best = size;
                 }
             }
-        } catch (Throwable ignored) {}
-        return null;
+            return best;
+        } catch (Exception ignored) { return null; }
     }
     /** Normal Camera2 session, never constrained high-speed (which would drop full-quality stills).
      * Keep the sensor's full 4:3 field, capped at 1440x1080 / 1080 sensor lines.
@@ -266,31 +268,140 @@ final class CameraCapabilities {
         return false;
     }
 
-    private static void appendFootageCapabilities(StringBuilder out, CameraCharacteristics c, StreamConfigurationMap map) {
-        out.append("RAW capability: ").append(hasCapability(c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW)).append('\n');
-        if (map != null) {
-            for (int format : new int[]{ImageFormat.RAW_SENSOR, ImageFormat.RAW10, ImageFormat.RAW12}) {
-                Size[] sizes = map.getOutputSizes(format);
-                String name = format == ImageFormat.RAW_SENSOR ? "RAW_SENSOR" : format == ImageFormat.RAW10 ? "RAW10" : "RAW12";
-                out.append(name).append(" (format ").append(format).append(") sizes/minFrameNs: ");
-                if (sizes != null) for (Size size : sizes) {
-                    out.append(size).append('/').append(map.getOutputMinFrameDuration(format, size)).append(' ');
-                }
-                out.append('\n');
-            }
-            out.append("Recorder sizes: ").append(Arrays.toString(map.getOutputSizes(MediaRecorder.class))).append('\n');
+    private static void appendMetadata(StringBuilder out, String label, CameraCharacteristics c, CameraCharacteristics.Key<?> key) {
+        out.append(label).append(": ");
+        try {
+            Object value = c.get(key);
+            out.append(value == null ? "not exposed" : value instanceof int[] ? Arrays.toString((int[]) value) :
+                    value instanceof float[] ? Arrays.toString((float[]) value) : String.valueOf(value));
+        } catch (Exception e) { out.append("unavailable(").append(e.getClass().getSimpleName()).append(')'); }
+        out.append('\n');
+    }
+
+    /** Returns false on query failure only for deciding whether to query dependent metadata. */
+    private static boolean appendCapability(StringBuilder out, String label, CameraCharacteristics c, int capability) {
+        out.append(label).append(": ");
+        try {
+            boolean present = hasCapability(c, capability);
+            out.append(present).append('\n');
+            return present;
+        } catch (Exception e) {
+            out.append("unavailable(").append(e.getClass().getSimpleName()).append(")\n");
+            return false;
         }
-        out.append("Tone-map modes: ").append(Arrays.toString(c.get(CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES))).append('\n');
-        if (Build.VERSION.SDK_INT >= 31) out.append("Rotate-and-crop modes (NONE requested when advertised): ").append(Arrays.toString(c.get(CameraCharacteristics.SCALER_AVAILABLE_ROTATE_AND_CROP_MODES))).append('\n');
-        if (Build.VERSION.SDK_INT >= 33) {
-            out.append("10-bit dynamic range capability: ").append(hasCapability(c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_DYNAMIC_RANGE_TEN_BIT)).append('\n');
-            DynamicRangeProfiles profiles = c.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES);
-            if (profiles != null) for (long profile : profiles.getSupportedProfiles()) {
-                String name = profile == DynamicRangeProfiles.STANDARD ? "SDR" : profile == DynamicRangeProfiles.HLG10 ? "HLG10" :
-                        profile == DynamicRangeProfiles.HDR10 ? "HDR10" : profile == DynamicRangeProfiles.HDR10_PLUS ? "HDR10+" : "Other HDR " + profile;
-                out.append("Dynamic range ").append(name).append(" constraints=").append(profiles.getProfileCaptureRequestConstraints(profile)).append('\n');
+    }
+
+    /** Diagnostics only: a zero minimum duration means unknown, not unlimited FPS. */
+    private static void appendRawSizes(StringBuilder out, StreamConfigurationMap map, int format, Size[] sizes) {
+        if (sizes == null || sizes.length == 0) { out.append("none advertised\n"); return; }
+        out.append('\n');
+        for (Size size : sizes) {
+            out.append("  ").append(size);
+            try {
+                long duration = map.getOutputMinFrameDuration(format, size);
+                out.append(" minFrameNs=").append(duration);
+                if (duration > 0) out.append(" theoreticalMaxFps=")
+                        .append(String.format(java.util.Locale.US, "%.2f", 1_000_000_000.0 / duration));
+                else out.append(" theoreticalMaxFps=unknown");
+            } catch (Exception e) { out.append(" minFrameNs=unavailable(").append(e.getClass().getSimpleName()).append(')'); }
+            try { out.append(" stallNs=").append(map.getOutputStallDuration(format, size)); }
+            catch (Exception e) { out.append(" stallNs=unavailable(").append(e.getClass().getSimpleName()).append(')'); }
+            if (format == ImageFormat.RAW_SENSOR) {
+                // RAW16 storage estimate, NOT ADC precision or measured throughput.
+                long bytes = (long) size.getWidth() * size.getHeight() * 2L;
+                out.append(" tightPackedRAW16BytesPerFrame=").append(bytes)
+                        .append(" excludingRowPadding");
             }
-            if (map != null) out.append("P010 sizes: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.YCBCR_P010))).append('\n');
+            out.append('\n');
+        }
+    }
+
+    private static void appendRawMap(StringBuilder out, String label, StreamConfigurationMap map) {
+        out.append("RAW stream map: ").append(label).append(" (metadata only)\n");
+        if (map == null) { out.append("  map not exposed\n"); return; }
+        try { out.append("  Output format IDs: ").append(Arrays.toString(map.getOutputFormats())).append('\n'); }
+        catch (Exception e) { out.append("Output format query unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+        for (int format : new int[]{ImageFormat.RAW_SENSOR, ImageFormat.RAW10, ImageFormat.RAW12}) {
+            String name = format == ImageFormat.RAW_SENSOR ? "RAW_SENSOR" : format == ImageFormat.RAW10 ? "RAW10" : "RAW12";
+            out.append("  ").append(name).append(" (format ").append(format).append(") sizes/minFrameNs: ");
+            try { appendRawSizes(out, map, format, map.getOutputSizes(format)); }
+            catch (Exception e) { out.append("unavailable(").append(e.getClass().getSimpleName()).append(")\n"); }
+            out.append("  High-resolution/slow ").append(name).append(": ");
+            try { appendRawSizes(out, map, format, map.getHighResolutionOutputSizes(format)); }
+            catch (Exception e) { out.append("unavailable(").append(e.getClass().getSimpleName()).append(")\n"); }
+        }
+    }
+
+    private static void appendSensorMetadata(StringBuilder out, CameraCharacteristics c) {
+        // Keep each optional calibration/control key independent of all other queries.
+        appendMetadata(out, "Sensor sensitivity range", c, CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+        appendMetadata(out, "Max analog ISO", c, CameraCharacteristics.SENSOR_MAX_ANALOG_SENSITIVITY);
+        appendMetadata(out, "Exposure time range (ns)", c, CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+        appendMetadata(out, "Max frame duration (ns)", c, CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION);
+        appendMetadata(out, "Sensor CFA enum", c, CameraCharacteristics.SENSOR_INFO_COLOR_FILTER_ARRANGEMENT);
+        appendMetadata(out, "Black levels", c, CameraCharacteristics.SENSOR_BLACK_LEVEL_PATTERN);
+        appendMetadata(out, "White level (signal level, not storage bit depth)", c, CameraCharacteristics.SENSOR_INFO_WHITE_LEVEL);
+        appendMetadata(out, "RAW color transform 1", c, CameraCharacteristics.SENSOR_COLOR_TRANSFORM1);
+        appendMetadata(out, "RAW calibration transform 1", c, CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM1);
+        appendMetadata(out, "RAW forward matrix 1", c, CameraCharacteristics.SENSOR_FORWARD_MATRIX1);
+        appendMetadata(out, "RAW reference illuminant 1", c, CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT1);
+        appendMetadata(out, "RAW color transform 2", c, CameraCharacteristics.SENSOR_COLOR_TRANSFORM2);
+        appendMetadata(out, "RAW calibration transform 2", c, CameraCharacteristics.SENSOR_CALIBRATION_TRANSFORM2);
+        appendMetadata(out, "RAW forward matrix 2", c, CameraCharacteristics.SENSOR_FORWARD_MATRIX2);
+        appendMetadata(out, "RAW reference illuminant 2", c, CameraCharacteristics.SENSOR_REFERENCE_ILLUMINANT2);
+        appendCapability(out, "Manual sensor capability", c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR);
+        appendCapability(out, "Manual post-processing capability", c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING);
+        appendMetadata(out, "AE modes", c, CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES);
+        appendMetadata(out, "AWB modes", c, CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES);
+        appendMetadata(out, "AF modes", c, CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
+        appendMetadata(out, "OIS modes", c, CameraCharacteristics.LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION);
+        appendMetadata(out, "EIS modes", c, CameraCharacteristics.CONTROL_AVAILABLE_VIDEO_STABILIZATION_MODES);
+        out.append("Stabilization: advertised modes, not measured crop or session support.\n");
+    }
+
+    private static void appendFootageCapabilities(StringBuilder out, CameraCharacteristics c, StreamConfigurationMap map) {
+        appendCapability(out, "RAW capability", c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW);
+        appendSensorMetadata(out, c);
+        appendRawMap(out, "DEFAULT pixel mode", map);
+        if (Build.VERSION.SDK_INT >= 31) {
+            appendCapability(out, "Ultra-high-resolution sensor capability", c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR);
+            appendMetadata(out, "Maximum pixel array", c, CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+            try { appendRawMap(out, "MAXIMUM_RESOLUTION pixel mode",
+                    c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)); }
+            catch (Exception e) { out.append("Maximum-resolution RAW map unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+        }
+        if (map != null) {
+            try { out.append("Recorder sizes: ").append(Arrays.toString(map.getOutputSizes(MediaRecorder.class))).append('\n'); }
+            catch (Exception e) { out.append("Recorder sizes unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            try { out.append("HEIC sizes: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.HEIC)))
+                    .append(" (metadata, not a verified HEIC encoder/session)\n"); }
+            catch (Exception e) { out.append("HEIC sizes unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            if (appendCapability(out, "Constrained high-speed capability", c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_CONSTRAINED_HIGH_SPEED_VIDEO)) {
+                try {
+                    for (Size size : map.getHighSpeedVideoSizes()) {
+                        try { out.append("Constrained high-speed ").append(size).append(" FPS ranges=")
+                                .append(Arrays.toString(map.getHighSpeedVideoFpsRangesFor(size)))
+                                .append(" (not a regular/full-field/RAW recording guarantee)\n"); }
+                        catch (Exception e) { out.append("High-speed FPS query unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+                    }
+                } catch (Exception e) { out.append("High-speed metadata unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            }
+        }
+        appendMetadata(out, "Tone-map modes", c, CameraCharacteristics.TONEMAP_AVAILABLE_TONE_MAP_MODES);
+        if (Build.VERSION.SDK_INT >= 31) appendMetadata(out, "Rotate-and-crop modes (NONE requested when advertised)", c, CameraCharacteristics.SCALER_AVAILABLE_ROTATE_AND_CROP_MODES);
+        if (Build.VERSION.SDK_INT >= 33) {
+            appendCapability(out, "10-bit dynamic range capability", c, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_DYNAMIC_RANGE_TEN_BIT);
+            try {
+                DynamicRangeProfiles profiles = c.get(CameraCharacteristics.REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES);
+                if (profiles != null) for (long profile : profiles.getSupportedProfiles()) {
+                    String name = profile == DynamicRangeProfiles.STANDARD ? "SDR" : profile == DynamicRangeProfiles.HLG10 ? "HLG10" :
+                            profile == DynamicRangeProfiles.HDR10 ? "HDR10" : profile == DynamicRangeProfiles.HDR10_PLUS ? "HDR10+" : "Other HDR " + profile;
+                    try { out.append("Dynamic range ").append(name).append(" constraints=").append(profiles.getProfileCaptureRequestConstraints(profile)).append('\n'); }
+                    catch (Exception e) { out.append("Dynamic range constraint unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+                }
+            } catch (Exception e) { out.append("Dynamic range profiles unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            try { if (map != null) out.append("P010 sizes: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.YCBCR_P010))).append('\n'); }
+            catch (Exception e) { out.append("P010 sizes unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
         }
         out.append("RAW metadata/stream availability is not proof of RAW video throughput. HLG/HDR and flat 8-bit curves are not camera Log.\n");
     }
@@ -313,10 +424,18 @@ final class CameraCapabilities {
                                     profile.profile == MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus) main10 = true;
                         }
                         if (MediaFormat.MIMETYPE_VIDEO_HEVC.equals(mime)) out.append(" HEVC Main10=").append(main10);
+                        out.append(" colorFormats=").append(Arrays.toString(caps.colorFormats));
+                        out.append(" surfaceInput=");
+                        boolean surfaceInput = false;
+                        for (int format : caps.colorFormats) if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surfaceInput = true;
+                        out.append(surfaceInput);
                         MediaCodecInfo.VideoCapabilities video = caps.getVideoCapabilities();
                         if (video != null) out.append(" widths=").append(video.getSupportedWidths()).append(" heights=").append(video.getSupportedHeights()).append(" bitrates=").append(video.getBitrateRange());
+                        if (video != null) out.append(" alignment=").append(video.getWidthAlignment()).append('x')
+                                .append(video.getHeightAlignment()).append(" frameRateRange=").append(video.getSupportedFrameRates());
                         out.append('\n');
-                    } catch (IllegalArgumentException ignored) { }
+                    } catch (Exception e) { out.append(codec.getName()).append(' ').append(mime)
+                            .append(" capability query unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
                 }
             }
         } catch (Exception e) { out.append("Encoder capability query failed: ").append(e).append('\n'); }
@@ -325,12 +444,17 @@ final class CameraCapabilities {
     static String report(CameraManager cm) throws Exception {
         StringBuilder out = new StringBuilder("NotiCam Camera2 capability report\nDevice: ")
                 .append(Build.MANUFACTURER).append(' ').append(Build.MODEL).append(" / ").append(Build.FINGERPRINT).append('\n');
-        Target chosen = discover(cm);
-        out.append("Selected 50 MP: ").append(chosen == null ? "not exposed by queried regular-session paths" :
-                chosen.cameraId + " " + chosen.size + " pixelMode=" + chosen.pixelMode + " source=" + chosen.source).append('\n');
+        try {
+            Target chosen = discover(cm);
+            out.append("Selected 50 MP: ").append(chosen == null ? "not exposed by queried regular-session paths" :
+                    chosen.cameraId + " " + chosen.size + " pixelMode=" + chosen.pixelMode + " source=" + chosen.source).append('\n');
+        } catch (Exception e) { out.append("50 MP discovery unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
         out.append("Enumerated IDs: ").append(Arrays.toString(cm.getCameraIdList()))
                 .append("\nQueried IDs (includes existing auxiliary routes): ").append(candidateIds(cm))
-                .append("\nMetadata eligibility is not proof of a successful capture session.\n");
+                .append("\nMetadata eligibility is not proof of a successful capture session.\n")
+                .append("Format legend: HAL RAW_SENSOR/RAW16=32 (0x20), BLOB=33 (0x21; commonly JPEG), PRIVATE=34 (0x22), YUV_420_888=35 (0x23), RAW10=37, RAW12=38; Java JPEG=256 (0x100).\n")
+                .append("Vendor tables require schema verification: 33/35 entries do not prove RAW, and a final 0/1 field has no assumed meaning in this diagnostic.\n")
+                .append("Read-only report: no streams opened, no capture, benchmark or system-setting changes. FPS limits are theoretical metadata, not measured delivery.\n");
         appendEncoderCapabilities(out); // Preserve codec evidence even if vendor tables truncate later.
         for (String id : candidateIds(cm)) try {
             CameraCharacteristics c = cm.getCameraCharacteristics(id);
@@ -346,25 +470,39 @@ final class CameraCapabilities {
                     if (childMax != null) out.append("Physical maximum JPEG: ").append(Arrays.toString(childMax.getOutputSizes(ImageFormat.JPEG))).append('\n');
                 }
             } catch (Exception e) { out.append("Physical ").append(physical).append(": not queryable\n"); }
-            StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            out.append("Active array: ").append(c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE))
-                    .append(" sensor pixels=").append(c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE))
-                    .append(" physical size=").append(c.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE))
-                    .append(" focal lengths=").append(Arrays.toString(c.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS))).append('\n');
+            StreamConfigurationMap map = null;
+            try { map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP); }
+            catch (Exception e) { out.append("Default stream map unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            appendMetadata(out, "Active array", c, CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            appendMetadata(out, "Sensor pixels", c, CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE);
+            appendMetadata(out, "Physical size", c, CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
+            appendMetadata(out, "Focal lengths", c, CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
             appendFootageCapabilities(out, c, map);
-            out.append("Native-aspect AVC/30 recorder candidate: ").append(videoSize(cm, id)).append('\n');
-            out.append("Preview profile (width,height,minFPS,maxFPS): ").append(Arrays.toString(previewConfig(cm, id, true))).append('\n');
-            if (map != null) out.append("YUV: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.YUV_420_888)))
-                    .append("\nRAW: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.RAW_SENSOR))).append('\n');
-            out.append("Request keys: ");
-            for (CaptureRequest.Key<?> key : c.getAvailableCaptureRequestKeys()) out.append(key.getName()).append(", ");
-            out.append("\nSession keys: ").append(c.getAvailableSessionKeys()).append('\n');
-            if (map != null) out.append("JPEG: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.JPEG)))
-                    .append("\nSlow JPEG: ").append(Arrays.toString(map.getHighResolutionOutputSizes(ImageFormat.JPEG))).append('\n');
+            try { out.append("Native-aspect AVC/30 recorder candidate: ").append(videoSize(cm, id)).append('\n'); }
+            catch (Exception e) { out.append("Recorder candidate unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            try { out.append("Preview profile (width,height,minFPS,maxFPS): ").append(Arrays.toString(previewConfig(cm, id, true))).append('\n'); }
+            catch (Exception e) { out.append("Preview profile unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            if (map != null) {
+                try { out.append("YUV: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.YUV_420_888))).append('\n'); }
+                catch (Exception e) { out.append("YUV metadata unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+                try { out.append("JPEG: ").append(Arrays.toString(map.getOutputSizes(ImageFormat.JPEG))).append('\n'); }
+                catch (Exception e) { out.append("JPEG metadata unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+                try { out.append("Slow JPEG: ").append(Arrays.toString(map.getHighResolutionOutputSizes(ImageFormat.JPEG))).append('\n'); }
+                catch (Exception e) { out.append("Slow JPEG metadata unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            }
+            try {
+                out.append("Request keys: ");
+                for (CaptureRequest.Key<?> key : c.getAvailableCaptureRequestKeys()) out.append(key.getName()).append(", ");
+                out.append('\n');
+            } catch (Exception e) { out.append("Request keys unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
+            try { out.append("Session keys: ").append(c.getAvailableSessionKeys()).append('\n'); }
+            catch (Exception e) { out.append("Session keys unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
             if (Build.VERSION.SDK_INT >= 31) {
-                StreamConfigurationMap max = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
-                out.append("Maximum array: ").append(c.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION)).append('\n');
-                if (max != null) out.append("Maximum JPEG: ").append(Arrays.toString(max.getOutputSizes(ImageFormat.JPEG))).append('\n');
+                appendMetadata(out, "Maximum array", c, CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+                try {
+                    StreamConfigurationMap max = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
+                    if (max != null) out.append("Maximum JPEG: ").append(Arrays.toString(max.getOutputSizes(ImageFormat.JPEG))).append('\n');
+                } catch (Exception e) { out.append("Maximum JPEG metadata unavailable: ").append(e.getClass().getSimpleName()).append('\n'); }
                 try {
                     CameraExtensionCharacteristics ext = cm.getCameraExtensionCharacteristics(id);
                     for (int extension : ext.getSupportedExtensions()) out.append("Extension ").append(extension).append(" JPEG (requires extension session): ")

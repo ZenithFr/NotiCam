@@ -24,7 +24,7 @@ class BokehModels(unittest.TestCase):
         for value in ('MediaPipeAuto', 'MediaPipeDual', 'MediaPipeLandscape', 'MediaPipeGeneral', 'MODNet', 'RVM'):
             self.assertIn(value, models)
             self.assertIn('BokehModel.' + value, engines)
-        self.assertIn('BokehModelSettings(state, actions)', (SRC / 'ui/components/Controls.kt').read_text())
+        self.assertIn('BokehModelSettings(state, actions)', (SRC / 'ui/components/CameraSettings.kt').read_text())
         for action in ('onBokehModelSelected', 'onRunBokehChecks(false)', 'onRunBokehChecks(true)', 'onCancelBokehChecks', 'onCopyBokehChecks'):
             self.assertIn(action, settings)
         self.assertIn('role = Role.RadioButton', settings)

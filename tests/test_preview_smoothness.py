@@ -22,7 +22,7 @@ class PreviewSmoothness(unittest.TestCase):
         self.assertIn('mPreviewFpsRange != null', service)
         self.assertIn('float requestedZoom, int previewMaxFps', (SRC / 'IAuxCamService.aidl').read_text())
         self.assertIn('videoMode, requestedZoom, previewMaxFps));', service)
-        self.assertIn('.version(7)', (SRC / 'CameraController.kt').read_text())
+        self.assertIn('.version(9)', (SRC / 'CameraController.kt').read_text())
 
     def test_new_preview_profile_never_sizes_a_still_reader(self):
         controller = (SRC / 'CameraController.kt').read_text()

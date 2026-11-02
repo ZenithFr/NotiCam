@@ -124,6 +124,14 @@ interface CameraActions {
     /** @param ev exposure compensation in EV, continuous (sent as 1/3 steps). */
     fun onEvChanged(ev: Float)
     fun onGridToggle()
+    fun onFramingGuideCycle() {}
+    fun onManualExposureToggle() {}
+    fun onSensorIsoChanged(fraction: Float) {}
+    fun onSensorShutterChanged(fraction: Float) {}
+    fun onWhiteBalanceSelected(preset: WhiteBalancePreset) {}
+
+    fun onRawFramesSelected(frames: Int) {}
+    fun onRawCaptureCancel() {}
     fun onRawToggle()
     fun onTimerCycle()
 
@@ -192,9 +200,13 @@ class CameraController(
     // ── UI state ────────────────────────────────────────────────────────────
     private val bokehPreferences = activity.getSharedPreferences("bokeh_models", Context.MODE_PRIVATE)
     @Volatile private var selectedBokehModel = BokehModel.fromId(bokehPreferences.getString("model", null))
+    private val controlPreferences = activity.getSharedPreferences("camera_controls", Context.MODE_PRIVATE)
+    private var sensorControlToken = 0
     private val _uiState = mutableStateOf(
         CameraUiState(
             bokehModel = selectedBokehModel,
+            grid = controlPreferences.getBoolean("grid", false),
+            framingGuide = FramingGuide.fromId(controlPreferences.getString("guide", null)),
             status = "Connecting…",
             telemetry = "VIEWFINDER · idle",
             lensCount = 1,
@@ -234,9 +246,9 @@ class CameraController(
     private var timerRunning = false
     @Volatile private var captureState: CameraUiState? = null
     private val captureTimeout = Runnable {
-        if (stillCaptureInProgress.getAndSet(false)) {
-            captureState = null
-            update { it.copy(captureBusy = false, status = "Capture timed out — try again") }
+        if (stillCaptureInProgress.get()) {
+            finishCapture("Capture timed out — try again")
+            if (foreground && state.raw) rebuildStillSession("RAW timed out · resetting capture session…")
         }
     }
     private val stillCaptureInProgress = AtomicBoolean(false)
@@ -290,7 +302,14 @@ class CameraController(
     private var maxPreviewGapNsDuringCapture = 0L
     private var capturePreviewFrames = 0
     private var latestPhotoUri: Uri? = null
-    private var latestPendingDngUri: Uri? = null
+    private class PendingRawCapture(val token: Int, val generation: Int, val count: Int) {
+        val cancelled = AtomicBoolean(false)
+        val uris = ArrayList<Uri>() // IO executor only.
+        val destinations = AtomicReference<Array<android.os.ParcelFileDescriptor>?>(null)
+        var finalizing = false // Main thread only; ignore duplicate completion callbacks.
+    }
+    @Volatile private var pendingRawCapture: PendingRawCapture? = null
+    private var nextRawToken = 0
     private var lensSwitching = false
     @Volatile private var zoomHandoffPending = false
     @Volatile private var zoomHandoffToken = 0
@@ -433,6 +452,7 @@ class CameraController(
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
+        if (pendingRawCapture != null) finishCapture("RAW backend disconnected")
         cancelZoomHandoff()
         if (state.videoStarting || state.videoRecording) stopVideo(save = false, restore = false)
         ++sessionToken
@@ -505,6 +525,7 @@ class CameraController(
     fun pause() {
         if (disposed || !foreground) return
         foreground = false // Reject queued reads/opens before releasing any resources.
+        if (pendingRawCapture != null) finishCapture("RAW capture cancelled on pause")
         engineReady = false
         abandonBokehChecks()
         invalidateAuxiliaryFrames()
@@ -522,6 +543,7 @@ class CameraController(
 
     fun dispose() {
         if (disposed) return
+        abandonRawCapture()
         abandonBokehChecks()
         if (state.videoStarting || state.videoRecording) stopVideo(save = state.videoRecording, restore = false)
         cancelZoomHandoff()
@@ -687,7 +709,7 @@ class CameraController(
         )
             .daemon(false)
             .tag("noticam-${android.os.Process.myPid()}-${System.identityHashCode(this)}")
-            .version(7)
+            .version(9)
             .processNameSuffix("auxcam_privileged")
         serviceArgs = args
         try { Shizuku.bindUserService(args, this) }
@@ -707,6 +729,7 @@ class CameraController(
     }
 
     override fun onServiceDisconnected(name: ComponentName?) {
+        if (pendingRawCapture != null) finishCapture("RAW backend disconnected")
         cancelZoomHandoff()
         if (state.videoStarting || state.videoRecording) stopVideo(save = false, restore = false)
         ++sessionToken
@@ -801,6 +824,19 @@ class CameraController(
                 override fun onSessionReady(cameraId: String?) { post { if (token == sessionToken) this@CameraController.onSessionReady(cameraId) } }
                 override fun onSessionError(msg: String?) { post { if (token == sessionToken) this@CameraController.onSessionError(msg) } }
                 override fun onStillCaptured() { post { if (token == sessionToken) this@CameraController.onStillCaptured() } }
+                override fun onRawCaptureFinished(request: Int, savedCount: Int, error: String?) {
+                    post { if (token == sessionToken) finishRawCapture(request, savedCount, error) }
+                }
+                override fun onSensorControlsResult(request: Int, selection: LongArray?, error: String?) {
+                    post { if (token == sessionToken && request == sensorControlToken && selection?.size == 4) {
+                        update { it.copy(manualExposure = selection[0] == 1L,
+                            sensorIso = selection[1].coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(), sensorExposureNs = selection[2],
+                            whiteBalance = WhiteBalancePreset.fromMode(selection[3].toInt()),
+                            sensorControlStatus = error ?: "Camera accepted requested controls · live exposure may be capped",
+                            status = error ?: if (it.status.startsWith("Camera controls rejected:")) "Ready" else it.status) }
+                        if (error != null) Toast.makeText(activity, error, Toast.LENGTH_LONG).show()
+                    } }
+                }
                 override fun onStats(colorFps: Float, depthFps: Float, dt: Float) {
                     post { if (token == sessionToken) this@CameraController.onStats(colorFps, depthFps, dt) }
                 }
@@ -842,6 +878,8 @@ class CameraController(
             currentLens = actualLens
             invalidateAuxiliaryFrames()
         }
+        refreshSensorControlCapabilities()
+        refreshRawCapability()
         if (state.mode == CaptureMode.Photo) refreshHighResolutionCapability()
         onTele = currentLens == "3"
         if (onTele) native.setCameraOpticalParams(11.12f, 5.80f, 2.40f)
@@ -895,6 +933,73 @@ class CameraController(
         }
     }
 
+    private fun refreshSensorControlCapabilities() {
+        val svc = service ?: return
+        val generation = sessionToken
+        val request = ++sensorControlToken
+        update { it.copy(sensorControls = SensorControlCapabilities(), sensorControlsLoaded = false, sensorControlStatus = "Checking current lens controls…") }
+        io.execute {
+            val caps = try { SensorControlCapabilities.fromWire(svc.sensorControlCapabilities) }
+                catch (e: Exception) { SensorControlCapabilities() }
+            post { if (generation == sessionToken && request == sensorControlToken && foreground && service === svc) {
+                val maxExposure = SensorControlPolicy.maxExposure(caps, state.mode == CaptureMode.Video, state.videoTargetFps)
+                update { it.copy(sensorControls = caps, sensorControlsLoaded = true,
+                    manualExposure = it.manualExposure && caps.hasManualExposure && maxExposure > 0 && it.resolution == Resolution.Standard,
+                    sensorIso = SensorControlPolicy.iso(it.sensorIso, caps).takeIf { iso -> iso > 0 } ?: 100,
+                    sensorExposureNs = SensorControlPolicy.exposure(it.sensorExposureNs, caps, it.mode == CaptureMode.Video, it.videoTargetFps).takeIf { ns -> ns > 0 } ?: 8_000_000L,
+                    whiteBalance = it.whiteBalance.takeIf { preset -> caps.supportsWhiteBalance(preset.mode) } ?: WhiteBalancePreset.Auto,
+                    sensorControlStatus = if (caps.hasManualExposure) "Current lens advertises manual sensor control" else "Manual sensor control not advertised; Auto retained") }
+                sendSensorControls()
+            } }
+        }
+    }
+
+    private fun sendSensorControls() {
+        val svc = service ?: return
+        val request = ++sensorControlToken
+        try {
+            svc.setSensorControls(request, state.manualExposure, state.sensorIso, state.sensorExposureNs, state.whiteBalance.mode)
+        } catch (e: RemoteException) {
+            update { it.copy(sensorControlStatus = "Could not send controls; camera connection needs attention") }
+        }
+    }
+
+    override fun onManualExposureToggle() {
+        if (!state.canAdjustSensorControls || (!state.manualExposure && !state.manualExposureAvailable)) return
+        if (!state.manualExposure && state.flash != FlashMode.Off) {
+            update { it.copy(sensorControlStatus = "Turn flash off before enabling manual exposure") }
+            return
+        }
+        update { it.copy(manualExposure = !it.manualExposure, aeAfLocked = false) }
+        try { service?.setAfLock(false) } catch (_: RemoteException) { }
+        sendSensorControls()
+        haptic()
+    }
+
+    override fun onSensorIsoChanged(fraction: Float) {
+        if (!state.canAdjustSensorControls || !state.manualExposure || !fraction.isFinite()) return
+        val caps = state.sensorControls
+        val iso = SensorControlPolicy.fromFraction(fraction, caps.minIso.toLong(), caps.maxIso.toLong()).toInt()
+        if (iso == state.sensorIso) return
+        update { it.copy(sensorIso = iso) }
+        sendSensorControls()
+    }
+
+    override fun onSensorShutterChanged(fraction: Float) {
+        if (!state.canAdjustSensorControls || !state.manualExposure || !fraction.isFinite()) return
+        val ns = SensorControlPolicy.fromFraction(fraction, state.sensorControls.minExposureNs, state.maxManualExposureNs)
+        if (ns == state.sensorExposureNs) return
+        update { it.copy(sensorExposureNs = ns) }
+        sendSensorControls()
+    }
+
+    override fun onWhiteBalanceSelected(preset: WhiteBalancePreset) {
+        if (!state.canAdjustSensorControls || !state.sensorControls.supportsWhiteBalance(preset.mode)) return
+        update { it.copy(whiteBalance = preset) }
+        sendSensorControls()
+        haptic()
+    }
+
     private fun refreshHighResolutionCapability() {
         val svc = service ?: return
         val generation = frameGeneration
@@ -934,6 +1039,12 @@ class CameraController(
             Toast.makeText(activity, msg ?: "Video session failed", Toast.LENGTH_LONG).show()
             return
         }
+        if (state.raw) {
+            finishCapture("RAW session rejected")
+            update { it.copy(raw = false, sessionReady = false) }
+            rebuildStillSession("RAW unavailable for this stream combination · restoring JPEG…")
+            return
+        }
         if (state.resolution == Resolution.High) {
             Toast.makeText(activity, "50 MP stream unavailable. Returning to 12 MP.", Toast.LENGTH_LONG).show()
             finishCapture("50 MP stream rejected")
@@ -955,34 +1066,124 @@ class CameraController(
     }
 
     private fun onStillCaptured() {
-        val pendingUri = latestPendingDngUri
-        if (pendingUri != null) {
-            latestPendingDngUri = null
-            io.execute {
-                try {
-                    val complete = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
-                    activity.contentResolver.update(pendingUri, complete, null, null)
-                    latestPhotoUri = pendingUri
-                    if (Build.VERSION.SDK_INT >= 29) {
-                        try {
-                            val source = ImageDecoder.createSource(activity.contentResolver, pendingUri)
-                            val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                                var sample = 1
-                                val maxDim = maxOf(info.size.width, info.size.height)
-                                while (maxDim / sample > 336) sample *= 2
-                                decoder.setTargetSampleSize(sample)
-                            }
-                            post { onThumbnailReady(bitmap.asImageBitmap()) }
-                        } catch (t: Throwable) {
-                            Log.w(TAG, "DNG thumbnail generation failed", t)
-                        }
+        // JPEG/YUV publication is owned by onStillImage, never by HAL completion alone.
+        Log.d(TAG, "Still request completed; waiting for image save")
+    }
+
+    private fun refreshRawCapability() {
+        val svc = service ?: return
+        val generation = sessionToken
+        val lens = currentLens
+        update { it.copy(rawCapabilityChecked = false, rawSensorWidth = 0, rawSensorHeight = 0) }
+        io.execute {
+            val size = try { svc.getRawSensorSize(lens) } catch (_: Exception) { null }
+            post { if (generation == sessionToken && lens == currentLens) {
+                update { it.copy(rawCapabilityChecked = true, rawSensorWidth = size?.getOrNull(0) ?: 0,
+                    rawSensorHeight = size?.getOrNull(1) ?: 0) }
+                update { it.copy(rawFrames = it.rawFrames.coerceIn(1, it.maxRawFrames.coerceAtLeast(1))) }
+            } }
+        }
+    }
+
+    private fun deleteRawAssets(job: PendingRawCapture) {
+        job.destinations.getAndSet(null)?.forEach { try { it.close() } catch (_: Exception) { } }
+        for (uri in job.uris) try { activity.contentResolver.delete(uri, null, null) }
+            catch (e: Exception) { Log.w(TAG, "Could not remove incomplete RAW asset", e) }
+        job.uris.clear()
+    }
+
+    private fun abandonRawCapture() {
+        val job = pendingRawCapture ?: return
+        pendingRawCapture = null
+        job.cancelled.set(true)
+        try { service?.cancelRawCapture(job.token) } catch (_: Exception) { }
+        io.execute { deleteRawAssets(job) }
+    }
+
+    private fun beginRawCapture(svc: IAuxCamService, snapshot: CameraUiState) {
+        val job = PendingRawCapture(++nextRawToken, sessionToken, snapshot.rawFrames)
+        pendingRawCapture = job
+        val commandNs = shutterClickNs
+        io.execute {
+            val fds = ArrayList<android.os.ParcelFileDescriptor>()
+            var transferred = false
+            try {
+                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+                repeat(job.count) { index ->
+                    check(!job.cancelled.get() && !disposed && foreground && job.generation == sessionToken) { "RAW cancelled" }
+                    val values = ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, "NOTICAM_${stamp}_RAW_${index + 1}.dng")
+                        put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
+                        put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NotiCam")
+                        put(MediaStore.Images.Media.IS_PENDING, 1)
+                        put(MediaStore.Images.Media.WIDTH, snapshot.photoWidth)
+                        put(MediaStore.Images.Media.HEIGHT, snapshot.photoHeight)
                     }
-                    Log.i(TAG, "DNG capture saved successfully to MediaStore: $pendingUri")
-                    finishCapture("RAW (DNG) saved")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed finalizing DNG MediaStore entry", e)
-                    finishCapture("Failed saving RAW (DNG)")
+                    val uri = checkNotNull(activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
+                    job.uris.add(uri)
+                    fds.add(checkNotNull(activity.contentResolver.openFileDescriptor(uri, "w")))
                 }
+                check(!job.cancelled.get() && foreground && !disposed && job.generation == sessionToken)
+                job.destinations.set(fds.toTypedArray())
+                transferred = true
+                // Dispatch and cancellation share Main's ordering. A cancelled preparation
+                // cannot submit a late request into a newly opened camera session.
+                post {
+                    val destinations = job.destinations.getAndSet(null) ?: return@post
+                    try {
+                        if (pendingRawCapture === job && !job.cancelled.get() && foreground &&
+                            !disposed && job.generation == sessionToken) svc.triggerRawBurst(job.token, commandNs, destinations)
+                    } catch (e: Exception) {
+                        if (pendingRawCapture === job) finishCapture("RAW request failed: ${e.message?.take(100)}")
+                    } finally { for (fd in destinations) try { fd.close() } catch (_: Exception) { } }
+                }
+            } catch (e: Exception) {
+                deleteRawAssets(job)
+                post { if (pendingRawCapture === job) finishCapture("RAW request failed: ${e.message?.take(100)}") }
+            } finally { if (!transferred) for (fd in fds) try { fd.close() } catch (_: Exception) { } }
+        }
+    }
+
+    private fun finishRawCapture(token: Int, savedCount: Int, error: String?) {
+        val job = pendingRawCapture ?: return
+        if (job.token != token || job.generation != sessionToken || job.cancelled.get() || job.finalizing) return
+        if (error != null || savedCount != job.count) {
+            finishCapture(error ?: "RAW sequence incomplete")
+            if (foreground) rebuildStillSession("RAW capture interrupted · reopening lens…")
+            return
+        }
+        job.finalizing = true
+        io.execute {
+            try {
+                check(!job.cancelled.get() && !disposed && foreground && job.generation == sessionToken)
+                for (uri in job.uris) {
+                    activity.contentResolver.openFileDescriptor(uri, "r").use { pfd ->
+                        check(pfd != null && pfd.statSize > 0) { "Empty DNG output" }
+                    }
+                }
+                val savedUri = job.uris.last()
+                val thumbnail = try {
+                    ImageDecoder.decodeBitmap(ImageDecoder.createSource(activity.contentResolver, savedUri)) { decoder, info, _ ->
+                        var sample = 1
+                        while (maxOf(info.size.width, info.size.height) / sample > 336) sample *= 2
+                        decoder.setTargetSampleSize(sample)
+                    }.asImageBitmap()
+                } catch (_: Exception) { null }
+                for (uri in job.uris) {
+                    check(!job.cancelled.get() && !disposed && foreground)
+                    val complete = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                    check(activity.contentResolver.update(uri, complete, null, null) == 1) { "Could not publish DNG" }
+                }
+                check(!job.cancelled.get() && !disposed && foreground && job.generation == sessionToken)
+                post { if (pendingRawCapture === job && !job.cancelled.get() && foreground && !disposed && job.generation == sessionToken) {
+                    latestPhotoUri = savedUri
+                    pendingRawCapture = null
+                    if (thumbnail != null) onThumbnailReady(thumbnail)
+                    finishCapture(if (job.count == 1) "RAW (DNG) saved" else "${job.count} separate DNGs saved · not merged")
+                } }
+            } catch (e: Exception) {
+                deleteRawAssets(job)
+                post { if (pendingRawCapture === job) finishCapture("RAW save failed: ${e.message?.take(100)}") }
             }
         }
     }
@@ -1599,13 +1800,7 @@ class CameraController(
         main.removeCallbacks(captureTimeout)
         stillCaptureInProgress.set(false)
         captureState = null
-        val pendingDng = latestPendingDngUri
-        if (pendingDng != null && message.contains("fail", ignoreCase = true)) {
-            latestPendingDngUri = null
-            io.execute {
-                try { activity.contentResolver.delete(pendingDng, null, null) } catch (ignored: Exception) {}
-            }
-        }
+        abandonRawCapture()
         post { update { it.copy(captureBusy = false, status = message) } }
     }
 
@@ -1631,25 +1826,12 @@ class CameraController(
             it.copy(
                 captureBusy = true,
                 capturePulse = it.capturePulse + 1,
-                status = "Capturing…",
+                status = if (it.raw) "Capturing ${it.rawFrames} RAW frame${if (it.rawFrames == 1) "" else "s"}…" else "Capturing…",
             )
         }
         try {
             if (state.raw) {
-                val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
-                val values = ContentValues().apply {
-                    put(MediaStore.Images.Media.DISPLAY_NAME, "NOTICAM_${stamp}_RAW.dng")
-                    put(MediaStore.Images.Media.MIME_TYPE, "image/x-adobe-dng")
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NotiCam")
-                    put(MediaStore.Images.Media.IS_PENDING, 1)
-                    put(MediaStore.Images.Media.WIDTH, state.photoWidth)
-                    put(MediaStore.Images.Media.HEIGHT, state.photoHeight)
-                }
-                val dngUri = checkNotNull(activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
-                latestPendingDngUri = dngUri
-                checkNotNull(activity.contentResolver.openFileDescriptor(dngUri, "w")).use { pfd ->
-                    svc.triggerStill(shutterClickNs, pfd)
-                }
+                beginRawCapture(svc, checkNotNull(captureState))
             } else {
                 svc.triggerStillWithZsl(shutterClickNs, false, enableZsl && !state.bokehActive && state.resolution == Resolution.Standard)
             }
@@ -1693,6 +1875,14 @@ class CameraController(
     // ═══════════════════════════ ACTIONS ═════════════════════════════════════
 
     override fun onFlashClick() {
+        if (state.mode != CaptureMode.Photo || !state.sessionReady || state.captureBusy || state.previewTransitioning || state.bokehChecksRunning) return
+        if (state.raw) {
+            Toast.makeText(activity, "RAW sequences use flash Off", Toast.LENGTH_SHORT).show(); return
+        }
+        if (state.manualExposure) {
+            update { it.copy(sensorControlStatus = "Return to Auto exposure before enabling flash", status = "Flash requires Auto exposure") }
+            return
+        }
         val next = when (state.flash) {
             FlashMode.Off -> FlashMode.Auto
             FlashMode.Auto -> FlashMode.On
@@ -1947,6 +2137,8 @@ class CameraController(
     }
 
     private fun invalidateAuxiliaryFrames() {
+        ++sensorControlToken
+        update { it.copy(sensorControls = SensorControlCapabilities(), sensorControlsLoaded = false, sensorControlStatus = "Checking current lens controls…") }
         resetLiveBokehPolicy()
         publishedMatte.set(null)
         update { it.copy(bokehModelReady = false) }
@@ -2046,6 +2238,8 @@ class CameraController(
     }
 
     override fun onEvChanged(ev: Float) {
+        if (state.manualExposure) return // Exposure compensation is an AE-only control.
+
         if (!ev.isFinite()) return
         val clamped = ev.coerceIn(-4f, 4f)
         if (kotlin.math.abs(clamped - state.ev) < 0.01f) return
@@ -2075,6 +2269,11 @@ class CameraController(
     }
 
     override fun onResolutionToggle() {
+        if (state.manualExposure) {
+            update { it.copy(sensorControlStatus = "Return to Auto exposure before changing resolution or video rate") }
+            return
+        }
+
         if (state.previewTransitioning || state.bokehChecksRunning) return
         if (state.mode == CaptureMode.Video) {
             if (state.videoRecording || state.videoStarting) return
@@ -2120,14 +2319,16 @@ class CameraController(
         val bokeh = state.bokehActive && !raw
         val advertised = if (!high && !bokeh && !raw) try { service?.getStandardJpegSize(currentLens) } catch (e: Exception) { null } else null
         if (!high && !bokeh && !raw && service != null) check(advertised?.size == 2) { "This lens has no advertised native JPEG output" }
+        val rawSize = if (raw) service?.getRawSensorSize(currentLens) else null
+        check(!raw || (rawSize?.size == 2 && rawSize[0] > 0 && rawSize[1] > 0)) { "This lens exposes no RAW_SENSOR output" }
         val width = when {
-            raw -> if (currentLens == "3") 4096 else 4080
+            raw -> checkNotNull(rawSize)[0]
             high -> if (currentLens == "3") 8192 else (state.highResolutionWidth.takeIf { it > 0 } ?: 8160)
             bokeh -> DeviceProfile.STILL_WIDTH
             else -> advertised?.getOrNull(0) ?: DeviceProfile.STILL_WIDTH
         }
         val height = when {
-            raw -> 3072
+            raw -> checkNotNull(rawSize)[1]
             high -> if (currentLens == "3") 6144 else (state.highResolutionHeight.takeIf { it > 0 } ?: 6144)
             bokeh -> DeviceProfile.STILL_HEIGHT
             else -> advertised?.getOrNull(1) ?: DeviceProfile.STILL_HEIGHT
@@ -2207,6 +2408,7 @@ class CameraController(
     }
 
     override fun onManualFocusChanged(fraction: Float) {
+        if (!state.sessionReady || state.captureBusy || state.previewTransitioning || state.videoStarting || state.videoRecording) return
         if (!fraction.isFinite()) return
         val clamped = fraction.coerceIn(0f, 1f)
         update { it.copy(manualFocus = true, focusFraction = clamped) }
@@ -2218,6 +2420,7 @@ class CameraController(
     }
 
     override fun onFocusReset() {
+        if (!state.sessionReady || state.captureBusy || state.previewTransitioning || state.videoStarting || state.videoRecording) return
         update { it.copy(manualFocus = false, aeAfLocked = false, focusFraction = 0f) }
         haptic()
         try {
@@ -2229,15 +2432,43 @@ class CameraController(
 
     override fun onGridToggle() {
         update { it.copy(grid = !it.grid) }
+        controlPreferences.edit().putBoolean("grid", state.grid).apply()
         haptic()
     }
 
+    override fun onFramingGuideCycle() {
+        val guide = state.framingGuide.next()
+        update { it.copy(framingGuide = guide, grid = true) }
+        controlPreferences.edit().putString("guide", guide.id).putBoolean("grid", true).apply()
+        haptic()
+    }
+
+    override fun onRawFramesSelected(frames: Int) {
+        if (state.mode != CaptureMode.Photo || !state.raw || !state.sessionReady || state.captureBusy || state.previewTransitioning) return
+        if (frames !in 1..state.maxRawFrames) return
+        update { it.copy(rawFrames = frames) }
+        haptic()
+    }
+
+    override fun onRawCaptureCancel() {
+        if (pendingRawCapture == null && !timerRunning) return
+        timerRunning = false
+        main.removeCallbacks(timerTick)
+        finishCapture("RAW capture cancelled")
+        if (foreground) rebuildStillSession("RAW cancelled · resetting capture session…")
+    }
+
     override fun onRawToggle() {
-        if (state.previewTransitioning || state.captureBusy || !state.sessionReady) return
+        if (state.mode != CaptureMode.Photo || state.previewTransitioning || state.captureBusy || !state.sessionReady) return
         val newRaw = !state.raw
+        if (newRaw && !state.supportsRaw) {
+            Toast.makeText(activity, if (state.rawCapabilityChecked) "No compatible RAW_SENSOR stream within the capture payload budget" else "Checking RAW support…", Toast.LENGTH_SHORT).show()
+            return
+        }
         if (newRaw) {
-            update { it.copy(raw = true, resolution = Resolution.Standard, bokehEnabled = false) }
-            rebuildStillSession("Enabling RAW (DNG) capture…")
+            try { service?.setFlashMode(0) } catch (_: Exception) { }
+            update { it.copy(raw = true, flash = FlashMode.Off, resolution = Resolution.Standard, bokehEnabled = false) }
+            rebuildStillSession("Enabling advertised RAW (DNG) capture…")
         } else {
             update { it.copy(raw = false) }
             rebuildStillSession("Returning to standard JPEG…")
@@ -2246,6 +2477,7 @@ class CameraController(
     }
 
     override fun onTimerCycle() {
+        if (!state.sessionReady || state.captureBusy || state.previewTransitioning || state.videoStarting || state.videoRecording) return
         val next = when (state.timerSeconds) {
             0 -> 3
             3 -> 10
