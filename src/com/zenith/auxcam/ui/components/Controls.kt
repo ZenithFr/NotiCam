@@ -712,8 +712,14 @@ fun TopBar(
                         .padding(horizontal = 10.dp, vertical = 9.dp),
                 )
             } else {
+                val is4K = state.videoHeight >= 2160 || state.videoHeight <= 0
+                val fpsText = if (state.videoTargetFps >= 60) {
+                    if (is4K) "4K+" else "${state.videoHeight}p+"
+                } else {
+                    if (is4K) "4K · 30" else "${state.videoHeight}p · ${state.videoTargetFps}"
+                }
                 Text(
-                    text = "${if (state.videoHeight >= 2160) "4K" else if (state.videoHeight > 0) "${state.videoHeight}p" else "4K"} · ${state.videoTargetFps}",
+                    text = fpsText,
                     style = CameraType.Value,
                     color = CameraColors.Label,
                     modifier = Modifier.cameraGlass(RoundedCornerShape(24.dp))

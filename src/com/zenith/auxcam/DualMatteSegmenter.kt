@@ -614,7 +614,8 @@ class DualMatteSegmenter(private val context: Context, private val packagedOnly:
                     }
                 } else {
                     for (i in 0 until 144 * 256) {
-                        val q = outBufL.get().toInt()
+                        val raw = outBufL.get().toInt()
+                        val q = if (outDtypeL == DataType.UINT8 || (outZeroL >= 0 && raw < 0)) (raw and 0xFF) else raw
                         var p = ((q - outZeroL) * outScaleL).coerceIn(0.0f, 1.0f)
                         if (doStretch) {
                             p = Math.min(1.0f, p * 2.0f)
@@ -673,7 +674,8 @@ class DualMatteSegmenter(private val context: Context, private val packagedOnly:
                         }
                     } else {
                         for (i in 0 until 256 * 256) {
-                            val q = outBufG.get().toInt()
+                            val raw = outBufG.get().toInt()
+                            val q = if (outDtypeG == DataType.UINT8 || (outZeroG >= 0 && raw < 0)) (raw and 0xFF) else raw
                             var p = ((q - outZeroG) * outScaleG).coerceIn(0.0f, 1.0f)
                             if (doStretch) {
                                 p = Math.min(1.0f, p * 2.0f)

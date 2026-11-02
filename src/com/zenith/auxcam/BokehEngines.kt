@@ -10,6 +10,7 @@ import ai.onnxruntime.TensorInfo
 import org.json.JSONObject
 import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -94,17 +95,39 @@ private class SingleMediaPipeEngine(context: Context, model: BokehModel) : Bokeh
     private val h = if (model == BokehModel.MediaPipeLandscape) 144 else 256
     private val bytes = BokehAssets.bytes(context, if (h == 144) "models/mp_landscape_fixed_float.tflite" else "models/mp_general_fixed_float.tflite")
     private val modelBuffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }
-    private val interpreter = Interpreter(modelBuffer, Interpreter.Options().apply { setNumThreads(2); setUseXNNPACK(true) })
+    private var nnapiDelegate: NnApiDelegate? = null
+    private val interpreter: Interpreter
     private val input = ByteBuffer.allocateDirect(256 * h * 3 * 4).order(ByteOrder.nativeOrder())
     private val output = ByteBuffer.allocateDirect(256 * h * 4).order(ByteOrder.nativeOrder())
-    override val description = "TFLite CPU/XNNPACK · 2 threads · 256 × $h"
+    override val description: String
     init {
+        var delegate: NnApiDelegate? = null
+        val options = Interpreter.Options().apply {
+            setNumThreads(4)
+            try {
+                val nnOpts = NnApiDelegate.Options().apply {
+                    setAcceleratorName("mtk-mdla_shim")
+                }
+                delegate = NnApiDelegate(nnOpts)
+                addDelegate(delegate)
+            } catch (t: Throwable) {
+                delegate = null
+                setUseXNNPACK(true)
+            }
+        }
+        interpreter = Interpreter(modelBuffer, options)
+        nnapiDelegate = delegate
+        description = (if (delegate != null) "TFLite APU (mtk-mdla_shim)" else "TFLite CPU/XNNPACK · 4 threads") + " · 256 × $h"
         try {
             require(interpreter.getInputTensor(0).shape().contentEquals(intArrayOf(1, h, 256, 3)))
             require(interpreter.getOutputTensor(0).shape().contentEquals(intArrayOf(1, h, 256, 1)))
             require(interpreter.getInputTensor(0).dataType() == DataType.FLOAT32)
             require(interpreter.getOutputTensor(0).dataType() == DataType.FLOAT32)
-        } catch (t: Throwable) { interpreter.close(); throw t }
+        } catch (t: Throwable) {
+            interpreter.close()
+            nnapiDelegate?.close()
+            throw t
+        }
     }
     override fun infer(frame: BokehFrame): ByteArray {
         frame.writeTensor(input.asFloatBuffer(), 256, h, nchw = false)
@@ -114,7 +137,10 @@ private class SingleMediaPipeEngine(context: Context, model: BokehModel) : Bokeh
         output.rewind(); output.asFloatBuffer().get(alpha)
         return BokehMask.sensorBytes(alpha, 256, h, DeviceProfile.PREVIEW_ROTATION_90)
     }
-    override fun close() = interpreter.close()
+    override fun close() {
+        interpreter.close()
+        nnapiDelegate?.close()
+    }
 }
 
 private class OnnxBokehEngine(context: Context, private val model: BokehModel) : BokehEngine {
