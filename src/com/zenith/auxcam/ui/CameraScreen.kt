@@ -30,9 +30,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -63,6 +61,8 @@ import com.zenith.auxcam.DeviceProfile
 import com.zenith.auxcam.Resolution
 import com.zenith.auxcam.ui.components.LensBlend
 import com.zenith.auxcam.ui.components.BottomBar
+import com.zenith.auxcam.ui.components.CaptureControlRail
+import com.zenith.auxcam.ui.components.TogglePill
 import com.zenith.auxcam.ui.components.CameraSettings
 import com.zenith.auxcam.ui.components.MatteIconButton
 import com.zenith.auxcam.ui.components.QuickApertureRow
@@ -107,6 +107,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                     LensBlend(state, actions, Modifier.fillMaxSize()) {
                         Viewfinder(
                             gridVisible = state.grid,
+                            framingGuide = state.framingGuide,
                             zoom = state.zoom,
                             capturePulse = state.capturePulse,
                             focusNonce = state.focusNonce,
@@ -164,6 +165,13 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                             enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.previewTransitioning,
                         )
                     }
+                    if (state.manualExposure) {
+                        Text("M · ISO ${state.sensorIso} · ${com.zenith.auxcam.SensorControlPolicy.shutterLabel(state.sensorExposureNs)}",
+                            style = CameraType.Caption, color = CameraColors.Accent,
+                            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 72.dp)
+                                .cameraGlass(RoundedCornerShape(12.dp)).padding(horizontal = 10.dp, vertical = 5.dp),
+                            maxLines = 1)
+                    }
                     Box(
                         Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
                             .cameraGlass(RoundedCornerShape(24.dp)).padding(horizontal = 2.dp)
@@ -187,27 +195,36 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                 }
             }
             // Reserved height keeps the Vulkan surface stable as portrait controls appear.
-            Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) {
                 Crossfade(
                     targetState = state.bokehActive && state.sessionReady && !state.captureBusy,
                     animationSpec = tween(220), label = "aperture-strip",
                 ) { apertureVisible ->
                     if (apertureVisible) QuickApertureRow(state = state, actions = actions)
                     else {
-                        val message = when {
-                            state.videoRecording -> if (state.videoHasAudio) "Recording • audio on" else "Recording • microphone off"
-                            state.mode == CaptureMode.Video && state.captureBusy -> state.status
-                            state.mode == CaptureMode.Video -> if (state.status == "Ready")
-                                "${state.videoHeight}p · 30 fps · ${if (state.videoHasAudio) "Audio on" else "Mic permission requested on Record"}"
-                                else state.status
-                            !DeviceProfile.isTargetDevice() -> "Designed for CMF Phone 2 Pro"
-                            state.status == "Ready" -> "${state.photoSizeLabel}  ·  4:3  ·  JPEG"
-                            else -> state.status
-                        }
-                        Crossfade(targetState = message, animationSpec = tween(180), label = "camera-status") { text ->
-                            Text(text = text, style = CameraType.Caption,
-                                color = if (state.captureBusy) CameraColors.Accent else CameraColors.LabelSecondary,
-                                modifier = Modifier.padding(horizontal = 24.dp), maxLines = 2)
+                        if (state.sessionReady && !state.captureBusy && !state.bokehChecksRunning && !state.videoStarting && !state.videoRecording) {
+                            CaptureControlRail(state, actions)
+                        } else if (state.raw && state.captureBusy) {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Text(state.status, style = CameraType.Caption, color = CameraColors.LabelSecondary, modifier = Modifier.weight(1f))
+                                TogglePill("CANCEL", false, actions::onRawCaptureCancel)
+                            }
+                        } else {
+                            val message = when {
+                                state.videoRecording -> if (state.videoHasAudio) "Recording • audio on" else "Recording • microphone off"
+                                state.mode == CaptureMode.Video && state.captureBusy -> state.status
+                                state.mode == CaptureMode.Video -> if (state.status == "Ready")
+                                    "${state.videoHeight}p · 30 fps · ${if (state.videoHasAudio) "Audio on" else "Mic permission requested on Record"}"
+                                    else state.status
+                                !DeviceProfile.isTargetDevice() -> "Designed for CMF Phone 2 Pro"
+                                state.status == "Ready" -> "${state.photoSizeLabel}  ·  4:3  ·  JPEG"
+                                else -> state.status
+                            }
+                            Crossfade(targetState = message, animationSpec = tween(180), label = "camera-status") { text ->
+                                Text(text = text, style = CameraType.Caption,
+                                    color = if (state.captureBusy) CameraColors.Accent else CameraColors.LabelSecondary,
+                                    modifier = Modifier.padding(horizontal = 24.dp), maxLines = 2)
+                            }
                         }
                     }
                 }
@@ -235,7 +252,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
         ) {
             CameraSettings(state = state, actions = actions,
                 modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp)
-                    .verticalScroll(rememberScrollState()).padding(bottom = 24.dp))
+                    .padding(bottom = 16.dp))
         }
     }
     if (state.galleryOpen) GalleryScreen(onClose = actions::onGalleryClose)

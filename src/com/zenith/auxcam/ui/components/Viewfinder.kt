@@ -34,6 +34,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.zenith.auxcam.DeviceProfile
+import com.zenith.auxcam.FramingGuide
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
@@ -70,6 +71,7 @@ fun Viewfinder(
     onLock: () -> Unit,
     onUnlock: () -> Unit,
     zoomEnabled: Boolean = enabled,
+    framingGuide: FramingGuide = FramingGuide.Thirds,
     modifier: Modifier = Modifier,
 ) {
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
@@ -149,15 +151,14 @@ fun Viewfinder(
             },
         )
 
-        // Rule-of-thirds grid.
+        // Viewfinder-only guides; no pixel reads, camera crop or saved-image changes.
         if (gridVisible || gridAlpha > 0.001f) {
             Canvas(Modifier.fillMaxSize().graphicsLayer { alpha = gridAlpha }) {
                 val hairline = 0.5.dp.toPx()
                 val color = Color.White.copy(alpha = 0.22f)
-                drawLine(color, Offset(size.width / 3f, 0f), Offset(size.width / 3f, size.height), hairline)
-                drawLine(color, Offset(size.width * 2f / 3f, 0f), Offset(size.width * 2f / 3f, size.height), hairline)
-                drawLine(color, Offset(0f, size.height / 3f), Offset(size.width, size.height / 3f), hairline)
-                drawLine(color, Offset(0f, size.height * 2f / 3f), Offset(size.width, size.height * 2f / 3f), hairline)
+                for (line in framingGuide.lines(size.width, size.height)) {
+                    drawLine(color, Offset(line.x1, line.y1), Offset(line.x2, line.y2), hairline)
+                }
             }
         }
 

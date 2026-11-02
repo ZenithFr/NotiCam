@@ -12,7 +12,6 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.graphics.Rect;
 import android.graphics.ImageFormat;
 import android.util.Size;
-import android.hardware.camera2.params.StreamConfigurationMap;
 import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
@@ -22,14 +21,12 @@ import android.media.ImageReader;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.ParcelFileDescriptor;
-import android.os.PowerManager;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 import android.util.Range;
 import android.view.Surface;
 
-import java.io.FileOutputStream;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,10 +57,27 @@ public class CameraUserService extends IAuxCamService.Stub {
     private Surface mStillSurface;
     private Surface mRecordingSurface;
     private ImageReader mRawImageReader;
-    private volatile ParcelFileDescriptor mPendingDngPfd;
-    private volatile Image mLatestRawImage;
-    private volatile TotalCaptureResult mLatestRawResult;
-    private final Object mDngLock = new Object();
+    private RawJob mRawJob; // Camera handler only. Writers own only their matched Image.
+    private final java.util.concurrent.atomic.AtomicInteger mRawWritesPending = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.ExecutorService mRawWriter = java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+        Thread thread = new Thread(r, "RawDngWriter"); thread.setDaemon(true); return thread;
+    });
+    private static final class RawJob {
+        final int token, generation, orientation;
+        final IAuxCamCallback owner;
+        final CameraCharacteristics characteristics;
+        final ParcelFileDescriptor[] outputs;
+        final RawFrameMatcher<Image, TotalCaptureResult> matcher;
+        final java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+        int saved;
+        Runnable timeout;
+        RawJob(int token, int generation, int orientation, IAuxCamCallback owner,
+                CameraCharacteristics characteristics, ParcelFileDescriptor[] outputs) {
+            this.token = token; this.generation = generation; this.orientation = orientation;
+            this.owner = owner; this.characteristics = characteristics; this.outputs = outputs;
+            matcher = new RawFrameMatcher<>(outputs.length);
+        }
+    }
     private boolean mVideoMode;
     private boolean mHighResolutionStill;
     private volatile CameraCapabilities.Target mHighResolutionTarget;
@@ -95,7 +109,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     private Range<Integer> mCompensationRange;
     private String mPhysicalId;
     private String mCurrentCameraId = CAMERA_ID;
-    private int mSessionGeneration = 0;
+    private volatile int mSessionGeneration = 0;
     private int[] mNoiseModes;
     private int[] mEdgeModes;
     private int[] mRotateAndCropModes;
@@ -103,6 +117,13 @@ public class CameraUserService extends IAuxCamService.Stub {
     private float mManualFocusDistance = 0.0f;
     private boolean mManualFocusActive = false;
     private boolean mAfLocked = false;
+    private volatile SensorControlCapabilities mSensorControls = new SensorControlCapabilities();
+    private boolean mManualExposureEnabled = false;
+    private int mManualIso = 100;
+    private long mManualExposureNs = 8_000_000L;
+    private int mAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO;
+    private final java.util.concurrent.atomic.AtomicInteger mLatestSensorControlToken = new java.util.concurrent.atomic.AtomicInteger();
+
 
     private int mColorW = 1440, mColorH = 1080;
     private int mDepthW = 448, mDepthH = 288;
@@ -328,28 +349,31 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         mColorSurface = colorSurface;
         mDepthSurface = depthSurface;
-        if (stillFormat == ImageFormat.RAW_SENSOR) {
-            if (mRawImageReader != null) {
-                mRawImageReader.close();
-                mRawImageReader = null;
-            }
-            mRawImageReader = ImageReader.newInstance(stillW, stillH, ImageFormat.RAW_SENSOR, 2);
-            mStillSurface = mRawImageReader.getSurface();
-            mRawImageReader.setOnImageAvailableListener(reader -> {
-                synchronized (mDngLock) {
-                    if (mLatestRawImage != null) mLatestRawImage.close();
-                    mLatestRawImage = reader.acquireLatestImage();
-                    maybeWriteDngLocked();
-                }
-            }, mCameraHandler);
-        } else {
-            if (mRawImageReader != null) {
-                mRawImageReader.close();
-                mRawImageReader = null;
-            }
-            mStillSurface = stillSurface;
-        }
+        mStillSurface = stillSurface;
         mRecordingSurface = recordingSurface;
+        CameraManager cm = cameraManager();
+        if (cm == null) {
+            closeSessionOnCameraThread();
+            notifyError("CameraManager unavailable"); return;
+        }
+        if (stillFormat == ImageFormat.RAW_SENSOR) {
+            Size rawSize = CameraCapabilities.rawSize(cm, colorPhysicalId);
+            if (rawSize == null || rawSize.getWidth() != stillW || rawSize.getHeight() != stillH ||
+                    RawFrameMatcher.maxFramesForSize(stillW, stillH) == 0) {
+                closeSessionOnCameraThread();
+                notifyError("RAW size not advertised or exceeds capture payload budget"); return;
+            }
+            try {
+                // Validate before allocating a reader or opening the camera.
+                mRawImageReader = ImageReader.newInstance(stillW, stillH, ImageFormat.RAW_SENSOR, RawFrameMatcher.MAX_FRAMES);
+                mStillSurface = mRawImageReader.getSurface();
+                if (stillSurface != null) stillSurface.release(); // Unused parcelled client reference.
+                mRawImageReader.setOnImageAvailableListener(this::onRawImageAvailable, mCameraHandler);
+            } catch (RuntimeException failure) {
+                closeSessionOnCameraThread();
+                notifyError("RAW reader allocation failed"); return;
+            }
+        }
         mVideoMode = videoMode;
         mZoomRatio = Float.isFinite(requestedZoom) ? Math.max(.6f, Math.min(10f, requestedZoom)) : 1f;
         mRequestedZoom = mZoomRatio;
@@ -370,12 +394,6 @@ public class CameraUserService extends IAuxCamService.Stub {
         mManualFocusActive = false;
         mCurrentCameraId = "2".equals(colorPhysicalId) || "3".equals(colorPhysicalId) ? colorPhysicalId :
                 (videoMode || stillFormat == ImageFormat.JPEG || stillFormat == ImageFormat.RAW_SENSOR ? "0" : CAMERA_ID);
-
-        CameraManager cm = cameraManager();
-        if (cm == null) {
-            notifyError("CameraManager unavailable");
-            return;
-        }
 
         if (mHighResolutionStill) {
             int[] size = getHighResolutionJpegSize(colorPhysicalId);
@@ -429,6 +447,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         return new int[0];
     }
 
+    @Override
     public int[] getRawSensorSize(String lensId) {
         try {
             CameraManager cm = cameraManager();
@@ -580,6 +599,13 @@ public class CameraUserService extends IAuxCamService.Stub {
     private void loadCameraCharacteristics(CameraManager cm) {
         try {
             CameraCharacteristics chars = cm.getCameraCharacteristics(mCurrentCameraId);
+            mSensorControls = readSensorControlCapabilities(chars);
+            if (!mSensorControls.getHasManualExposure() || mHighResolutionStill ||
+                    SensorControlPolicy.maxExposure(mSensorControls, mVideoMode, mVideoRecordFps) == 0L)
+                mManualExposureEnabled = false;
+            mManualIso = SensorControlPolicy.iso(mManualIso, mSensorControls);
+            mManualExposureNs = SensorControlPolicy.exposure(mManualExposureNs, mSensorControls, mVideoMode, mVideoRecordFps);
+            if (!mSensorControls.supportsWhiteBalance(mAwbMode)) mAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO;
             mPreviewFpsRange = CameraCapabilities.previewRange(cm, mCurrentCameraId, new Size(mColorW, mColorH), mPreviewMaxFps);
             if (mPreviewFpsRange == null) throw new IllegalStateException("No advertised FPS range for the preview stream");
             Log.i(TAG, "PREVIEW_TARGET: " + mColorW + "x" + mColorH + " " + mPreviewFpsRange + " (still " + mStillW + "x" + mStillH + " unchanged)");
@@ -725,6 +751,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         } catch (Throwable t) {
             Log.w(TAG, "applyPreviewControls: " + t);
         }
+        applySensorControls(b, false);
     }
 
     private void applyStillFlash(CaptureRequest.Builder b) {
@@ -744,6 +771,109 @@ public class CameraUserService extends IAuxCamService.Stub {
         } catch (Throwable t) {
             Log.w(TAG, "applyStillFlash: " + t);
         }
+    }
+
+    private static boolean containsMode(int[] modes, int wanted) {
+        if (modes != null) for (int mode : modes) if (mode == wanted) return true;
+        return false;
+    }
+
+    private static SensorControlCapabilities readSensorControlCapabilities(CameraCharacteristics chars) {
+        int[] capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES);
+        int[] aeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES);
+        Range<Integer> iso = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE);
+        Range<Long> exposure = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE);
+        Long frame = chars.get(CameraCharacteristics.SENSOR_INFO_MAX_FRAME_DURATION);
+        java.util.List<CaptureRequest.Key<?>> keys = chars.getAvailableCaptureRequestKeys();
+        boolean manual = containsMode(capabilities, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR)
+                && containsMode(aeModes, CaptureRequest.CONTROL_AE_MODE_OFF) && keys != null
+                && keys.contains(CaptureRequest.SENSOR_EXPOSURE_TIME) && keys.contains(CaptureRequest.SENSOR_SENSITIVITY)
+                && keys.contains(CaptureRequest.SENSOR_FRAME_DURATION);
+        long awb = 0L;
+        int[] awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES);
+        if (keys != null && keys.contains(CaptureRequest.CONTROL_AWB_MODE) && awbModes != null)
+            for (int mode : awbModes) if (mode >= 1 && mode <= 8) awb |= 1L << mode;
+        return new SensorControlCapabilities(manual, iso == null ? 0 : iso.getLower(), iso == null ? 0 : iso.getUpper(),
+                exposure == null ? 0L : exposure.getLower(), exposure == null ? 0L : exposure.getUpper(),
+                frame == null ? 0L : frame, awb);
+    }
+
+    @Override
+    public long[] getSensorControlCapabilities() { return mSensorControls.toWire(); }
+
+    private void applySensorControls(CaptureRequest.Builder b, boolean still) {
+        SensorControlCapabilities caps = mSensorControls;
+        if (caps.supportsWhiteBalance(mAwbMode)) {
+            b.set(CaptureRequest.CONTROL_AWB_MODE, mAwbMode);
+            if (mAwbMode != CaptureRequest.CONTROL_AWB_MODE_AUTO) b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
+        }
+        if (!caps.getHasManualExposure()) return;
+        if (mManualExposureEnabled && !mHighResolutionStill) {
+            int fps = mVideoMode ? mVideoRecordFps : mPreviewMaxFps;
+            long exposure = still ? SensorControlPolicy.exposure(mManualExposureNs, caps, false, fps)
+                    : SensorControlPolicy.liveExposure(mManualExposureNs, caps, fps);
+            if (exposure <= 0L) throw new IllegalStateException("No manual exposure fits the current stream");
+            b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF);
+            b.set(CaptureRequest.CONTROL_AE_LOCK, false);
+            b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, SensorControlPolicy.iso(mManualIso, caps));
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, exposure);
+            b.set(CaptureRequest.SENSOR_FRAME_DURATION, SensorControlPolicy.frameDuration(exposure, caps, fps));
+        } else {
+            // The repeating builder is reused: remove manual keys when returning to Auto.
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, null);
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, null);
+            b.set(CaptureRequest.SENSOR_FRAME_DURATION, null);
+        }
+    }
+
+    @Override
+    public void setSensorControls(final int token, final boolean manual, final int iso, final long exposureNs, final int awbMode) {
+        if (mCameraHandler == null) return;
+        final int generation = mSessionGeneration;
+        final IAuxCamCallback owner = mCallback;
+        mLatestSensorControlToken.set(token);
+        mCameraHandler.post(() -> {
+            if (generation != mSessionGeneration || owner != mCallback) return;
+            if (token != mLatestSensorControlToken.get()) return; // Coalesce queued slider updates.
+            boolean oldManual = mManualExposureEnabled;
+            int oldIso = mManualIso, oldAwb = mAwbMode;
+            long oldExposure = mManualExposureNs;
+            String error = null;
+            try {
+                SensorControlCapabilities caps = mSensorControls;
+                if (mCaptureSession == null || mPreviewRequestBuilder == null) throw new IllegalStateException("Camera not ready");
+                if (manual && (!caps.getHasManualExposure() || mHighResolutionStill || mFlashMode != FLASH_OFF))
+                    throw new IllegalArgumentException("Manual exposure needs a supported standard-resolution lens with flash off");
+                if (awbMode != CaptureRequest.CONTROL_AWB_MODE_AUTO && !caps.supportsWhiteBalance(awbMode))
+                    throw new IllegalArgumentException("White balance preset not advertised");
+                long actualExposure = SensorControlPolicy.exposure(exposureNs, caps, mVideoMode, mVideoRecordFps);
+                if (manual && (actualExposure == 0L || SensorControlPolicy.liveExposure(actualExposure, caps,
+                        mVideoMode ? mVideoRecordFps : mPreviewMaxFps) == 0L))
+                    throw new IllegalArgumentException("Exposure does not fit this stream");
+                mManualExposureEnabled = manual;
+                mManualIso = SensorControlPolicy.iso(iso, caps);
+                mManualExposureNs = actualExposure;
+                mAwbMode = awbMode;
+                applyPreviewControls(mPreviewRequestBuilder);
+                mCaptureSession.setRepeatingRequest(mPreviewRequestBuilder.build(), new CaptureCallback(this), mCameraHandler);
+            } catch (Throwable t) {
+                mManualExposureEnabled = oldManual; mManualIso = oldIso;
+                mManualExposureNs = oldExposure; mAwbMode = oldAwb;
+                // The last accepted repeating request remains active after rejection.
+                try { if (mPreviewRequestBuilder != null) applyPreviewControls(mPreviewRequestBuilder); }
+                catch (Throwable ignored) { }
+                String detail = t.getMessage();
+                error = "Camera controls rejected: " + (detail == null ? t.getClass().getSimpleName()
+                        : detail.substring(0, Math.min(detail.length(), 200)));
+                Log.w(TAG, error, t);
+            }
+            IAuxCamCallback callback = owner;
+            if (callback != null) try {
+                callback.onSensorControlsResult(token,
+                        new long[]{mManualExposureEnabled ? 1L : 0L, mManualIso, mManualExposureNs, mAwbMode}, error);
+            } catch (RemoteException e) { Log.w(TAG, "Control result", e); }
+        });
     }
 
     /** Re-submits the repeating preview request after a control change. */
@@ -921,10 +1051,178 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     @Override
     public void triggerStill(long shutterCommandNs, ParcelFileDescriptor dngPfd) {
-        synchronized (mDngLock) {
-            mPendingDngPfd = dngPfd;
+        triggerRawBurst(0, shutterCommandNs, new ParcelFileDescriptor[]{dngPfd});
+    }
+
+    @Override
+    public void triggerRawBurst(int token, long shutterCommandNs, ParcelFileDescriptor[] outputs) {
+        IAuxCamCallback owner = mCallback;
+        int generation = mSessionGeneration;
+        if (outputs == null) outputs = new ParcelFileDescriptor[0];
+        final ParcelFileDescriptor[] destinations = outputs;
+        if (mCameraHandler == null || mDestroying.get() || !mCameraHandler.post(() ->
+                startRawCapture(token, shutterCommandNs, destinations, owner, generation))) {
+            closeRawOutputs(destinations); rawFinished(owner, token, 0, "RAW backend unavailable");
         }
-        triggerStillWithZsl(shutterCommandNs, false, false);
+    }
+
+    @Override
+    public void cancelRawCapture(int token) {
+        if (mCameraHandler != null) mCameraHandler.post(() -> {
+            if (mRawJob != null && mRawJob.token == token) failRaw(mRawJob, "RAW capture cancelled");
+        });
+    }
+
+    private static void closeRawOutputs(ParcelFileDescriptor[] outputs) {
+        for (ParcelFileDescriptor pfd : outputs) if (pfd != null) try { pfd.close(); } catch (Exception ignored) { }
+    }
+
+    private void rawFinished(IAuxCamCallback owner, int token, int saved, String error) {
+        if (owner == null || owner != mCallback) return;
+        try {
+            if (token == 0) {
+                if (error == null) owner.onStillCaptured(); else owner.onSessionError(error);
+            } else owner.onRawCaptureFinished(token, saved, error);
+        } catch (RemoteException ignored) { }
+    }
+
+    private void startRawCapture(int token, long shutterCommandNs, ParcelFileDescriptor[] outputs,
+            IAuxCamCallback owner, int generation) {
+        RawJob job = null;
+        try {
+            if (generation != mSessionGeneration || owner != mCallback || mVideoMode ||
+                    mStillFormat != ImageFormat.RAW_SENSOR || mRawImageReader == null ||
+                    mCaptureSession == null || mCameraDevice == null || mRawJob != null || mRawWritesPending.get() != 0)
+                throw new IllegalStateException("RAW session unavailable or previous capture is cleaning up");
+            if (outputs.length < 1 || outputs.length > RawFrameMatcher.MAX_FRAMES ||
+                    outputs.length > RawFrameMatcher.maxFramesForSize(mStillW, mStillH))
+                throw new IllegalArgumentException("RAW sequence exceeds frame/memory budget (128 MiB)");
+            for (ParcelFileDescriptor pfd : outputs) if (pfd == null) throw new IllegalArgumentException("Missing DNG destination");
+            job = new RawJob(token, generation, RawFrameMatcher.exifOrientation(mSensorOrientation), owner,
+                    cameraManager().getCameraCharacteristics(mCurrentCameraId), outputs);
+            mRawJob = job;
+            final RawJob active = job;
+            mShutterCommandNs = shutterCommandNs;
+            Image stale;
+            while ((stale = mRawImageReader.acquireNextImage()) != null) stale.close();
+            mCameraHandler.removeCallbacks(mZoomStep);
+            mZoomRatio = mRequestedZoom;
+            recomputeCropRegion();
+            ArrayList<CaptureRequest> requests = new ArrayList<>();
+            for (int index = 0; index < outputs.length; index++) {
+                CaptureRequest.Builder b = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
+                b.addTarget(mStillSurface);
+                b.setTag(index);
+                b.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
+                b.set(CaptureRequest.CONTROL_ENABLE_ZSL, false);
+                b.set(CaptureRequest.CONTROL_AF_MODE, mManualFocusActive ? CaptureRequest.CONTROL_AF_MODE_OFF :
+                        mAfLocked ? CaptureRequest.CONTROL_AF_MODE_AUTO : CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+                if (mManualFocusActive) b.set(CaptureRequest.LENS_FOCUS_DISTANCE, mManualFocusDistance);
+                if (mAfLocked) b.set(CaptureRequest.CONTROL_AE_LOCK, true);
+                if (mAfRegion != null) b.set(CaptureRequest.CONTROL_AF_REGIONS,
+                        new MeteringRectangle[]{new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
+                applyCropAndExposure(b, false);
+                b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
+                b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
+                applySensorControls(b, true);
+                applyMinimalProcessing(b);
+                requests.add(b.build());
+            }
+            job.timeout = () -> failRaw(active, "RAW capture timed out");
+            mCameraHandler.postDelayed(job.timeout, 20_000L);
+            mCaptureSession.captureBurst(requests, new CameraCaptureSession.CaptureCallback() {
+                @Override public void onCaptureCompleted(CameraCaptureSession session, CaptureRequest request, TotalCaptureResult result) {
+                    if (active != mRawJob || active.generation != mSessionGeneration || session != mCaptureSession) return;
+                    try {
+                        Long timestamp = result.get(CaptureResult.SENSOR_TIMESTAMP);
+                        if (timestamp == null) throw new IllegalStateException("RAW result has no sensor timestamp");
+                        writeMatchedRaw(active, active.matcher.result(timestamp, (Integer) request.getTag(), result));
+                    } catch (Exception e) { failRaw(active, "RAW result rejected: " + e.getClass().getSimpleName()); }
+                }
+                @Override public void onCaptureFailed(CameraCaptureSession session, CaptureRequest request, CaptureFailure failure) {
+                    failRaw(active, "RAW frame failed: HAL reason=" + failure.getReason());
+                }
+                @Override public void onCaptureSequenceAborted(CameraCaptureSession session, int sequenceId) {
+                    failRaw(active, "RAW capture sequence aborted");
+                }
+            }, mCameraHandler);
+        } catch (Exception e) {
+            if (job != null) failRaw(job, "RAW capture failed: " + e.getClass().getSimpleName());
+            else { closeRawOutputs(outputs); rawFinished(owner, token, 0, "RAW capture rejected: " + e.getMessage()); }
+        }
+    }
+
+    private void onRawImageAvailable(ImageReader reader) {
+        try {
+            Image image;
+            while ((image = reader.acquireNextImage()) != null) {
+                RawJob job = mRawJob;
+                if (reader != mRawImageReader || job == null || job.cancelled.get()) { image.close(); continue; }
+                boolean transferred = false;
+                try {
+                    long timestamp = image.getTimestamp();
+                    long bytes = image.getPlanes()[0].getBuffer().remaining();
+                    // Compute metadata before handing off; even plane access can fail.
+                    transferred = true; // matcher.image owns distinct acquisitions on rejection too.
+                    writeMatchedRaw(job, job.matcher.image(timestamp, bytes, image));
+                } catch (Exception e) { failRaw(job, "RAW image rejected: " + e.getClass().getSimpleName()); }
+                finally { if (!transferred) try { image.close(); } catch (Exception ignored) { } }
+            }
+        } catch (Exception e) {
+            if (reader == mRawImageReader && mRawJob != null) failRaw(mRawJob, "RAW reader failed");
+        }
+    }
+
+    private void writeMatchedRaw(RawJob job, RawFrameMatcher.Match<Image, TotalCaptureResult> pair) {
+        if (pair == null) return;
+        ParcelFileDescriptor pfd = job.outputs[pair.index];
+        job.outputs[pair.index] = null; // Writer alone owns this descriptor and Image now.
+        mRawWritesPending.incrementAndGet();
+        Runnable write = () -> {
+            String failure = null;
+            try {
+                if (!job.cancelled.get()) {
+                    try (DngCreator dng = new DngCreator(job.characteristics, pair.result);
+                            ParcelFileDescriptor.AutoCloseOutputStream stream = new ParcelFileDescriptor.AutoCloseOutputStream(pfd)) {
+                        dng.setOrientation(job.orientation);
+                        dng.writeImage(stream, pair.image);
+                        stream.flush();
+                    }
+                }
+            } catch (Exception e) { failure = "DNG write failed: " + e.getClass().getSimpleName(); }
+            finally {
+                try { pair.image.close(); } catch (Exception ignored) { }
+                try { pfd.close(); } catch (Exception ignored) { }
+                mRawWritesPending.decrementAndGet();
+            }
+            final String error = failure;
+            mCameraHandler.post(() -> {
+                if (mRawJob != job || job.generation != mSessionGeneration || job.cancelled.get()) return;
+                if (error != null) { failRaw(job, error); return; }
+                if (++job.saved == job.outputs.length) {
+                    mCameraHandler.removeCallbacks(job.timeout);
+                    job.matcher.close(); mRawJob = null;
+                    rawFinished(job.owner, job.token, job.saved, null);
+                }
+            });
+        };
+        try { mRawWriter.execute(write); }
+        catch (java.util.concurrent.RejectedExecutionException rejected) {
+            mRawWritesPending.decrementAndGet();
+            try { pair.image.close(); } catch (Exception ignored) { }
+            try { pfd.close(); } catch (Exception ignored) { }
+            failRaw(job, "RAW writer unavailable");
+        }
+    }
+
+    private void failRaw(RawJob job, String error) {
+        if (mRawJob != job) return;
+        mRawJob = null;
+        job.cancelled.set(true);
+        if (job.timeout != null) mCameraHandler.removeCallbacks(job.timeout);
+        job.matcher.close(); closeRawOutputs(job.outputs);
+        try { if (mCaptureSession != null) mCaptureSession.abortCaptures(); } catch (Exception ignored) { }
+        rawFinished(job.owner, job.token, job.saved, error);
     }
 
     public void triggerStill(long shutterCommandNs, boolean highQualityNr) {
@@ -938,6 +1236,9 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     private void captureStillOnCameraThread(long shutterCommandNs, boolean enableZsl) {
+        if (mStillFormat == ImageFormat.RAW_SENSOR) {
+            notifyError("RAW capture requires DNG destinations"); return;
+        }
         if (mVideoMode || mCameraDevice == null || mCaptureSession == null || mStillSurface == null) {
             Log.e(TAG, "Cannot trigger still capture: session not ready");
             notifyError("Session not ready for still capture");
@@ -955,7 +1256,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             refreshRepeatingRequest();
             CaptureRequest.Builder stillBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             stillBuilder.addTarget(mStillSurface);
-            stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl && mStillFormat != ImageFormat.JPEG);
+            stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl && !mManualExposureEnabled && mStillFormat != ImageFormat.JPEG);
             if (mStillFormat == ImageFormat.JPEG) {
                 if (android.os.Build.VERSION.SDK_INT >= 31 && (mHighResolutionTarget == null || !"Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source))) {
                     stillBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
@@ -984,6 +1285,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             }
             applyCropAndExposure(stillBuilder, mHighResolutionStill);
             applyStillFlash(stillBuilder);
+            applySensorControls(stillBuilder, true);
             if (mHighResolutionStill && mRemosaicStatus == 1) {
                 stillBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST);
             } else {
@@ -1011,43 +1313,6 @@ public class CameraUserService extends IAuxCamService.Stub {
             b.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL);
         if (supports(mEdgeModes, CaptureRequest.EDGE_MODE_OFF))
             b.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_OFF);
-    }
-
-    void onRawCaptureCompleted(TotalCaptureResult result) {
-        synchronized (mDngLock) {
-            mLatestRawResult = result;
-            maybeWriteDngLocked();
-        }
-    }
-
-    private void maybeWriteDngLocked() {
-        if (mPendingDngPfd != null && mLatestRawImage != null && mLatestRawResult != null) {
-            ParcelFileDescriptor pfd = mPendingDngPfd;
-            Image img = mLatestRawImage;
-            TotalCaptureResult res = mLatestRawResult;
-            mPendingDngPfd = null;
-            mLatestRawImage = null;
-            mLatestRawResult = null;
-
-            mExecutor.execute(() -> {
-                try {
-                    CameraCharacteristics chars = cameraManager().getCameraCharacteristics(mCurrentCameraId);
-                    try (DngCreator dng = new DngCreator(chars, res);
-                         FileOutputStream fos = new FileOutputStream(pfd.getFileDescriptor())) {
-                        dng.setOrientation(mSensorOrientation);
-                        dng.writeImage(fos, img);
-                        fos.flush();
-                    }
-                    Log.i(TAG, "DNG written successfully via DngCreator for camera " + mCurrentCameraId);
-                } catch (Throwable t) {
-                    Log.e(TAG, "Failed writing DNG", t);
-                } finally {
-                    try { pfd.close(); } catch (Throwable ignored) {}
-                    try { img.close(); } catch (Throwable ignored) {}
-                    onStillCompleted();
-                }
-            });
-        }
     }
 
     void onStillCompleted() {
@@ -1180,6 +1445,7 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     private void closeSessionOnCameraThread() {
+        mSensorControls = new SensorControlCapabilities();
         mSessionGeneration++; // Stale onOpened/onConfigured callbacks close themselves.
         if (mCameraHandler != null) {
             mCameraHandler.removeCallbacks(mZoomStep);
@@ -1190,17 +1456,13 @@ public class CameraUserService extends IAuxCamService.Stub {
         mCaptureSession = null;
         mCameraDevice = null;
         mPreviewRequestBuilder = null;
-        synchronized (mDngLock) {
-            if (mLatestRawImage != null) { mLatestRawImage.close(); mLatestRawImage = null; }
-            if (mPendingDngPfd != null) {
-                try { mPendingDngPfd.close(); } catch (Throwable ignored) {}
-                mPendingDngPfd = null;
-            }
-            mLatestRawResult = null;
-        }
+        if (mRawJob != null) failRaw(mRawJob, "RAW session closed");
         if (mRawImageReader != null) {
-            try { mRawImageReader.close(); } catch (Throwable ignored) {}
+            ImageReader retired = mRawImageReader;
             mRawImageReader = null;
+            retired.setOnImageAvailableListener(null, null);
+            // Closing a reader invalidates acquired Images: retire it only AFTER writer jobs.
+            mRawWriter.execute(() -> { try { retired.close(); } catch (Exception ignored) { } });
         }
         Surface[] surfaces = {mColorSurface, mDepthSurface, mStillSurface, mRecordingSurface};
         mColorSurface = null; mDepthSurface = null; mStillSurface = null; mRecordingSurface = null;
@@ -1331,11 +1593,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             Long sensorTs = result.get(CaptureResult.SENSOR_TIMESTAMP);
             long sensorDeltaMs = (sensorTs != null) ? (sensorTs - mService.mShutterCommandNs) / 1_000_000 : 0;
             Log.i(TAG, "TIMING HAL onCaptureCompleted: " + t_hal + " ns, total HAL dt=" + dt + " ms, sensorTs=" + sensorTs + " ns, sensor_minus_t0=" + sensorDeltaMs + " ms");
-            if (mService.mStillFormat == ImageFormat.RAW_SENSOR) {
-                mService.onRawCaptureCompleted(result);
-            } else {
-                mService.onStillCompleted();
-            }
+            mService.onStillCompleted();
         }
 
         @Override

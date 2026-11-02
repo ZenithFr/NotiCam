@@ -44,3 +44,6 @@ __pycache__/
 
 # Large model weights are checksum-pinned and bundled by fetchBokehModels at build time.
 assets/models/optional/
+
+# User-provided third-party analysis inputs; never redistribute in Git.
+.reference/

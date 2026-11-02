@@ -105,11 +105,11 @@ class MediaFeatures(unittest.TestCase):
     def test_reserved_shizuku_destroy_preserves_original_transaction_ids(self):
         import re
         aidl = (SRC / 'IAuxCamService.aidl').read_text()
-        methods = re.findall(r'(?:void|boolean|int\[\]|String)\s+(\w+)\([^;]*?\)\s*=\s*(\d+);', aidl)
-        self.assertEqual([int(code) for _, code in methods[:-1]], list(range(17)))
+        methods = re.findall(r'(?:void|boolean|int\[\]|long\[\]|String)\s+(\w+)\([^;]*?\)\s*=\s*(\d+);', aidl)
+        self.assertEqual([int(code) for _, code in methods[:-1]], list(range(22)))
         self.assertEqual(methods[-1], ('destroy', '16777114'))
         controller = (SRC / 'CameraController.kt').read_text()
-        self.assertIn('.version(7)', controller)
+        self.assertIn('.version(9)', controller)
         self.assertIn('.daemon(false)', controller)
         self.assertIn('.tag("noticam-', controller)
         self.assertIn('exitingService?.destroy()', controller)

@@ -80,7 +80,20 @@ data class CameraUiState(
     val ev: Float = 0f,
 
     val grid: Boolean = false,
+    val framingGuide: FramingGuide = FramingGuide.Thirds,
+    val sensorControls: SensorControlCapabilities = SensorControlCapabilities(),
+    val sensorControlsLoaded: Boolean = false,
+    val manualExposure: Boolean = false,
+    val sensorIso: Int = 100,
+    val sensorExposureNs: Long = 8_000_000L,
+    val whiteBalance: WhiteBalancePreset = WhiteBalancePreset.Auto,
+    val sensorControlStatus: String = "Checking current lens controls…",
+
     val raw: Boolean = false,
+    val rawFrames: Int = 1,
+    val rawSensorWidth: Int = 0,
+    val rawSensorHeight: Int = 0,
+    val rawCapabilityChecked: Boolean = false,
     val timerSeconds: Int = 0,
 
     /** 12MP vs 50MP output. */
@@ -134,8 +147,24 @@ data class CameraUiState(
     val previewTransitioning: Boolean
         get() = zoomBlendPending || zoomBlendImage != null
 
+    val canAdjustSensorControls: Boolean
+        get() = sessionReady && sensorControlsLoaded && !captureBusy && !previewTransitioning && !bokehChecksRunning && !videoStarting && !videoRecording
+
+    val maxManualExposureNs: Long
+        get() = SensorControlPolicy.maxExposure(sensorControls, mode == CaptureMode.Video, videoTargetFps)
+
+    val manualExposureAvailable: Boolean
+        get() = sensorControls.hasManualExposure && resolution == Resolution.Standard && maxManualExposureNs > 0L &&
+            SensorControlPolicy.liveExposure(sensorExposureNs, sensorControls, if (mode == CaptureMode.Video) videoTargetFps else previewTargetFps) > 0L
+
+    val supportsRaw: Boolean
+        get() = rawCapabilityChecked && maxRawFrames > 0
+
+    val maxRawFrames: Int
+        get() = RawFrameMatcher.maxFramesForSize(rawSensorWidth, rawSensorHeight)
+
     val canTakePhoto: Boolean
-        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy && !previewTransitioning && !bokehChecksRunning
+        get() = mode == CaptureMode.Photo && sessionReady && !captureBusy && !previewTransitioning && !bokehChecksRunning && (!raw || supportsRaw)
 
     val canUseShutter: Boolean
         get() = if (mode == CaptureMode.Photo) canTakePhoto

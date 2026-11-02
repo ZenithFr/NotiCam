@@ -1,7 +1,6 @@
 package com.zenith.auxcam.ui.components
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
@@ -12,8 +11,6 @@ import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -22,7 +19,6 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -57,7 +53,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -65,7 +60,6 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
@@ -73,7 +67,6 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zenith.auxcam.CameraActions
@@ -513,206 +506,6 @@ fun GalleryTile(
     }
 }
 
-/**
- * The camera-controls sheet: aperture ladder, exposure and the shoot toggles.
- *
- * The panel itself is static — [BottomBar] performs the slide-in on the whole
- * panel (translation + fade + a 4 % scale) so the contents are never re-laid out
- * frame by frame. The only thing that morphs inside is the aperture block, which
- * belongs to the optional portrait effect.
- */
-@Composable
-fun CameraSettings(
-    state: CameraUiState,
-    actions: CameraActions,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .cameraGlass(RoundedCornerShape(CameraSpacing.panelRadius), CameraColors.MatteScrim)
-            .padding(horizontal = 20.dp, vertical = 18.dp),
-    ) {
-        Text("Camera controls", style = CameraType.Title, color = CameraColors.Label)
-        Spacer(Modifier.height(8.dp))
-        Text(if (state.raw) "RAW (DNG) · 4:3 · 16-bit DNG" else "${state.resolution.label} · 4:3 · JPEG 100", style = CameraType.Value, color = CameraColors.Label)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            if (state.raw)
-                "Uncompressed RAW sensor Bayer capture saved as Adobe DNG. Portrait depth is disabled in RAW mode."
-            else if (state.resolution == Resolution.High)
-                "Full-resolution 50 MP capture on 1× and 2× telephoto. No upscaling or second JPEG encode. Portrait effect uses 12 MP."
-            else "Standard 12 MP capture. Tap the person icon for portrait depth effect. 50 MP available at 1× and 2×.",
-            style = CameraType.Caption,
-            color = CameraColors.LabelSecondary,
-        )
-        Spacer(Modifier.height(16.dp))
-
-        BokehModelSettings(state, actions)
-        Spacer(Modifier.height(22.dp))
-
-        // ── Optional portrait depth ────────────────────────────────
-        AnimatedVisibility(
-            visible = state.apertureVisible,
-            enter = fadeIn(tween(200)) + slideInVertically(
-                animationSpec = CameraMotion.slide<IntOffset>(),
-                initialOffsetY = { -it / 3 },
-            ),
-            exit = fadeOut(tween(120)) + slideOutVertically(
-                animationSpec = tween<IntOffset>(140),
-                targetOffsetY = { -it / 4 },
-            ),
-        ) {
-            Column {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = NotiIcons.Aperture,
-                        contentDescription = "Aperture",
-                        tint = CameraColors.LabelSecondary,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Text("DEPTH EFFECT", style = CameraType.Section, color = CameraColors.LabelTertiary)
-                    Spacer(Modifier.weight(1f))
-                    Text(state.fStopLabel, style = CameraType.Value, color = CameraColors.Label)
-                }
-                IosSlider(
-                    value = state.apertureFraction,
-                    valueRange = 0f..1f,
-                    onValueChange = { actions.onApertureChanged(fStopForFraction(it)) },
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Text("1.4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("2.8", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("5.6", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("11", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("16", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                }
-                Spacer(Modifier.height(14.dp))
-            }
-        }
-
-        // ── Exposure ───────────────────────────────────────────────────────
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("EXPOSURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
-            Spacer(Modifier.weight(1f))
-            Text(state.evLabel, style = CameraType.Value, color = CameraColors.Label)
-        }
-        IosSlider(
-            value = state.evFraction,
-            valueRange = 0f..1f,
-            onValueChange = { actions.onEvChanged(it * 8f - 4f) },
-            modifier = Modifier.padding(top = 2.dp),
-        )
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Text("−4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("0", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("+4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        // ── Focus: Manual slider with Reset chip ───────────────────────────
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = NotiIcons.Focus,
-                contentDescription = "Focus",
-                tint = if (state.manualFocus) CameraColors.Accent else CameraColors.LabelSecondary,
-                modifier = Modifier.size(16.dp),
-            )
-            Spacer(Modifier.width(7.dp))
-            Text("FOCUS", style = CameraType.Section, color = CameraColors.LabelTertiary)
-            Spacer(Modifier.weight(1f))
-            Text(
-                state.focusLabel,
-                style = CameraType.Value,
-                color = if (state.manualFocus) CameraColors.Accent else CameraColors.Label,
-            )
-            if (state.manualFocus || state.aeAfLocked) {
-                Spacer(Modifier.width(8.dp))
-                ResetChip(onClick = actions::onFocusReset)
-            }
-        }
-        IosSlider(
-            value = state.focusFraction,
-            valueRange = 0f..1f,
-            onValueChange = actions::onManualFocusChanged,
-            modifier = Modifier.padding(top = 2.dp),
-        )
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Text("∞", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("FAR", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("NEAR", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-            Spacer(Modifier.weight(1f))
-            Text("MACRO", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-        }
-
-        Spacer(Modifier.height(16.dp))
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(CameraColors.Separator),
-        )
-        Spacer(Modifier.height(14.dp))
-
-        // ── Capture options ────────────────────────────────────────────────
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TogglePill(
-                label = "GRID",
-                active = state.grid,
-                onClick = { actions.onGridToggle() },
-                modifier = Modifier.weight(1f),
-            )
-            TogglePill(
-                label = if (state.timerSeconds == 0) "TIMER" else "${state.timerSeconds}s",
-                active = state.timerSeconds > 0,
-                onClick = { actions.onTimerCycle() },
-                modifier = Modifier.weight(1f),
-            )
-            TogglePill(
-                label = "RAW (DNG)",
-                active = state.raw,
-                onClick = { actions.onRawToggle() },
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        Spacer(Modifier.height(22.dp))
-        Text("Viewfinder", style = CameraType.Heading, color = CameraColors.Label)
-        Text("${state.previewWidth} × ${state.previewHeight} · ${state.previewTargetFps} fps target · ${state.previewMeasuredFps.toInt()} rendered",
-            style = CameraType.Caption, color = CameraColors.LabelSecondary)
-        Text(state.previewFallback, style = CameraType.Caption, color = CameraColors.LabelSecondary)
-        Text("Still resolution and original JPEG quality are independent of this preview.",
-            style = CameraType.Caption, color = CameraColors.LabelSecondary)
-        Spacer(Modifier.height(18.dp))
-        Text("Shizuku camera backend", style = CameraType.Heading, color = CameraColors.Label)
-        Spacer(Modifier.height(6.dp))
-        Text("Report service UID, permissions and exposed camera streams. Shell access does not guarantee OEM-only modes.",
-            style = CameraType.Caption, color = CameraColors.LabelSecondary)
-        Spacer(Modifier.height(12.dp))
-        TogglePill(label = "CAMERA REPORT", active = false, onClick = actions::onCameraReport,
-            modifier = Modifier.fillMaxWidth())
-        Spacer(Modifier.height(12.dp))
-        Text(
-            text = state.telemetry,
-            style = CameraType.Telemetry,
-            color = CameraColors.LabelTertiary,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-        )
-    }
-}
-
 /** Segmented control used for the framing row. */
 @Composable
 private fun SegmentPill(
@@ -764,7 +557,7 @@ private fun SegmentPill(
 }
 
 /** Inverse of [CameraUiState.apertureFraction]: 0..1 → f-number on a log scale. */
-private fun fStopForFraction(fraction: Float): Float {
+internal fun fStopForFraction(fraction: Float): Float {
     val lo = CameraController.FSTOPS.first().toDouble()
     val hi = CameraController.FSTOPS.last().toDouble()
     val f = fraction.coerceIn(0f, 1f).toDouble()
@@ -900,12 +693,12 @@ fun TopBar(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth().height(76.dp).padding(horizontal = 16.dp),
+        modifier = modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("NotiCam", style = CameraType.Title, color = CameraColors.Label, maxLines = 1)
-            Text(if (state.mode == CaptureMode.Photo) "Photo · 4:3" else "Video · native frame",
+            Text("NotiCam", style = CameraType.Mode, color = CameraColors.Label, maxLines = 1)
+            Text(if (state.status.isNotBlank() && state.status != "Ready") state.status else if (state.mode == CaptureMode.Photo) "Photo · native frame" else "Video · native frame",
                 style = CameraType.Caption, color = CameraColors.LabelSecondary, maxLines = 1)
         }
         Box(Modifier.size(64.dp, 48.dp), contentAlignment = Alignment.Center) {
@@ -937,7 +730,7 @@ fun TopBar(
             },
             contentDescription = "Flash: ${state.flash.name}",
             onClick = actions::onFlashClick,
-            enabled = state.mode == CaptureMode.Photo && state.sessionReady && !state.captureBusy,
+            enabled = state.mode == CaptureMode.Photo && !state.raw && state.sessionReady && !state.captureBusy,
             selected = state.flash != FlashMode.Off,
         )
         MatteIconButton(
