@@ -48,15 +48,14 @@ class NothingPortrait(unittest.TestCase):
         self.assertIn('if (liveBokehSuspended) publishedMatte.set(null)', controller)
         self.assertIn('BokehMask.hasForeground(it) || FrameData.hasUsableDepth(depthFor(image.timestamp))', controller)
 
-    def test_discovered_nnapi_devices_and_honest_fallback(self):
-        native = (ROOT / 'jni/src/NativeBokehBridge.cpp').read_text()
-        for api in ('ANeuralNetworks_getDeviceCount', 'ANeuralNetworksDevice_getType', 'ANEURALNETWORKS_DEVICE_ACCELERATOR'):
-            self.assertIn(api, native)
-        engines = (SRC / 'BokehEngines.kt').read_text()
-        for required in ('NnapiDevices.available()', 'setUseNnapiCpu(false)', 'placement unverified', 'CPU/XNNPACK fallback', 'setAcceleratorName(device)'):
-            self.assertIn(required, engines)
-        self.assertNotIn('mtk-neuron', engines)
-        self.assertIn('-lneuralnetworks', (ROOT / 'jni/Android.mk').read_text())
+    def test_missing_apu_runtime_never_falls_back_to_old_inference(self):
+        controller = (SRC / 'CameraController.kt').read_text()
+        toggle = controller.split('override fun onBokehToggle()', 1)[1].split('override fun onResolutionToggle()', 1)[0]
+        self.assertIn('if (!PortraitRuntime.available)', toggle)
+        self.assertIn('bokehEnabled = false', toggle)
+        contract = (SRC / 'PortraitRuntime.kt').read_text()
+        self.assertIn('val available: Boolean get() = false', contract)
+        self.assertIn('No CPU/GPU fallback', contract)
 
     def test_neutral_theme_has_no_proprietary_font_or_fake_affiliation(self):
         theme = (SRC / 'ui/theme/Theme.kt').read_text()
@@ -69,7 +68,7 @@ class NothingPortrait(unittest.TestCase):
         controls = (SRC / 'ui/components/Controls.kt').read_text()
         pill = controls.split('fun TogglePill(', 1)[1].split('/** 52 dp gallery', 1)[0]
         self.assertIn('heightIn(min = CameraSpacing.capsuleHeight)', pill)
-        self.assertIn('padding(horizontal = 12.dp, vertical = 12.dp)', pill)
+        self.assertIn('padding(horizontal = 12.dp, vertical = 8.dp)', pill)
         self.assertIn('maxLines = 2', pill)
         self.assertIn('overflow = TextOverflow.Ellipsis', pill)
-        self.assertIn('width(80.dp).heightIn(min = CameraSpacing.touch)', controls)
+        self.assertIn('128.dp else 80.dp).heightIn(min = CameraSpacing.touch)', controls)

@@ -30,7 +30,7 @@ object CameraColors {
     /** Neutral status token; do not imply a semantic pass just with color. */
     val Green = Color(0xFFB1B3B3)
 
-    val Label = Color.White
+    val Label = Color.White.copy(alpha = 0.90f)
     val LabelSecondary = Color(0xFFDCD7D2)
     val LabelTertiary = Color(0xFFB1B3B3)
     val LabelQuaternary = Color(0xFF777B7B)
@@ -60,17 +60,17 @@ object CameraSpacing {
 
     /** Minimum interactive target: 48 dp; visual glyphs remain smaller. */
     val touch = 48.dp
-    val iconButton = 40.dp
-    val iconSize = 21.dp
+    val iconButton = 36.dp
+    val iconSize = 18.dp
     val gutter = 16.dp
     val gutterWide = 24.dp
     val capsuleHeight = 48.dp
     val panelRadius = 28.dp
-    val shutterVisual = 78.dp
+    val shutterVisual = 68.dp
     /** The shutter composable is larger than its disc so the capture pulse ring
      *  always has room to expand — this is what stops the animation clipping. */
     val shutterTouch = 96.dp
-    val gallery = 52.dp
+    val gallery = 48.dp
     val railSlider = 44.dp
     val controlRadius = 16.dp
 }

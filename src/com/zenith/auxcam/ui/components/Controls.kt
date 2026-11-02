@@ -123,7 +123,7 @@ fun MatteIconButton(
         animationSpec = CameraMotion.fade(180), label = "matte-availability",
     )
     val foreground by animateColorAsState(
-        targetValue = if (selected) Color.Black else tint,
+        targetValue = if (selected) CameraColors.Label else tint,
         animationSpec = tween(180),
         label = "matte-fg",
     )
@@ -135,6 +135,7 @@ fun MatteIconButton(
                 interactionSource = interaction,
                 indication = null,
                 enabled = enabled,
+                role = Role.Button,
                 onClick = {
                     haptics.tap()
                     onClick()
@@ -210,7 +211,7 @@ fun LensChip(
         label = "chip-bg",
     )
     val foreground by animateColorAsState(
-        targetValue = if (selected) Color.Black else Color.White,
+        targetValue = CameraColors.Label,
         animationSpec = tween(200),
         label = "chip-fg",
     )
@@ -223,7 +224,7 @@ fun LensChip(
                 scaleY = scale
                 clip = false
             }
-            .background(background, CircleShape)
+            .cameraGlass(CircleShape, background)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -235,80 +236,6 @@ fun LensChip(
     }
 }
 
-/** Floating two-mode dock with a single spring-driven white selection. */
-@Composable
-fun ModeCarousel(
-    selected: CaptureMode,
-    onSelect: (CaptureMode) -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
-    val tabWidth = 104.dp
-    val indicatorX by animateDpAsState(
-        targetValue = tabWidth * selected.ordinal,
-        animationSpec = CameraMotion.select(),
-        label = "mode-indicator",
-    )
-    Box(modifier = modifier.cameraGlass(RoundedCornerShape(28.dp)).padding(4.dp)) {
-        Box(Modifier.offset(x = indicatorX).size(tabWidth, 48.dp)
-            .background(CameraColors.Accent, RoundedCornerShape(24.dp)))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            CaptureMode.entries.forEach { mode ->
-                ModeLabel(label = mode.label, selected = mode == selected,
-                    onClick = { onSelect(mode) }, enabled = enabled, modifier = Modifier.size(tabWidth, 48.dp))
-            }
-        }
-    }
-}
-
-@Composable
-private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
-    val interaction = remember { MutableInteractionSource() }
-    val pressed by interaction.collectIsPressedAsState()
-    val haptics = rememberCameraHaptics()
-    val color by animateColorAsState(
-        targetValue = if (selected) CameraColors.OnLight else CameraColors.LabelSecondary,
-        animationSpec = tween(220),
-        label = "mode-color",
-    )
-    val scale by animateFloatAsState(
-        // Selected labels sit a hair larger — Apple does the same in the carousel.
-        targetValue = when {
-            pressed -> 0.92f
-            selected -> 1f
-            else -> 1f
-        },
-        animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
-        label = "mode-scale",
-    )
-
-    Box(
-        modifier = modifier
-            .semantics { this.selected = selected }
-            .clickable(
-                role = Role.Tab,
-                enabled = enabled,
-                interactionSource = interaction,
-                indication = null,
-                onClick = { haptics.select(); onClick() },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            style = CameraType.Mode,
-            color = color,
-            maxLines = 1,
-            modifier = Modifier.graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-                transformOrigin = TransformOrigin.Center
-                clip = false
-            },
-        )
-    }
-}
-
 /** Direct under the finger; spring-settled on taps, resets and release. */
 @Composable
 fun IosSlider(
@@ -316,6 +243,7 @@ fun IosSlider(
     valueRange: ClosedFloatingPointRange<Float>,
     onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    detents: List<Float> = emptyList(),
 ) {
     var widthPx by remember { mutableFloatStateOf(1f) }
     var dragging by remember { mutableStateOf(false) }
@@ -337,8 +265,9 @@ fun IosSlider(
         label = "slider-touch",
     )
     fun emit(x: Float) {
-        val position = ((x - insetPx) / (widthPx - 2f * insetPx).coerceAtLeast(1f)).coerceIn(0f, 1f)
-        val detent = (position * 12f).roundToInt()
+        val rawPosition = ((x - insetPx) / (widthPx - 2f * insetPx).coerceAtLeast(1f)).coerceIn(0f, 1f)
+        val position = if (detents.isEmpty()) rawPosition else detents.minBy { kotlin.math.abs(it - rawPosition) }
+        val detent = if (detents.isEmpty()) (position * 12f).roundToInt() else detents.indexOf(position)
         if (dragging && detent != lastTick) { lastTick = detent; haptics.tick() }
         onChange(valueRange.start + position * span)
     }
@@ -349,13 +278,13 @@ fun IosSlider(
                 progressBarRangeInfo = ProgressBarRangeInfo(value.coerceIn(valueRange), valueRange)
                 setProgress { requested -> onChange(requested.coerceIn(valueRange)); true }
             }
-            .pointerInput(valueRange) {
+            .pointerInput(valueRange, detents) {
                 detectTapGestures(
                     onPress = { pressed = true; try { tryAwaitRelease() } finally { pressed = false } },
                     onTap = { offset -> emit(offset.x) },
                 )
             }
-            .pointerInput(valueRange) {
+            .pointerInput(valueRange, detents) {
                 detectHorizontalDragGestures(
                     onDragStart = { dragging = true; lastTick = -1; emit(it.x) },
                     onDragEnd = { dragging = false },
@@ -374,7 +303,9 @@ fun IosSlider(
                 Size(travel, trackHeight), radius)
             drawRoundRect(CameraColors.SliderFill, Offset(knobRadius, cy - trackHeight / 2f),
                 Size(travel * displayedFraction, trackHeight), radius)
-            drawCircle(Color.White, knobRadius * knobScale, Offset(knobX, cy))
+            for (stop in detents) drawLine(CameraColors.LabelSecondary.copy(alpha = .45f),
+                Offset(knobRadius + travel * stop, cy - 5.dp.toPx()), Offset(knobRadius + travel * stop, cy + 5.dp.toPx()), 1.dp.toPx())
+            drawCircle(CameraColors.Label, knobRadius * knobScale, Offset(knobX, cy))
         }
     }
 }
@@ -386,6 +317,7 @@ fun TogglePill(
     active: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -400,7 +332,7 @@ fun TogglePill(
         label = "toggle-bg",
     )
     val foreground by animateColorAsState(
-        targetValue = if (active) Color.Black else Color.White,
+        targetValue = CameraColors.Label,
         animationSpec = tween(180),
         label = "toggle-fg",
     )
@@ -409,13 +341,14 @@ fun TogglePill(
         modifier = modifier
             .heightIn(min = CameraSpacing.capsuleHeight)
             .graphicsLayer {
+                alpha = if (enabled) 1f else 0.38f
                 scaleX = scale
                 scaleY = scale
                 clip = false
             }
-            .background(background, RoundedCornerShape(CameraSpacing.capsuleHeight / 2))
             .semantics { selected = active }
             .clickable(
+                enabled = enabled,
                 role = Role.Button,
                 interactionSource = interaction,
                 indication = null,
@@ -424,7 +357,9 @@ fun TogglePill(
                     onClick()
                 },
             )
-            .padding(horizontal = 12.dp, vertical = 12.dp),
+            .padding(vertical = 4.dp)
+            .cameraGlass(RoundedCornerShape(20.dp), background)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(text = label, style = CameraType.Value, color = foreground, fontSize = 12.sp,
@@ -533,7 +468,7 @@ private fun SegmentPill(
         label = "segment-bg",
     )
     val fg by animateColorAsState(
-        targetValue = if (selected) Color.Black else CameraColors.LabelSecondary,
+        targetValue = if (selected) CameraColors.Label else CameraColors.LabelSecondary,
         animationSpec = tween(190),
         label = "segment-fg",
     )
@@ -546,7 +481,7 @@ private fun SegmentPill(
                 scaleY = scale
                 clip = false
             }
-            .background(bg, RoundedCornerShape(16.dp))
+            .cameraGlass(RoundedCornerShape(16.dp), bg)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -628,7 +563,7 @@ fun ResetChip(
                 scaleY = scale
             }
             .clip(RoundedCornerShape(10.dp))
-            .background(CameraColors.Accent.copy(alpha = 0.20f))
+            .cameraGlass(RoundedCornerShape(10.dp), CameraColors.Accent)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
@@ -690,7 +625,7 @@ fun QuickFocusRow(
     }
 }
 
-/** Player-like title and metadata, with a compact cluster of floating controls. */
+/** Compact header: RAW at top-left, profile/flash/settings on the right. */
 @Composable
 fun TopBar(
     state: CameraUiState,
@@ -701,22 +636,18 @@ fun TopBar(
         modifier = modifier.fillMaxWidth().heightIn(min = 72.dp).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.weight(1f)) {
-            Text("NotiCam", style = CameraType.Value, color = CameraColors.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(if (state.status.isNotBlank() && state.status != "Ready") state.status else if (state.mode == CaptureMode.Photo) "Photo · native frame" else "Video · native frame",
-                style = CameraType.Caption, color = CameraColors.LabelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        // Resolution + rate have separate lines, not an overlong "1080p · 30"
-        // forced into a fixed capsule. The entire >=48dp surface is interactive.
-        Box(Modifier.width(80.dp).heightIn(min = CameraSpacing.touch), contentAlignment = Alignment.Center) {
+        RawCaptureButton(state, actions)
+        Spacer(Modifier.weight(1f))
+        // Independent resolution/rate controls, not a combined misleading "4K+". The entire >=48dp surface is interactive.
+        Row(Modifier.width(if (state.mode == CaptureMode.Video) 128.dp else 80.dp).heightIn(min = CameraSpacing.touch), verticalAlignment = Alignment.CenterVertically) {
             val photo = state.mode == CaptureMode.Photo
             val label = if (photo) {
-                if (state.raw) "RAW" else if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel
+                if (state.raw) "${if (state.resolution == Resolution.High) "50" else "12"} RAW" else if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel
             } else when {
-                state.videoHeight > 0 -> "${state.videoHeight}p"
-                else -> "Video"
+                state.videoQuality == com.zenith.auxcam.VideoPolicy.UHD -> "4K"
+                else -> "1080"
             }
-            Column(Modifier.fillMaxWidth().heightIn(min = CameraSpacing.touch)
+            Column(Modifier.weight(1f).heightIn(min = CameraSpacing.touch)
                 .cameraGlass(RoundedCornerShape(CameraSpacing.controlRadius))
                 .clickable(enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.videoStarting,
                     role = Role.Button, onClick = actions::onResolutionToggle)
@@ -724,9 +655,16 @@ fun TopBar(
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text(label, style = CameraType.Value, color = CameraColors.Label,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (!photo) Text("${state.videoTargetFps} fps", style = CameraType.Telemetry,
-                    color = CameraColors.LabelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            if (!photo) Text("${state.videoTargetFps} fps", style = CameraType.Telemetry,
+                color = CameraColors.LabelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.heightIn(min = CameraSpacing.touch).clickable(
+                    enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.videoStarting,
+                    role = Role.Button,
+                    onClick = {
+                        val rates = if (state.videoQuality == com.zenith.auxcam.VideoPolicy.HD) listOf(24, 30, 60) else listOf(24, 30)
+                        actions.onVideoRateSelected(rates[(rates.indexOf(state.videoTargetFps) + 1) % rates.size])
+                    }).padding(horizontal = 8.dp, vertical = 16.dp))
         }
         MatteIconButton(
             icon = when (state.flash) {
@@ -765,16 +703,11 @@ fun BottomBar(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         // Settings use a modal overlay and never resize the native preview.
-        ModeCarousel(
-            selected = state.mode,
-            enabled = !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
-            onSelect = { actions.onModeSelected(it) },
-        )
 
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 20.dp, bottom = 8.dp),
+                .padding(top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             GalleryTile(
@@ -808,8 +741,13 @@ fun BottomBar(
 
             Spacer(Modifier.weight(1f))
 
-            // Match the gallery footprint without leaving a dead or invisible button.
-            Spacer(Modifier.size(CameraSpacing.gallery))
+            MatteIconButton(
+                icon = if (state.mode == CaptureMode.Photo) NotiIcons.Video else NotiIcons.Photo,
+                contentDescription = if (state.mode == CaptureMode.Photo) "Switch to Video" else "Switch to Photo",
+                onClick = { actions.onModeSelected(if (state.mode == CaptureMode.Photo) CaptureMode.Video else CaptureMode.Photo) },
+                enabled = state.sessionReady && !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
+                modifier = Modifier.size(CameraSpacing.gallery),
+            )
         }
     }
 }

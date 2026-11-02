@@ -50,6 +50,14 @@ interface IAuxCamService {
     /** 1–4 individual DNG outputs, not merged footage. Completion is token-tagged. */
     void triggerRawBurst(int token, long shutterCommandNs, in ParcelFileDescriptor[] outputs) = 20;
     void cancelRawCapture(int token) = 21;
+    /** Exact requested profile: width, height, orientation; empty if unsupported. */
+    int[] getVideoConfiguration(String lensId, int quality, int fps) = 22;
+    /** Exact advertised default-pixel-mode RAW class. No remosaic/upscale substitute. */
+    int[] getRawConfiguration(String lensId, boolean highResolution) = 23;
+    /** 0=Auto; otherwise approximate 2000–10000 K, gated by manual postprocessing. */
+    void setWhiteBalanceTemperature(int token, int kelvin) = 24;
+    /** Lens-specific genuine JPEG size/pixel mode; no inferred 50 MP dimensions. */
+    int[] getHighResolutionJpegConfiguration(String lensId) = 25;
     /** Reserved Shizuku removal transaction. Closes camera and exits only this sidecar. */
     void destroy() = 16777114;
 }

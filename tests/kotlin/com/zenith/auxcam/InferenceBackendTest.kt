@@ -4,67 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class InferenceBackendTest {
-    private class Resource(val name: String) : AutoCloseable {
-        var closes = 0
-        override fun close() { closes++ }
+    @Test fun missingVerifiedApuRuntimeIsExplicitAndCannotEnablePortrait() {
+        assertFalse(PortraitRuntime.available)
+        assertEquals(512, PortraitRuntime.INPUT_SIZE)
+        val failure = assertThrows(PortraitUnavailableException::class.java) { PortraitRuntime.requireAvailable() }
+        assertTrue(failure.message!!.contains("No CPU/GPU fallback"))
+        assertFalse(CameraUiState(bokehEnabled = true).bokehActive)
+        assertTrue(CameraUiState(sessionReady = true).canTakePhoto)
     }
-    @Test fun validatedDeviceWinsWithoutCpuAndIsNotClosedEarly() {
-        val requested = mutableListOf<String?>()
-        val result = InferenceBackend.open(listOf("actual-mdla"), { requested += it; Resource(it!!) },
-            { fail("CPU must not be constructed"); Resource("cpu") }, { assertEquals("actual-mdla", it.name) })
-        assertEquals(listOf("actual-mdla"), requested)
-        assertEquals(0, result.closes)
-        result.close(); assertEquals(1, result.closes)
-    }
-    @Test fun creationAndWarmupFailuresRetryAndCloseBeforeCpu() {
-        val warmupFailure = Resource("bad-warmup")
-        val requested = mutableListOf<String?>()
-        val cpu = Resource("cpu")
-        val result = InferenceBackend.open(listOf("throws", "bad-warmup"), {
-            requested += it
-            if (it == "bad-warmup") warmupFailure else throw UnsatisfiedLinkError("driver unavailable")
-        }, { assertEquals(1, warmupFailure.closes); cpu }, {
-            if (it === warmupFailure) throw IllegalArgumentException("tensor shape/warmup rejected")
-        })
-        assertSame(cpu, result)
-        assertEquals(listOf("throws", "bad-warmup", null), requested)
-        assertEquals(0, cpu.closes)
-    }
-    @Test fun systemNnapiCanWorkWhenNoDevicesAreListed() {
-        var calls = 0
-        val result = InferenceBackend.open(emptyList(), { assertNull(it); calls++; Resource("system") },
-            { fail("No CPU expected"); Resource("cpu") }, {})
-        assertEquals("system", result.name); assertEquals(1, calls)
-    }
-    @Test fun duplicateDevicesAndInitializationAttemptsAreBounded() {
-        val requested = mutableListOf<String?>()
-        InferenceBackend.open(listOf("a", "a", "b", "c", "d"), {
-            requested += it; throw IllegalStateException("unsupported")
-        }, { Resource("cpu") }, {})
-        assertEquals(listOf("a", "b", "c", null), requested)
-    }
-    @Test fun rejectedCpuIsClosedAndItsFailureEscapes() {
-        val cpu = Resource("cpu")
-        assertThrows(IllegalStateException::class.java) {
-            InferenceBackend.open(emptyList(), { throw IllegalStateException("no delegate") }, { cpu }, {
-                throw IllegalStateException("invalid CPU model")
-            })
+    @Test fun allRemovedPreferencesMigrateToTheSingleRequestedModel() {
+        listOf("mediapipe_auto", "modnet", "rvm", null, "unknown", PortraitRuntime.MODEL_ID).forEach {
+            assertEquals(BokehModel.MobileNetV4Int8, BokehModel.fromId(it))
         }
-        assertEquals(1, cpu.closes)
-    }
-    @Test fun fatalRuntimeFailureIsNotHiddenAsCpuFallback() {
-        val oom = OutOfMemoryError("test")
-        val thrown = assertThrows(OutOfMemoryError::class.java) {
-            InferenceBackend.open(emptyList(), { throw oom }, { fail("No fallback on fatal error"); Resource("cpu") }, {})
-        }
-        assertSame(oom, thrown)
-    }
-    @Test fun removedPreferencesMigrateToAutoWithoutChangingModnetId() {
-        listOf("mediapipe_dual", "mediapipe_landscape", "mediapipe_general", "rvm", "unknown", null).forEach {
-            assertEquals(BokehModel.MediaPipeAuto, BokehModel.fromId(it))
-        }
-        assertEquals(BokehModel.MODNet, BokehModel.fromId("modnet"))
-        assertEquals(listOf("mediapipe_auto", "modnet"), BokehModel.entries.map { it.id })
+        assertEquals(listOf(PortraitRuntime.MODEL_ID), BokehModel.entries.map { it.id })
     }
     @Test fun unmeasuredDepthCannotAuthorizeWholeFrameBlur() {
         assertFalse(FrameData.hasUsableDepth(null))

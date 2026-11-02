@@ -1,5 +1,9 @@
 # NotiCam camera UI — Photo / Video
 
+> Portrait/model and video-profile details below are historical where they conflict
+> with the current [APU-only replacement report](APU_PORTRAIT_VIDEO_PROFILES.md).
+> Auto/MODNet inference is now removed; the replacement is blocked pending artifacts.
+
 ## Direction
 
 The latest direction is Nothing-inspired neutral matte glass, using the

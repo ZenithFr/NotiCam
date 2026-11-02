@@ -27,6 +27,7 @@ class VideoCapture(private val context: Context) {
     @Suppress("DEPRECATION")
     fun prepare(width: Int, height: Int, audio: Boolean, orientation: Int, targetFps: Int = VideoPolicy.FPS, onFailure: () -> Unit, onLimit: () -> Unit) {
         check(recorder == null)
+        require(targetFps in listOf(24, 30, 60)) { "Unsupported video rate" }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val values = ContentValues().apply {
             put(MediaStore.Video.Media.DISPLAY_NAME, "NOTICAM_$stamp.mp4")
@@ -50,8 +51,7 @@ class VideoCapture(private val context: Context) {
                 info.isEncoder && info.isHardwareAccelerated && try {
                     val caps = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
                     caps.colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) &&
-                        (caps.videoCapabilities?.areSizeAndRateSupported(width, height, targetFps.toDouble()) == true ||
-                         caps.videoCapabilities?.areSizeAndRateSupported(width, height, VideoPolicy.FPS.toDouble()) == true)
+                        caps.videoCapabilities?.areSizeAndRateSupported(width, height, targetFps.toDouble()) == true
                 } catch (_: IllegalArgumentException) { false }
             } ?: error("No hardware AVC encoder for this native-aspect stream")
             val bitrateRange = codec.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities.bitrateRange

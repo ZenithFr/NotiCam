@@ -139,13 +139,14 @@ class CaptureContracts(unittest.TestCase):
         self.assertEqual(2, self.controller.count('depthFor(image.timestamp),'))
         self.assertIn('generation == frameGeneration', self.controller)
 
-    def test_segmentation_uses_bounded_upright_rgb_and_one_inverse_rotation(self):
+    def test_replacement_input_is_copied_upright_without_downsampling_saved_frame(self):
         engines = read('src/com/zenith/auxcam/BokehEngines.kt')
         self.assertIn('WIDTH, HEIGHT, DeviceProfile.PREVIEW_ROTATION_90', engines)
-        self.assertIn('frame.writeTensor(input.asFloatBuffer(), 256, 256, nchw = false)', engines)
-        self.assertIn('BokehMask.sensorBytes(alpha, 256, 256, DeviceProfile.PREVIEW_ROTATION_90)', engines)
+        self.assertIn('const val WIDTH = 512', engines)
+        self.assertIn('const val HEIGHT = 512', engines)
+        self.assertIn('throw PortraitUnavailableException', engines)
         self.assertNotIn('DualMatteSegmenter', engines)
-        self.assertIn('/ 255f', read('src/com/zenith/auxcam/BokehFrame.kt'))
+        self.assertIn('PortraitRuntime.available', read('src/com/zenith/auxcam/CameraUiState.kt'))
 
     def test_stale_session_callbacks_are_rejected(self):
         self.assertGreaterEqual(self.service.count('mGeneration != mService.mSessionGeneration'), 5)

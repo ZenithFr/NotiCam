@@ -74,6 +74,6 @@ class SensorControlPolicyTest {
         assertFalse(ui.copy(videoRecording = true).canAdjustSensorControls)
         assertFalse(ui.copy(zoomBlendPending = true).canAdjustSensorControls)
         assertFalse(ui.copy(bokehChecksRunning = true).canAdjustSensorControls)
-        assertFalse(ui.copy(resolution = Resolution.High).manualExposureAvailable)
+        assertTrue(ui.copy(resolution = Resolution.High).manualExposureAvailable)
     }
 }

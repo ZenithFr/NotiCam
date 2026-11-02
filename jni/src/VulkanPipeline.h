@@ -6,7 +6,8 @@
 #include <memory>
 #include <algorithm>
 #include "YuvConverter.h"
-#include "NpuWorker.h"
+#include <atomic>
+#include <vector>
 #include <mutex>
 
 class VulkanPipeline {
@@ -17,10 +18,8 @@ public:
     bool init(ANativeWindow* window, uint32_t previewWidth = 1440, uint32_t previewHeight = 1080);
     void destroy();
 
-    // Set thermal status policy: when SEVERE (true), throttle APU to 6 Hz (166ms interval)
-    void setThermalThrottled(bool throttled) {
-        if (mNpuWorker) mNpuWorker->setThermalThrottled(throttled);
-    }
+    // JNI compatibility hook. No APU worker exists until a verified runtime is integrated.
+    void setThermalThrottled(bool /*throttled*/) {}
 
     void setDisableGuided(bool disable);
     bool getDisableGuided();
@@ -87,7 +86,6 @@ private:
     VkSwapchainKHR mSwapchain{VK_NULL_HANDLE};
 
     std::unique_ptr<YuvConverter> mYuvConverter;
-    std::unique_ptr<NpuWorker> mNpuWorker;
 
     uint32_t mWidth{1440};
     uint32_t mHeight{1080};

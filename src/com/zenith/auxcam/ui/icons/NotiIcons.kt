@@ -77,6 +77,15 @@ object NotiIcons {
     }
 
     /** A person in a frame: optional portrait depth effect, not a capture mode. */
+    val Photo: ImageVector = builder("Photo").apply {
+        strokePath { moveTo(4f, 6f); lineTo(8f, 6f); lineTo(9f, 4f); lineTo(15f, 4f); lineTo(16f, 6f); lineTo(20f, 6f); lineTo(20f, 20f); lineTo(4f, 20f); close() }
+        strokePath { circle(12f, 13f, 4f) }
+    }.build()
+    val Video: ImageVector = builder("Video").apply {
+        strokePath { moveTo(3f, 6f); lineTo(15f, 6f); lineTo(15f, 18f); lineTo(3f, 18f); close() }
+        strokePath { moveTo(15f, 10f); lineTo(21f, 7f); lineTo(21f, 17f); lineTo(15f, 14f) }
+    }.build()
+
     val Portrait: ImageVector = builder("Portrait").apply {
         strokePath {
             circle(12f, 8.2f, 2.7f)

@@ -86,7 +86,7 @@ import kotlin.math.roundToInt
 @Composable
 fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifier = Modifier) {
     BackHandler(enabled = state.settingsOpen) { actions.onSettingsToggle() }
-    val railHeight = CameraSpacing.touch * LocalDensity.current.fontScale.coerceAtLeast(1f) + CameraSpacing.railSlider
+    val railHeight = CameraSpacing.touch * LocalDensity.current.fontScale.coerceAtLeast(1f) + CameraSpacing.railSlider + 5.dp
     var shutterCenter by remember { mutableStateOf(Offset.Zero) }
     var galleryCenter by remember { mutableStateOf(Offset.Zero) }
     Box(modifier.fillMaxSize().background(CameraColors.Black)) {
@@ -130,13 +130,14 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                     Box(Modifier.fillMaxWidth().height(100.dp).align(Alignment.BottomCenter)
                         .background(Brush.verticalGradient(listOf(Color.Transparent, Color(0x70000000)))))
                     ModeBadge(
+                        persistent = state.videoRecording,
                         label = when {
                             state.videoRecording -> String.format(java.util.Locale.US, "● %02d:%02d", state.videoElapsedSeconds / 60, state.videoElapsedSeconds % 60)
                             state.mode == CaptureMode.Video -> if (state.videoWidth > 0) "VIDEO  ·  ${state.videoWidth} × ${state.videoHeight}" else "VIDEO  ·  NATIVE FRAME"
-                            state.raw -> if (state.zoom >= 2f) "RAW (DNG)  ·  2×" else "RAW (DNG)  ·  1×"
+                            state.raw -> "${if (state.resolution == Resolution.High) "50" else "12"} MP RAW  ·  ${String.format(java.util.Locale.US, "%.1f×", state.zoom)}"
                             state.bokehActive -> "PORTRAIT  ${state.fStopLabel}"
                             state.resolution == Resolution.High -> if (state.zoom >= 2f) "50 MP  ·  2×" else "50 MP  ·  1×"
-                            else -> null
+                            else -> "${state.photoSizeLabel}  ·  ${String.format(java.util.Locale.US, "%.1f×", state.zoom)}"
                         },
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
                     )
@@ -216,7 +217,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                                 state.videoRecording -> if (state.videoHasAudio) "Recording • audio on" else "Recording • microphone off"
                                 state.mode == CaptureMode.Video && state.captureBusy -> state.status
                                 state.mode == CaptureMode.Video -> if (state.status == "Ready")
-                                    "${state.videoHeight}p · 30 fps · ${if (state.videoHasAudio) "Audio on" else "Mic permission requested on Record"}"
+                                    "${state.videoHeight}p · ${state.videoTargetFps} fps · ${if (state.videoHasAudio) "Audio on" else "Mic permission requested on Record"}"
                                     else state.status
                                 !DeviceProfile.isTargetDevice() -> "Designed for CMF Phone 2 Pro"
                                 state.status == "Ready" -> "${state.photoSizeLabel}  ·  4:3  ·  JPEG"
@@ -262,11 +263,16 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
 
 /** Preserve the last valid label while fading out, rather than flashing a false 50 MP badge. */
 @Composable
-private fun ModeBadge(label: String?, modifier: Modifier = Modifier) {
+private fun ModeBadge(label: String?, modifier: Modifier = Modifier, persistent: Boolean = false) {
+    var visible by remember { mutableStateOf(false) }
+    LaunchedEffect(label, persistent) {
+        visible = label != null
+        if (!persistent) { kotlinx.coroutines.delay(2000); visible = false }
+    }
     var lastLabel by remember { mutableStateOf(label.orEmpty()) }
     SideEffect { if (label != null) lastLabel = label }
     AnimatedVisibility(
-        visible = label != null,
+        visible = visible,
         enter = fadeIn(tween(180)) + scaleIn(initialScale = 0.94f, animationSpec = CameraMotion.slide()),
         exit = fadeOut(tween(140)) + scaleOut(targetScale = 0.94f),
         modifier = modifier,

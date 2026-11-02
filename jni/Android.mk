@@ -4,14 +4,13 @@ include $(CLEAR_VARS)
 
 LOCAL_MODULE    := auxcam_engine
 LOCAL_SRC_FILES := src/YuvConverter.cpp \
-                   src/NpuWorker.cpp \
                    src/VulkanPipeline.cpp \
                    src/NativeBokehBridge.cpp
 
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/src
 
 LOCAL_CFLAGS    := -std=c++17 -O3 -DANDROID_NDK
-LOCAL_LDLIBS    := -llog -landroid -lvulkan -lz -lneuralnetworks
+LOCAL_LDLIBS    := -llog -landroid -lvulkan -lz
 
 include $(BUILD_SHARED_LIBRARY)
 

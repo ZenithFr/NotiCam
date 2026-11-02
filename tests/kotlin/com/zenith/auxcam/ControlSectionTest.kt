@@ -13,11 +13,11 @@ class ControlSectionTest {
     }
     @Test fun multiWordQueriesMatchEveryTermRegardlessOfCaseOrWhitespace() {
         assertTrue(ControlSection.Capture.matches("  RAW   sequence  "))
-        assertTrue(ControlSection.Manual.matches("WHITE\tbalance"))
+        assertFalse(ControlSection.entries.any { it.label == "Manual" })
         assertTrue(ControlSection.Portrait.matches("bokeh MODEL"))
         assertTrue(ControlSection.Capture.matches("flash"))
         assertFalse(ControlSection.System.matches("RAW sequence"))
-        assertFalse(ControlSection.Manual.matches("iso waveform"))
+        assertFalse(ControlSection.entries.any { it.matches("iso waveform") })
     }
     @Test fun searchDoesNotAdvertiseUnimplementedProcessing() {
         for (feature in listOf("HDR", "XDR", "Night", "Astro", "waveform"))

@@ -14,7 +14,7 @@ class SensorControls(unittest.TestCase):
         self.assertIn('int awbMode) = 18;', aidl)
         self.assertIn('destroy() = 16777114;', aidl)
         controller = (SRC / 'CameraController.kt').read_text()
-        self.assertIn('.version(9)', controller)
+        self.assertIn('.version(11)', controller)
         callback = (SRC / 'IAuxCamCallback.aidl').read_text()
         self.assertIn('onSensorControlsResult(int token, in long[] selection, String error)', callback)
         self.assertIn('request == sensorControlToken', controller)
@@ -44,7 +44,7 @@ class SensorControls(unittest.TestCase):
             self.assertIn(key, manual)
         for key in ('SENSOR_SENSITIVITY', 'SENSOR_EXPOSURE_TIME', 'SENSOR_FRAME_DURATION'):
             self.assertIn('b.set(CaptureRequest.' + key + ', null)', manual)
-        self.assertIn('!mHighResolutionStill', manual)
+        self.assertNotIn('!mHighResolutionStill', manual)
 
     def test_failures_restore_last_selection_and_slider_backlog_is_coalesced(self):
         service = (SRC / 'CameraUserService.java').read_text()
@@ -58,13 +58,12 @@ class SensorControls(unittest.TestCase):
         self.assertNotIn('closeSession', setter)
 
     def test_ui_real_controls_preserve_auto_and_capture_quality(self):
-        screen = (SRC / 'ui/components/SensorControlSettings.kt').read_text()
-        for action in ('onManualExposureToggle', 'onSensorIsoChanged', 'onSensorShutterChanged', 'onWhiteBalanceSelected'):
+        screen = (SRC / 'ui/components/CaptureControlRail.kt').read_text()
+        for action in ('onManualExposureToggle', 'onSensorIsoChanged', 'onSensorShutterChanged', 'onWhiteBalanceTemperatureChanged'):
             self.assertIn(action, screen)
-        self.assertIn('supportsWhiteBalance(it.mode)', screen)
-        self.assertIn('may appear darker', screen)
+        self.assertIn('supportsTemperature', screen)
         self.assertIn('state.canAdjustSensorControls', screen)
-        self.assertIn('SensorControlSettings(state, actions)', (SRC / 'ui/components/CameraSettings.kt').read_text())
+        self.assertNotIn('SensorControlSettings(state, actions)', (SRC / 'ui/components/CameraSettings.kt').read_text())
         controller = (SRC / 'CameraController.kt').read_text()
         sensor = controller.split('private fun refreshSensorControlCapabilities', 1)[1].split('private fun refreshHighResolutionCapability', 1)[0]
         for forbidden in ('rebuildStillSession(', 'Bitmap.', 'native.', 'bokehEnabled ='):

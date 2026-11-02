@@ -7,9 +7,9 @@ import org.junit.Test
 class BokehMathTest {
     @Test fun modelPreferencesUseStableIdsAndSafeUnknownFallback() {
         BokehModel.entries.forEach { assertEquals(it, BokehModel.fromId(it.id)) }
-        assertEquals(BokehModel.MediaPipeAuto, BokehModel.fromId(null))
-        assertEquals(BokehModel.MediaPipeAuto, BokehModel.fromId("removed_model"))
-        assertEquals(2, BokehModel.entries.map { it.id }.distinct().size)
+        assertEquals(BokehModel.MobileNetV4Int8, BokehModel.fromId(null))
+        assertEquals(BokehModel.MobileNetV4Int8, BokehModel.fromId("removed_model"))
+        assertEquals(1, BokehModel.entries.map { it.id }.distinct().size)
     }
     @Test fun mediaPipeReceivesUnsignedNhwcRgb() {
         val frame = BokehFrame(2, 1, byteArrayOf(-1, 0, -128, 0, -1, 64), 10L)

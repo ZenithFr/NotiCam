@@ -121,6 +121,9 @@ public class CameraUserService extends IAuxCamService.Stub {
     private boolean mManualExposureEnabled = false;
     private int mManualIso = 100;
     private long mManualExposureNs = 8_000_000L;
+    private int mKelvin = 0;
+    private android.hardware.camera2.params.ColorSpaceTransform mAutoColorTransform;
+    private android.hardware.camera2.params.RggbChannelVector mAutoColorGains;
     private int mAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO;
     private final java.util.concurrent.atomic.AtomicInteger mLatestSensorControlToken = new java.util.concurrent.atomic.AtomicInteger();
 
@@ -357,7 +360,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             notifyError("CameraManager unavailable"); return;
         }
         if (stillFormat == ImageFormat.RAW_SENSOR) {
-            Size rawSize = CameraCapabilities.rawSize(cm, colorPhysicalId);
+            Size rawSize = CameraCapabilities.rawSize(cm, colorPhysicalId, (long) stillW * stillH >= 45_000_000L);
             if (rawSize == null || rawSize.getWidth() != stillW || rawSize.getHeight() != stillH ||
                     RawFrameMatcher.maxFramesForSize(stillW, stillH) == 0) {
                 closeSessionOnCameraThread();
@@ -365,7 +368,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             }
             try {
                 // Validate before allocating a reader or opening the camera.
-                mRawImageReader = ImageReader.newInstance(stillW, stillH, ImageFormat.RAW_SENSOR, RawFrameMatcher.MAX_FRAMES);
+                mRawImageReader = ImageReader.newInstance(stillW, stillH, ImageFormat.RAW_SENSOR, RawFrameMatcher.maxFramesForSize(stillW, stillH));
                 mStillSurface = mRawImageReader.getSurface();
                 if (stillSurface != null) stillSurface.release(); // Unused parcelled client reference.
                 mRawImageReader.setOnImageAvailableListener(this::onRawImageAvailable, mCameraHandler);
@@ -377,8 +380,8 @@ public class CameraUserService extends IAuxCamService.Stub {
         mVideoMode = videoMode;
         mZoomRatio = Float.isFinite(requestedZoom) ? Math.max(.6f, Math.min(10f, requestedZoom)) : 1f;
         mRequestedZoom = mZoomRatio;
-        mPreviewMaxFps = previewMaxFps >= 60 && recordingSurface == null ? 60 : 30;
-        mVideoRecordFps = previewMaxFps >= 60 ? 60 : 30;
+        mPreviewMaxFps = videoMode && recordingSurface != null ? previewMaxFps : (previewMaxFps >= 60 ? 60 : 30);
+        mVideoRecordFps = previewMaxFps;
         mHighResolutionStill = !videoMode && stillFormat == ImageFormat.JPEG && (long) stillW * stillH >= 45_000_000L;
 
         mColorW = colorW;
@@ -458,6 +461,20 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     @Override
+    public int[] getHighResolutionJpegConfiguration(String lensId) {
+        try {
+            CameraCapabilities.Target target = CameraCapabilities.discover(cameraManager(), lensId);
+            return target == null ? new int[0] : new int[]{target.size.getWidth(), target.size.getHeight(), target.pixelMode};
+        } catch (Throwable ignored) { return new int[0]; }
+    }
+
+    @Override
+    public int[] getRawConfiguration(String lensId, boolean highResolution) {
+        Size size = CameraCapabilities.rawSize(cameraManager(), lensId, highResolution);
+        return size == null ? new int[0] : new int[]{size.getWidth(), size.getHeight()};
+    }
+
+    @Override
     public int[] getStandardJpegSize(String lensId) {
         try {
             CameraManager cm = cameraManager();
@@ -473,8 +490,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             CameraManager cm = cameraManager();
             String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
-            Size size = CameraCapabilities.fourKVideoSize(cm, id);
-            if (size == null) size = CameraCapabilities.videoSize(cm, id);
+            Size size = CameraCapabilities.videoSize(cm, id);
             if (size != null) {
                 Integer orientation = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION);
                 return new int[]{size.getWidth(), size.getHeight(), orientation == null ? 90 : orientation};
@@ -484,12 +500,26 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     @Override
+    public int[] getVideoConfiguration(String lensId, int quality, int fps) {
+        try {
+            CameraManager cm = cameraManager();
+            String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
+            Size size = CameraCapabilities.videoProfile(cm, id, quality, fps);
+            if (size != null) {
+                Integer orientation = cm.getCameraCharacteristics(id).get(CameraCharacteristics.SENSOR_ORIENTATION);
+                return new int[]{size.getWidth(), size.getHeight(), orientation == null ? 90 : orientation};
+            }
+        } catch (Exception failure) { Log.w(TAG, "Video profile unavailable", failure); }
+        return new int[0];
+    }
+
+    @Override
     public int[] getPreviewConfiguration(String lensId, boolean bokeh, boolean highResolution, boolean prefer60) {
         try {
             CameraManager cm = cameraManager();
             String id = bokeh ? CAMERA_ID : ("2".equals(lensId) || "3".equals(lensId) ? lensId : "0");
             if (highResolution) {
-                CameraCapabilities.Target target = CameraCapabilities.discover(cm);
+                CameraCapabilities.Target target = CameraCapabilities.discover(cm, lensId);
                 if (target != null) id = target.cameraId;
             }
             boolean diagnostic30 = sForceFps30 || new java.io.File("/data/local/tmp/force_fps_30").exists();
@@ -600,13 +630,21 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             CameraCharacteristics chars = cm.getCameraCharacteristics(mCurrentCameraId);
             mSensorControls = readSensorControlCapabilities(chars);
-            if (!mSensorControls.getHasManualExposure() || mHighResolutionStill ||
+            if (!mSensorControls.getHasManualExposure() ||
                     SensorControlPolicy.maxExposure(mSensorControls, mVideoMode, mVideoRecordFps) == 0L)
                 mManualExposureEnabled = false;
             mManualIso = SensorControlPolicy.iso(mManualIso, mSensorControls);
             mManualExposureNs = SensorControlPolicy.exposure(mManualExposureNs, mSensorControls, mVideoMode, mVideoRecordFps);
             if (!mSensorControls.supportsWhiteBalance(mAwbMode)) mAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO;
             mPreviewFpsRange = CameraCapabilities.previewRange(cm, mCurrentCameraId, new Size(mColorW, mColorH), mPreviewMaxFps);
+            if (mVideoMode && mRecordingSurface != null) {
+                Range<Integer> exact = CameraCapabilities.recordingRange(cm, mCurrentCameraId, mVideoRecordFps);
+                long duration = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                        .getOutputMinFrameDuration(ImageFormat.YUV_420_888, new Size(mColorW, mColorH));
+                if (exact == null || duration <= 0 || duration > 1_000_000_000L / mVideoRecordFps + 1)
+                    throw new IllegalStateException("Requested video FPS unsupported by combined preview session");
+                mPreviewFpsRange = exact;
+            }
             if (mPreviewFpsRange == null) throw new IllegalStateException("No advertised FPS range for the preview stream");
             Log.i(TAG, "PREVIEW_TARGET: " + mColorW + "x" + mColorH + " " + mPreviewFpsRange + " (still " + mStillW + "x" + mStillH + " unchanged)");
             Integer orientation = chars.get(CameraCharacteristics.SENSOR_ORIENTATION);
@@ -639,6 +677,7 @@ public class CameraUserService extends IAuxCamService.Stub {
                     + " minFocusDist=" + mMinFocusDistance
                     + " evRange=" + mCompensationRange);
         } catch (Throwable t) {
+            mPreviewFpsRange = null; // Fail closed; do not retain a previous/unsupported FPS range.
             Log.w(TAG, "Could not read camera characteristics: " + t);
         }
     }
@@ -708,14 +747,7 @@ public class CameraUserService extends IAuxCamService.Stub {
             b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF);
             if (mVideoMode) {
                 b.set(CaptureRequest.CONTROL_CAPTURE_INTENT, CaptureRequest.CONTROL_CAPTURE_INTENT_VIDEO_RECORD);
-                if (mVideoRecordFps >= 60 || mPreviewMaxFps >= 60) {
-                    b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, new Range<>(30, 60));
-                    try {
-                        b.set(new CaptureRequest.Key<Integer>("com.mediatek.streamingfeature.hfpsMode", Integer.class), 1);
-                    } catch (Throwable ignored) {}
-                } else if (mPreviewFpsRange != null) {
-                    b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mPreviewFpsRange);
-                }
+                if (mPreviewFpsRange != null) b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mPreviewFpsRange);
             } else if (mPreviewFpsRange != null) {
                 b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, mPreviewFpsRange);
             }
@@ -793,6 +825,11 @@ public class CameraUserService extends IAuxCamService.Stub {
         int[] awbModes = chars.get(CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES);
         if (keys != null && keys.contains(CaptureRequest.CONTROL_AWB_MODE) && awbModes != null)
             for (int mode : awbModes) if (mode >= 1 && mode <= 8) awb |= 1L << mode;
+        boolean manualColor = containsMode(capabilities, CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_POST_PROCESSING)
+                && containsMode(awbModes, CaptureRequest.CONTROL_AWB_MODE_OFF) && keys != null
+                && keys.contains(CaptureRequest.COLOR_CORRECTION_GAINS) && keys.contains(CaptureRequest.COLOR_CORRECTION_TRANSFORM)
+                && keys.contains(CaptureRequest.COLOR_CORRECTION_MODE);
+        if (manualColor) awb |= 1L; // v1 reserved bit 0: manual temperature, never an AWB preset.
         return new SensorControlCapabilities(manual, iso == null ? 0 : iso.getLower(), iso == null ? 0 : iso.getUpper(),
                 exposure == null ? 0L : exposure.getLower(), exposure == null ? 0L : exposure.getUpper(),
                 frame == null ? 0L : frame, awb);
@@ -803,12 +840,27 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     private void applySensorControls(CaptureRequest.Builder b, boolean still) {
         SensorControlCapabilities caps = mSensorControls;
-        if (caps.supportsWhiteBalance(mAwbMode)) {
+        if (mKelvin > 0 && caps.getSupportsTemperature()) {
+            if (mAutoColorTransform == null || mAutoColorGains == null) throw new IllegalStateException("Waiting for Auto white-balance calibration");
+            float[] gains = SensorControlPolicy.temperatureGains(mKelvin);
+            b.set(CaptureRequest.CONTROL_AWB_MODE, CaptureRequest.CONTROL_AWB_MODE_OFF);
+            b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
+            b.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_TRANSFORM_MATRIX);
+            b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, mAutoColorTransform);
+            b.set(CaptureRequest.COLOR_CORRECTION_GAINS, new android.hardware.camera2.params.RggbChannelVector(
+                    Math.min(8f, mAutoColorGains.getRed() * gains[0]), mAutoColorGains.getGreenEven(),
+                    mAutoColorGains.getGreenOdd(), Math.min(8f, mAutoColorGains.getBlue() * gains[3])));
+        } else if (caps.supportsWhiteBalance(mAwbMode)) {
+            if (caps.getSupportsTemperature()) {
+                b.set(CaptureRequest.COLOR_CORRECTION_GAINS, null);
+                b.set(CaptureRequest.COLOR_CORRECTION_TRANSFORM, null);
+                b.set(CaptureRequest.COLOR_CORRECTION_MODE, CaptureRequest.COLOR_CORRECTION_MODE_FAST);
+            }
             b.set(CaptureRequest.CONTROL_AWB_MODE, mAwbMode);
             if (mAwbMode != CaptureRequest.CONTROL_AWB_MODE_AUTO) b.set(CaptureRequest.CONTROL_AWB_LOCK, false);
         }
         if (!caps.getHasManualExposure()) return;
-        if (mManualExposureEnabled && !mHighResolutionStill) {
+        if (mManualExposureEnabled) {
             int fps = mVideoMode ? mVideoRecordFps : mPreviewMaxFps;
             long exposure = still ? SensorControlPolicy.exposure(mManualExposureNs, caps, false, fps)
                     : SensorControlPolicy.liveExposure(mManualExposureNs, caps, fps);
@@ -843,8 +895,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             try {
                 SensorControlCapabilities caps = mSensorControls;
                 if (mCaptureSession == null || mPreviewRequestBuilder == null) throw new IllegalStateException("Camera not ready");
-                if (manual && (!caps.getHasManualExposure() || mHighResolutionStill || mFlashMode != FLASH_OFF))
-                    throw new IllegalArgumentException("Manual exposure needs a supported standard-resolution lens with flash off");
+                if (manual && (!caps.getHasManualExposure() || mFlashMode != FLASH_OFF))
+                    throw new IllegalArgumentException("Manual exposure needs a supported lens with flash off");
                 if (awbMode != CaptureRequest.CONTROL_AWB_MODE_AUTO && !caps.supportsWhiteBalance(awbMode))
                     throw new IllegalArgumentException("White balance preset not advertised");
                 long actualExposure = SensorControlPolicy.exposure(exposureNs, caps, mVideoMode, mVideoRecordFps);
@@ -854,7 +906,7 @@ public class CameraUserService extends IAuxCamService.Stub {
                 mManualExposureEnabled = manual;
                 mManualIso = SensorControlPolicy.iso(iso, caps);
                 mManualExposureNs = actualExposure;
-                mAwbMode = awbMode;
+                if (mKelvin == 0) mAwbMode = awbMode;
                 applyPreviewControls(mPreviewRequestBuilder);
                 mCaptureSession.setRepeatingRequest(mPreviewRequestBuilder.build(), new CaptureCallback(this), mCameraHandler);
             } catch (Throwable t) {
@@ -871,8 +923,37 @@ public class CameraUserService extends IAuxCamService.Stub {
             IAuxCamCallback callback = owner;
             if (callback != null) try {
                 callback.onSensorControlsResult(token,
-                        new long[]{mManualExposureEnabled ? 1L : 0L, mManualIso, mManualExposureNs, mAwbMode}, error);
+                        new long[]{mManualExposureEnabled ? 1L : 0L, mManualIso, mManualExposureNs, mAwbMode, mKelvin}, error);
             } catch (RemoteException e) { Log.w(TAG, "Control result", e); }
+        });
+    }
+
+    @Override
+    public void setWhiteBalanceTemperature(final int token, final int kelvin) {
+        if (mCameraHandler == null) return;
+        final int generation = mSessionGeneration;
+        final IAuxCamCallback owner = mCallback;
+        mLatestSensorControlToken.set(token);
+        mCameraHandler.post(() -> {
+            if (generation != mSessionGeneration || owner != mCallback || token != mLatestSensorControlToken.get()) return;
+            int oldKelvin = mKelvin, oldAwb = mAwbMode;
+            String error = null;
+            try {
+                if (mCaptureSession == null || mPreviewRequestBuilder == null) throw new IllegalStateException("Camera not ready");
+                if (kelvin != 0 && (kelvin < 2000 || kelvin > 10000 || !mSensorControls.getSupportsTemperature()))
+                    throw new IllegalArgumentException("Manual temperature not advertised");
+                mKelvin = kelvin;
+                mAwbMode = kelvin == 0 ? CaptureRequest.CONTROL_AWB_MODE_AUTO : CaptureRequest.CONTROL_AWB_MODE_OFF;
+                applyPreviewControls(mPreviewRequestBuilder);
+                mCaptureSession.setRepeatingRequest(mPreviewRequestBuilder.build(), new CaptureCallback(this), mCameraHandler);
+            } catch (Throwable t) {
+                mKelvin = oldKelvin; mAwbMode = oldAwb;
+                try { if (mPreviewRequestBuilder != null) applyPreviewControls(mPreviewRequestBuilder); } catch (Throwable ignored) { }
+                error = "WB temperature rejected: " + t.getClass().getSimpleName();
+            }
+            if (owner != null) try {
+                owner.onSensorControlsResult(token, new long[]{mManualExposureEnabled ? 1L : 0L, mManualIso, mManualExposureNs, mAwbMode, mKelvin}, error);
+            } catch (RemoteException ignored) { }
         });
     }
 
@@ -1329,6 +1410,11 @@ public class CameraUserService extends IAuxCamService.Stub {
     }
 
     void onCaptureResult(TotalCaptureResult result) {
+        if (mKelvin == 0 && Integer.valueOf(CaptureRequest.CONTROL_AWB_MODE_AUTO).equals(result.get(CaptureResult.CONTROL_AWB_MODE))) {
+            android.hardware.camera2.params.ColorSpaceTransform transform = result.get(CaptureResult.COLOR_CORRECTION_TRANSFORM);
+            android.hardware.camera2.params.RggbChannelVector gains = result.get(CaptureResult.COLOR_CORRECTION_GAINS);
+            if (transform != null && gains != null) { mAutoColorTransform = transform; mAutoColorGains = gains; }
+        }
         mColorFrameCount++;
         mDepthFrameCount++; // Synced hardware DPE frames
 
@@ -1446,6 +1532,8 @@ public class CameraUserService extends IAuxCamService.Stub {
 
     private void closeSessionOnCameraThread() {
         mSensorControls = new SensorControlCapabilities();
+        mKelvin = 0; mAwbMode = CaptureRequest.CONTROL_AWB_MODE_AUTO;
+        mAutoColorTransform = null; mAutoColorGains = null;
         mSessionGeneration++; // Stale onOpened/onConfigured callbacks close themselves.
         if (mCameraHandler != null) {
             mCameraHandler.removeCallbacks(mZoomStep);
