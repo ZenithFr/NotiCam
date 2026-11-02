@@ -9,6 +9,7 @@
 #include <atomic>
 #include <vector>
 #include <mutex>
+#include <thread>
 
 class VulkanPipeline {
 public:
