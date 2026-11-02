@@ -11,7 +11,7 @@ LOCAL_SRC_FILES := src/YuvConverter.cpp \
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/src
 
 LOCAL_CFLAGS    := -std=c++17 -O3 -DANDROID_NDK
-LOCAL_LDLIBS    := -llog -landroid -lvulkan -lz
+LOCAL_LDLIBS    := -llog -landroid -lvulkan -lz -lneuralnetworks
 
 include $(BUILD_SHARED_LIBRARY)
 

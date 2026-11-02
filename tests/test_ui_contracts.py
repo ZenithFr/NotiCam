@@ -49,7 +49,7 @@ class UiContracts(unittest.TestCase):
         self.assertIn('AnimatedVisibility(visible = busy', shutter)
         self.assertIn('GalleryFlight(pulse = state.galleryPulse', screen)
         self.assertIn('thumbnail != null && from != Offset.Zero && to != Offset.Zero', screen)
-        self.assertIn('Box(Modifier.fillMaxWidth().height(80.dp)', screen)
+        self.assertIn('Box(Modifier.fillMaxWidth().height(railHeight)', screen)
         self.assertIn('CaptureControlRail(state, actions)', screen)
         self.assertIn('text = label ?: lastLabel', screen)
 

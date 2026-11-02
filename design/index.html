@@ -8,9 +8,9 @@
       :root {
         color-scheme: dark;
         --accent: #fff;
-        --focus: #ffd60a;
-        --scene-tone: 183, 122, 73;
-        --muted: #a5a5ad;
+        --focus: #ffc700;
+        --scene-tone: 177, 179, 179;
+        --muted: #b1b3b3;
         font-family:
           Inter,
           -apple-system,
@@ -27,8 +27,8 @@
       body {
         margin: 0;
         background:
-          radial-gradient(ellipse at 85% 20%, #35251c55, transparent 65%),
-          #111110;
+          radial-gradient(ellipse at 85% 20%, #b1b3b30c, transparent 65%),
+          #0b0d0d;
         color: #fff;
         min-height: 100svh;
         display: grid;
@@ -120,15 +120,15 @@
         background:
           radial-gradient(
             ellipse at 15% 15%,
-            rgba(var(--scene-tone), 0.28),
+            rgba(var(--scene-tone), 0.055),
             transparent 70%
           ),
           radial-gradient(
             ellipse at 95% 95%,
-            rgba(var(--scene-tone), 0.2),
+            rgba(var(--scene-tone), 0.025),
             transparent 70%
           ),
-          #050504;
+          #050606;
         border: 6px solid #26272b;
         outline: 1px solid #46474a;
         border-radius: 49px;
@@ -186,16 +186,16 @@
       .glass {
         background: linear-gradient(
           135deg,
-          #ffffff20,
-          #ffffff10 45%,
-          #34302d99
+          #ffffff0a,
+          #ffffff04 45%,
+          #2a2d2de6
         );
-        backdrop-filter: blur(14px) saturate(1.15);
-        -webkit-backdrop-filter: blur(14px) saturate(1.15);
+        backdrop-filter: blur(14px) saturate(0.3);
+        -webkit-backdrop-filter: blur(14px) saturate(0.3);
       }
       .round {
-        width: 44px;
-        height: 44px;
+        width: 48px;
+        height: 48px;
         flex-shrink: 0;
         display: grid;
         place-items: center;
@@ -204,8 +204,12 @@
       .toolbar .format {
         font-size: 11px;
         letter-spacing: 0.1px;
-        width: 58px;
-        height: 44px;
+        width: 80px;
+        min-height: 48px;
+        padding: 10px 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
         flex-shrink: 0;
         border-radius: 22px;
         font-weight: 650;
@@ -216,9 +220,13 @@
       }
       .camera-heading strong {
         display: block;
-        font-size: 26px;
+        font-family: ui-monospace, monospace;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 15px;
         font-weight: 520;
-        letter-spacing: -0.8px;
+        letter-spacing: 0;
       }
       .camera-heading small {
         display: block;
@@ -443,7 +451,7 @@
           transform 420ms cubic-bezier(0.16, 1, 0.3, 1);
       }
       .shutter.video:before {
-        background: #ff453a;
+        background: #c8102e;
       }
       .brand {
         display: flex;
@@ -757,7 +765,7 @@
             rgba(var(--scene-tone), 0.22),
             transparent 70%
           ),
-          #050504;
+          #050606;
         padding: 16px;
       }
       .viewer::backdrop {
@@ -875,6 +883,7 @@
           display: none;
         }
         .intro .note {
+          display: block;
           margin: 0 auto;
           font-size: 10px;
         }
@@ -906,15 +915,15 @@
   </head>
   <body>
     <aside class="intro">
-      <div class="eyebrow">NOTICAM / BITCHORD-INSPIRED</div>
-      <h1>Every frame.<br />Its own atmosphere.</h1>
+      <div class="eyebrow">NOTICAM / NOTHING-INSPIRED</div>
+      <h1>Less noise.<br />More camera.</h1>
       <p>
-        BitChord’s floating glass and artwork-inspired atmosphere, reimagined
-        for your camera. White selections. Quiet controls. The original photo
-        stays untouched.
+        Window grey. Soft matte surfaces. A little red, only where it matters.
+        Rounded framing and room for every control. Independently implemented;
+        no Nothing logos or proprietary fonts. The original photo stays untouched.
       </p>
       <div class="features">
-        <span>Floating glass</span><span>Photo + Video</span
+        <span>Neutral matte glass</span><span>Photo + Video</span
         ><span>Original JPEG</span>
       </div>
       <p class="note">
@@ -1055,8 +1064,8 @@
           </button>
         </header>
         <p class="description">
-          50 MP uses the main camera at 1×. The portrait effect switches to the
-          12 MP bokeh engine. The Android app records H.264/AAC video; this
+          50 MP eligibility comes from camera metadata at 1×. Portrait offers
+          Auto and Portrait quality in the Android app; both are person models. The Android app records H.264/AAC video; this
           browser shows only its controls.
         </p>
         <h3>CAPTURE</h3>
@@ -1172,40 +1181,6 @@
         videoStarted = 0,
         videoInterval;
       const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-      function sampleAtmosphere() {
-        const image = $("photo");
-        if (!image.naturalWidth) return;
-        try {
-          const canvas = document.createElement("canvas");
-          canvas.width = canvas.height = 12;
-          const ctx = canvas.getContext("2d", { willReadFrequently: true });
-          ctx.drawImage(image, 0, 0, 12, 12);
-          const pixels = ctx.getImageData(0, 0, 12, 12).data;
-          let red = 0,
-            green = 0,
-            blue = 0,
-            total = 0;
-          for (let i = 0; i < pixels.length; i += 4) {
-            const [r, g, b, a] = pixels.slice(i, i + 4);
-            const light = (r + g + b) / (3 * 255);
-            if (a < 128 || light < 0.06 || light > 0.94) continue;
-            const weight = 0.08 + (Math.max(r, g, b) - Math.min(r, g, b)) / 255;
-            red += r * weight;
-            green += g * weight;
-            blue += b * weight;
-            total += weight;
-          }
-          if (total)
-            document.documentElement.style.setProperty(
-              "--scene-tone",
-              [red, green, blue].map((c) => Math.round(c / total)).join(", "),
-            );
-        } catch {
-          /* Keep the warm fallback if browser pixel reads are unavailable. */
-        }
-      }
-      $("photo").addEventListener("load", sampleAtmosphere);
-      if ($("photo").complete) sampleAtmosphere();
       function fillRange(input) {
         input.style.setProperty(
           "--fill",

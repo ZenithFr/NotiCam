@@ -33,7 +33,8 @@ internal class BokehProcessor(
             sessionGeneration = generation
             lastTimestamp = frame.timestampNs
             active.policy(thermal, fps)
-            return active.infer(frame) to active.description
+            val mask = active.infer(frame)
+            return mask to (active.description + if (BokehMask.hasForeground(mask)) "" else " · no person mask; valid depth or sharp fallback")
         } catch (t: Throwable) { close(); throw t }
     }
 
@@ -53,7 +54,7 @@ internal class BokehProcessor(
                     val loadMs = (nowNanos() - loadStart) / 1_000_000.0
                     active.policy(thermal, fps)
                     if (cancelled()) throw CancellationException()
-                    active.infer(frame) // Warmup also exercises RVM's initial zero state.
+                    active.infer(frame) // Warmup before timing; no live/still temporal history is retained.
                     val times = mutableListOf<Double>()
                     var alpha = ByteArray(0)
                     repeat(5) { index ->

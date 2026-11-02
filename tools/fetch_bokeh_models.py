@@ -45,6 +45,12 @@ def fetch(spec):
                        'Restore network access or supply the matching file; no model is substituted.')
 
 
+def prune_retired_assets(root):
+    # This exact path was a generated APK weight, never a user's camera media.
+    # Do not recursively clean optional/: unrelated user-supplied files survive.
+    (root / 'assets/models/optional/rvm_mobilenetv3_fp32.onnx').unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--verify', action='store_true')
@@ -62,6 +68,8 @@ def main():
                 temporary_path = Path(temporary.name)
             temporary_path.replace(path)
         print(f"Verified {spec['asset']} ({spec['size']} bytes)")
+    if not args.verify:
+        prune_retired_assets(ROOT)
 
 
 if __name__ == '__main__':

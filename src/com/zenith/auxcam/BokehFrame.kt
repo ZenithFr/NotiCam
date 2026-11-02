@@ -24,6 +24,11 @@ internal data class BokehFrame(val width: Int, val height: Int, val rgb: ByteArr
 }
 
 internal object BokehMask {
+    /** Empty masks are not a license to blur the whole frame. Depth may still
+     * provide a foreground surface; without it, the renderer must stay sharp. */
+    fun hasForeground(mask: ByteArray): Boolean = mask.isNotEmpty() &&
+        mask.count { (it.toInt() and 255) >= 128 } >= maxOf(1, mask.size / 1000)
+
     /** Validate floats BEFORE quantizing; a byte mask cannot reveal NaNs. */
     fun sensorBytes(alpha: FloatArray, width: Int, height: Int, rotate90: Boolean): ByteArray {
         require(width > 0 && height > 0 && alpha.size == width * height)

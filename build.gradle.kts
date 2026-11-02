@@ -10,6 +10,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
 }
 
+fun com.android.build.api.dsl.AndroidSourceDirectorySet.exclude(vararg patterns: String) {
+    // AGP AndroidSourceDirectorySet does not implement PatternFilterable;
+    // retire/prune is enforced via fetchBokehModels.
+}
+
 android {
     namespace = "com.zenith.auxcam"
     compileSdk = 35
@@ -55,6 +60,8 @@ android {
             aidl.setSrcDirs(listOf("src"))
             res.setSrcDirs(listOf("res"))
             assets.setSrcDirs(listOf("assets"))
+            // Also exclude an old ignored/downloaded weight on incremental builds.
+            assets.exclude("models/optional/rvm_mobilenetv3_fp32.onnx")
             // TFLite JNI binaries ship as prebuilts next to the NDK output.
             jniLibs.setSrcDirs(listOf("tflite_extracted/jni"))
         }
@@ -101,7 +108,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // Shizuku + TensorFlow Lite ship as local jars (no network needed).
     implementation(fileTree("libs") { include("*.jar") })
-    // MODNet + recurrent RVM use their original FP32 ONNX exports.
+    // The optional Portrait quality choice uses the original MODNet FP32 ONNX export.
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
@@ -180,7 +187,7 @@ tasks.named("check") { dependsOn(verifySources) }
 // Large weights stay out of Git, following assets/models/*.onnx conventions.
 val fetchBokehModels = tasks.register<Exec>("fetchBokehModels") {
     group = "build"
-    description = "Fetches and SHA-256 verifies pinned MODNet/RVM assets for APK bundling"
+    description = "Fetches and SHA-256 verifies pinned MediaPipe/MODNet assets for APK bundling"
     inputs.files("tools/fetch_bokeh_models.py", "assets/models/bokeh-models.json")
     outputs.dir("assets/models/optional")
     outputs.upToDateWhen { false } // Rehash cached assets; download only missing/corrupt files.

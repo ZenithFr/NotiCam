@@ -293,16 +293,10 @@ class CameraController(
         if (currentLens == "0") FrameData.closestDepth(depthFrames, timestamp) else null
     }
 
-    @Volatile private var latestValidMatte: ByteArray? = null
-
-    private fun matteFor(timestamp: Long): ByteArray? {
-        val fresh = publishedMatte.get()?.forFrame(timestamp, frameGeneration, bokehModelGeneration)
-        if (fresh != null) {
-            latestValidMatte = fresh
-            return fresh
-        }
-        return latestValidMatte
-    }
+    // No unbounded last-mask fallback: moving subjects/lens changes must not keep
+    // a stale silhouette. Without a fresh mask, native uses valid depth or sharp.
+    private fun matteFor(timestamp: Long): ByteArray? =
+        if (liveBokehSuspended) null else publishedMatte.get()?.forFrame(timestamp, frameGeneration, bokehModelGeneration)
 
     private var shutterClickNs = 0L
     private var shutterDispatchNs = 0L
@@ -1423,7 +1417,7 @@ class CameraController(
         try {
             val stillMatte = if (frozen.bokehActive) {
                 post { if (state.captureBusy) update { it.copy(status = "Processing portrait…") } }
-                portraitMatteForStill(image, frozen)
+                portraitMatteForStill(image, frozen)?.takeIf { BokehMask.hasForeground(it) || FrameData.hasUsableDepth(depthFor(image.timestamp)) }
             } else null
             portraitApplied = stillMatte != null
             val t3 = SystemClock.elapsedRealtimeNanos()
@@ -1916,7 +1910,6 @@ class CameraController(
         selectedBokehModel = model
         resetLiveBokehPolicy()
         ++bokehModelGeneration
-        latestValidMatte = null
         publishedMatte.set(null)
         bokehPreferences.edit().putString("model", model.id).apply()
         matteExecutor.execute { bokehProcessor.close() }
@@ -1990,8 +1983,8 @@ class CameraController(
         val current = state
         bokehLatestSensorTimestamp = image.timestamp
         val now = SystemClock.elapsedRealtime()
-        val live = current.bokehActive && !current.captureBusy && !current.bokehChecksRunning && current.bokehModelError == null
-        val interval = if (liveBokehSuspended) 250L else liveBokehIntervalMs
+        val live = current.bokehActive && !current.captureBusy && !current.bokehChecksRunning && !liveBokehSuspended && current.bokehModelError == null
+        val interval = liveBokehIntervalMs
         if (checks == null && (!live || now - lastMatteDispatchMs < interval)) return
         if (!isMatteWorkerBusy.compareAndSet(false, true)) {
             if (live) native.notifyMatteDrop()
@@ -2039,7 +2032,6 @@ class CameraController(
                         // snapshot is rejected even if a close/switch races this store.
                         if (generation == frameGeneration && modelGeneration == bokehModelGeneration && foreground) {
                             publishedMatte.set(BokehLivePolicy.Matte(mask, frame.timestampNs, generation, modelGeneration))
-                            latestValidMatte = mask
                         }
                         post {
                             if (generation == frameGeneration && modelGeneration == bokehModelGeneration && foreground &&
@@ -2049,13 +2041,14 @@ class CameraController(
                                 liveBokehWarm = true
                                 liveBokehIntervalMs = BokehLivePolicy.intervalMs(ms)
                                 liveBokehSuspended = liveBokehSlowCycles >= 2
+                                if (liveBokehSuspended) publishedMatte.set(null)
                                 val reportDue = SystemClock.elapsedRealtime() - lastBokehStatusMs >= 1000L
                                 if (reportDue || fresh != state.bokehModelReady || liveBokehSuspended) {
                                     lastBokehStatusMs = SystemClock.elapsedRealtime()
                                     update { it.copy(bokehModelReady = fresh && !liveBokehSuspended,
                                         bokehLiveSuspended = liveBokehSuspended, bokehModelError = null,
                                         bokehModelStatus = if (liveBokehSuspended)
-                                            "${model.label} running at relaxed cadence · still applied on capture"
+                                            "${model.label} too slow for fresh live masks · valid depth or sharp preview; still applied on capture"
                                         else String.format(Locale.US, "%s · last cycle %.1f ms%s", description, ms,
                                             if (fresh) "" else " · waiting for a fresh portrait mask")) }
                                 }
@@ -2151,7 +2144,6 @@ class CameraController(
         update { it.copy(sensorControls = SensorControlCapabilities(), sensorControlsLoaded = false, sensorControlStatus = "Checking current lens controls…") }
         resetLiveBokehPolicy()
         publishedMatte.set(null)
-        latestValidMatte = null
         update { it.copy(bokehModelReady = false) }
         frameGeneration++
         synchronized(depthFrames) { depthFrames.clear() }
@@ -2273,7 +2265,6 @@ class CameraController(
         val enabled = !state.bokehEnabled
         if (!enabled) matteExecutor.execute { bokehProcessor.close() }
         resetLiveBokehPolicy()
-        latestValidMatte = null
         if (enabled) { currentLens = "0"; onTele = false; lastSentZoom = 1f }
         update { it.copy(bokehEnabled = enabled, resolution = Resolution.Standard, aeAfLocked = false, manualFocus = false,
             zoom = if (enabled) 1f else it.zoom) }

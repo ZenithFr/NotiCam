@@ -16,31 +16,31 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Independent BitChord-inspired visual tokens: neutral floating glass, white
- * selections, generous radii and a quiet type hierarchy. No copied font assets.
- * Artwork atmosphere belongs behind chrome, never in the camera's image path.
+/** Nothing-inspired, independently implemented neutral/matte tokens.
+ * Reference: nothing.wiki/nothing/brand_reference (community guide).
+ * No Nothing logos or proprietary fonts are bundled; system type is a fallback.
  */
 object CameraColors {
     val Accent = Color.White
     /** Functional focus reticle; not the UI selection accent. */
-    val Yellow = Color(0xFFFFD60A)
-    val Atmosphere = Color(0xFFB77A49)
-    /** iOS systemRed — recording only. */
-    val Red = Color(0xFFFF453A)
-    /** iOS systemGreen — reserved for future "ready" states. */
-    val Green = Color(0xFF30D158)
+    val Yellow = Color(0xFFFFC700)
+    val Atmosphere = Color(0xFFB1B3B3)
+    /** N-Red: functional recording/error accents, not a colored brand mark. */
+    val Red = Color(0xFFC8102E)
+    /** Neutral status token; do not imply a semantic pass just with color. */
+    val Green = Color(0xFFB1B3B3)
 
     val Label = Color.White
-    val LabelSecondary = Color(0xC2FFFFFF)
-    val LabelTertiary = Color(0x94FFFFFF)
-    val LabelQuaternary = Color(0x40FFFFFF)
+    val LabelSecondary = Color(0xFFDCD7D2)
+    val LabelTertiary = Color(0xFFB1B3B3)
+    val LabelQuaternary = Color(0xFF777B7B)
     val OnLight = Color.Black
 
     /** Subtle inset fill, not a decorative outline. */
-    val Matte = Color(0x14FFFFFF)
-    val ControlSurface = Color(0x803D3B3A)
+    val Matte = Color(0xFF222525)
+    val ControlSurface = Color(0xE62A2D2D)
     /** Sheets need their own readable body over the native camera SurfaceView. */
-    val MatteScrim = Color(0xF21D1B1A)
+    val MatteScrim = Color(0xFA191C1C)
 
     /** Internal hairline *between rows inside* a panel. Never a surface rim. */
     val Separator = Color(0x1FFFFFFF)
@@ -58,19 +58,21 @@ object CameraSpacing {
     val l = 16.dp
     val xl = 24.dp
 
-    /** Minimum touch target, per HIG. */
+    /** Minimum interactive target: 48 dp; visual glyphs remain smaller. */
     val touch = 48.dp
     val iconButton = 40.dp
     val iconSize = 21.dp
     val gutter = 16.dp
     val gutterWide = 24.dp
-    val capsuleHeight = 34.dp
-    val panelRadius = 32.dp
+    val capsuleHeight = 48.dp
+    val panelRadius = 28.dp
     val shutterVisual = 78.dp
     /** The shutter composable is larger than its disc so the capture pulse ring
      *  always has room to expand — this is what stops the animation clipping. */
     val shutterTouch = 96.dp
     val gallery = 52.dp
+    val railSlider = 44.dp
+    val controlRadius = 16.dp
 }
 
 /**
@@ -79,8 +81,8 @@ object CameraSpacing {
  * Rules of thumb baked into these numbers:
  *  • **press down** is fast and stiff (~120 ms to settle) so the control answers
  *    the finger immediately;
- *  • **release** is slower and slightly bouncy, which is where the iOS "lift"
- *    feel comes from;
+ *  • **release** is slower and critically damped, keeping the matte controls
+ *    quiet and readable;
  *  • **selection** (chips, modes) is a medium spring — visible travel, no wobble;
  *  • **slides** (controls sheet, dial) are heavily damped so panels never overshoot
  *    into their neighbours;
@@ -93,16 +95,16 @@ object CameraSpacing {
 object CameraMotion {
 
     /** Press compression. Crisp, no visible wobble. */
-    fun <T> press(): SpringSpec<T> = spring(dampingRatio = 0.62f, stiffness = Spring.StiffnessHigh)
+    fun <T> press(): SpringSpec<T> = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessHigh)
 
-    /** Finger-up return. The bounce is subtle but it is what reads as "iOS". */
+    /** Finger-up return. Critically damped return; do not bounce into adjacent controls. */
     fun <T> release(): SpringSpec<T> = spring(
-        dampingRatio = Spring.DampingRatioMediumBouncy,
+        dampingRatio = 1f,
         stiffness = Spring.StiffnessMediumLow,
     )
 
     /** Selection / colour / mode changes. */
-    fun <T> select(): SpringSpec<T> = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+    fun <T> select(): SpringSpec<T> = spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow)
 
     /** Panels and overlays sliding into place — damped, never overshoots a neighbour. */
     fun <T> slide(): SpringSpec<T> = spring(dampingRatio = 0.9f, stiffness = Spring.StiffnessMediumLow)
@@ -133,56 +135,59 @@ object CameraType {
         fontFamily = sans,
         fontWeight = FontWeight.Medium,
         fontSize = 26.sp,
-        letterSpacing = (-0.8).sp,
+        letterSpacing = (-0.26).sp,
     )
 
     val Heading = TextStyle(
         fontFamily = sans,
         fontWeight = FontWeight.Medium,
         fontSize = 20.sp,
-        letterSpacing = (-0.4).sp,
+        letterSpacing = 0.2.sp,
     )
 
     val Mode = TextStyle(
         fontFamily = sans,
-        fontWeight = FontWeight.SemiBold,
+        fontWeight = FontWeight.Medium,
         fontSize = 15.sp,
-        letterSpacing = (-0.2).sp,
+        letterSpacing = 0.15.sp,
     )
 
     val Lens = TextStyle(
-        fontFamily = sans,
+        fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
-        letterSpacing = 0.24.sp,
+        letterSpacing = 0.sp,
     )
 
     val Section = TextStyle(
-        fontFamily = sans,
-        fontWeight = FontWeight.SemiBold,
+        fontFamily = FontFamily.Monospace,
+        fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
-        letterSpacing = 1.2.sp,
+        letterSpacing = 0.sp,
     )
 
     val Value = TextStyle(
-        fontFamily = sans,
+        fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Medium,
         fontSize = 13.sp,
-        letterSpacing = 0.2.sp,
+        lineHeight = 18.sp,
+        letterSpacing = 0.sp,
     )
 
     val Caption = TextStyle(
         fontFamily = sans,
         fontWeight = FontWeight.Normal,
         fontSize = 12.sp,
-        letterSpacing = 0.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.12.sp,
     )
 
     val Telemetry = TextStyle(
         fontFamily = FontFamily.Monospace,
         fontWeight = FontWeight.Normal,
         fontSize = 10.sp,
-        letterSpacing = 0.2.sp,
+        lineHeight = 12.sp,
+        letterSpacing = 0.sp,
     )
 
     val Dial = TextStyle(

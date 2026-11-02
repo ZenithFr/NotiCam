@@ -19,22 +19,17 @@ class ReferenceAndPrivilege(unittest.TestCase):
         self.assertNotIn('text = label.uppercase()', controls)
         self.assertIn('CameraColors.Yellow', (SRC / 'ui/components/Viewfinder.kt').read_text())
 
-    def test_atmosphere_is_bounded_off_thread_and_never_a_live_frame_effect(self):
+    def test_matte_atmosphere_is_neutral_and_does_not_read_camera_or_thumbnails(self):
         effect = (SRC / 'ui/effects/SceneAtmosphere.kt').read_text()
-        self.assertIn('produceState(CameraColors.Atmosphere, image)', effect)
-        self.assertIn('withContext(Dispatchers.Default)', effect)
-        self.assertIn('for (y in 0 until 12) for (x in 0 until 12)', effect)
-        self.assertIn('Bitmap.Config.HARDWARE', effect)
-        self.assertIn('ownedCopy?.recycle()', effect)
-        for forbidden in ('original.recycle()', 'ImageReader', 'CaptureRequest', 'RenderEffect', '.blur('):
+        self.assertIn('Color.White.copy(alpha = 0.055f)', effect)
+        for forbidden in ('produceState', 'Bitmap', 'ImageReader', 'CaptureRequest', 'RenderEffect', '.blur('):
             self.assertNotIn(forbidden, effect)
-        self.assertIn('SceneAtmosphere(state.lastThumbnail', (SRC / 'ui/CameraScreen.kt').read_text())
+        self.assertIn('SceneAtmosphere(Modifier.matchParentSize())', (SRC / 'ui/CameraScreen.kt').read_text())
 
-    def test_viewer_uses_selected_thumbnail_and_keeps_original_fit(self):
+    def test_viewer_keeps_original_fit_and_neutral_surround(self):
         viewer = (SRC / 'ui/GalleryScreen.kt').read_text()
-        self.assertIn('produceState<ImageBitmap?>(null, selected?.uri)', viewer)
-        self.assertIn('Size(128, 128)', viewer)
-        self.assertIn('SceneAtmosphere(backdrop', viewer)
+        self.assertIn('SceneAtmosphere(Modifier.matchParentSize())', viewer)
+        self.assertNotIn('val backdrop', viewer)
         self.assertIn('ContentScale.Fit', viewer)
         self.assertIn('label = "filmstrip-selection"', viewer)
         self.assertIn('cameraGlass(CircleShape)', viewer)
@@ -74,8 +69,8 @@ class ReferenceAndPrivilege(unittest.TestCase):
 
     def test_browser_is_a_monochrome_reference_companion_not_a_fake_unlock(self):
         preview = (ROOT / 'design/index.html').read_text()
-        for required in ('BITCHORD-INSPIRED', '--scene-tone:', '--accent: #fff;',
-                         'cameraSubtitle', 'sampleAtmosphere()', 'pixels.length; i += 4',
+        for required in ('NOTHING-INSPIRED', '--scene-tone:', '--accent: #fff;',
+                         'cameraSubtitle', 'Neutral matte glass',
                          'Sample · Not a camera capture', 'max-width: 340px'):
             self.assertIn(required, preview)
         self.assertIn('simulations', preview)

@@ -139,12 +139,13 @@ class CaptureContracts(unittest.TestCase):
         self.assertEqual(2, self.controller.count('depthFor(image.timestamp),'))
         self.assertIn('generation == frameGeneration', self.controller)
 
-    def test_segmentation_uses_upright_zero_to_one_input(self):
-        segmenter = read('src/com/zenith/auxcam/DualMatteSegmenter.kt')
-        self.assertIn('outBuf.putFloat(r / 255.0f)', segmenter)
-        self.assertNotIn('r / 127.5f', segmenter)
-        self.assertIn('FrameData.sensorMatteIndex(', segmenter)
-        self.assertIn('val isDual = (preparedMode == TierMode.DUAL)', segmenter)
+    def test_segmentation_uses_bounded_upright_rgb_and_one_inverse_rotation(self):
+        engines = read('src/com/zenith/auxcam/BokehEngines.kt')
+        self.assertIn('WIDTH, HEIGHT, DeviceProfile.PREVIEW_ROTATION_90', engines)
+        self.assertIn('frame.writeTensor(input.asFloatBuffer(), 256, 256, nchw = false)', engines)
+        self.assertIn('BokehMask.sensorBytes(alpha, 256, 256, DeviceProfile.PREVIEW_ROTATION_90)', engines)
+        self.assertNotIn('DualMatteSegmenter', engines)
+        self.assertIn('/ 255f', read('src/com/zenith/auxcam/BokehFrame.kt'))
 
     def test_stale_session_callbacks_are_rejected(self):
         self.assertGreaterEqual(self.service.count('mGeneration != mService.mSessionGeneration'), 5)

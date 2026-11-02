@@ -21,7 +21,7 @@ class BokehModels(unittest.TestCase):
         models = (SRC / 'BokehModel.kt').read_text()
         engines = (SRC / 'BokehEngines.kt').read_text()
         settings = (SRC / 'ui/components/BokehModelSettings.kt').read_text()
-        for value in ('MediaPipeAuto', 'MediaPipeDual', 'MediaPipeLandscape', 'MediaPipeGeneral', 'MODNet', 'RVM'):
+        for value in ('MediaPipeAuto', 'MODNet'):
             self.assertIn(value, models)
             self.assertIn('BokehModel.' + value, engines)
         self.assertIn('BokehModelSettings(state, actions)', (SRC / 'ui/components/CameraSettings.kt').read_text())
@@ -55,20 +55,21 @@ class BokehModels(unittest.TestCase):
         self.assertNotIn('matteSegmenter?.close()', controller)
         self.assertNotIn('matteExecutor.awaitTermination', controller)
 
-    def test_rvm_states_are_copied_before_result_close_and_reset(self):
+    def test_stateless_quality_closes_results_and_retired_models_are_absent(self):
         engines = (SRC / 'BokehEngines.kt').read_text()
-        self.assertIn('session.run(tensors, names).use', engines)
-        self.assertIn('tensor.info.shape.clone()', engines)
-        self.assertIn('recurrent = emptyList()', engines)
-        self.assertIn('tensors.values.forEach { it.close() }', engines)
-        self.assertIn('frame.timestampNs - lastTimestamp > FrameData.MATTE_MAX_AGE_NS', (SRC / 'BokehProcessor.kt').read_text())
-        self.assertIn('signed = model == BokehModel.MODNet', engines)
+        self.assertIn('session.run(mapOf("input" to tensor), setOf("output")).use', engines)
+        self.assertIn('nchw = true, signed = true', engines)
+        self.assertIn('session.close(); throw failure', engines)
+        for retired in ('MediaPipeDual', 'MediaPipeLandscape', 'MediaPipeGeneral', 'BokehModel.RVM', 'recurrent =', 'DualMatteSegmenter'):
+            self.assertNotIn(retired, engines)
+        self.assertFalse((SRC / 'DualMatteSegmenter.kt').exists())
+        self.assertEqual(['mp_general_fixed_float.tflite'], [p.name for p in (ROOT / 'assets/models').glob('*.tflite')])
 
     def test_optional_folders_do_not_break_legacy_asset_refresh(self):
         activity = (SRC / 'MainActivity.kt').read_text()
         self.assertIn('if (!name.endsWith(".tflite")) continue', activity)
         self.assertIn('Cannot replace model $name', activity)
-        self.assertIn('packagedOnly = true', (SRC / 'BokehEngines.kt').read_text())
+        self.assertIn('context.assets.open(asset)', (SRC / 'BokehEngines.kt').read_text())
 
     def test_runtime_pass_is_not_claimed_as_quality_or_display_fps(self):
         processor = (SRC / 'BokehProcessor.kt').read_text()
@@ -86,10 +87,10 @@ class BokehModels(unittest.TestCase):
 
     def test_all_assets_have_licenses_and_checksums_and_are_bundled_at_build(self):
         manifest = json.loads((ROOT / 'assets/models/bokeh-models.json').read_text())
-        self.assertEqual(4, len(manifest['files']))
+        self.assertEqual(2, len(manifest['files']))
         for spec in manifest['files']:
             self.assertEqual(64, len(spec['sha256']))
-            self.assertIn(spec['license'], ('Apache-2.0', 'GPL-3.0-only'))
+            self.assertIn(spec['license'], ('Apache-2.0',))
             path = ROOT / 'assets' / spec['asset']
             if path.exists():
                 self.assertTrue(fetcher.valid(path, spec), spec['asset'])
@@ -98,8 +99,25 @@ class BokehModels(unittest.TestCase):
         gradle = (ROOT / 'build.gradle.kts').read_text()
         self.assertIn('onnxruntime-android:1.20.0', gradle)
         self.assertIn('dependsOn(fetchBokehModels)', gradle)
-        for name in ('MODNet-Apache-2.0.txt', 'RVM-GPL-3.0.txt', 'ONNX-Runtime-MIT.txt', 'MediaPipe-Apache-2.0.txt'):
+        for name in ('MODNet-Apache-2.0.txt', 'ONNX-Runtime-MIT.txt', 'MediaPipe-Apache-2.0.txt'):
             self.assertTrue((ROOT / 'assets/models/licenses' / name).is_file())
+
+    def test_retired_generated_weight_is_pruned_without_touching_other_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            optional = root / 'assets/models/optional'
+            optional.mkdir(parents=True)
+            retired = optional / 'rvm_mobilenetv3_fp32.onnx'
+            current = optional / 'modnet.onnx'
+            custom = optional / 'my_audit_model.onnx'
+            for path in (retired, current, custom):
+                path.write_bytes(b'fixture')
+            fetcher.prune_retired_assets(root)
+            self.assertFalse(retired.exists())
+            self.assertTrue(current.exists())
+            self.assertTrue(custom.exists())
+            fetcher.prune_retired_assets(root)  # Idempotent.
+        self.assertIn('assets.exclude("models/optional/rvm_mobilenetv3_fp32.onnx")', (ROOT / 'build.gradle.kts').read_text())
 
     def test_fetcher_rejects_corruption_and_accepts_only_verified_fallback(self):
         expected = b'verified model bytes'

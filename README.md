@@ -61,22 +61,20 @@ phones. Permission to use the privileged camera service is provided by Shizuku.
 - `CameraController.kt`: Shizuku binding, ImageReaders, capture admission, frame matching and storage.
 - `FrameData.kt`: pure buffer-packing, timestamp-matching and matte-orientation rules.
 - `CameraUserService.java`: privileged Camera2 session and controls, serialized on its camera handler.
-- `BokehProcessor.kt` / `BokehEngines.kt`: worker-owned selectable MediaPipe, MODNet
-  and recurrent RVM inference, hash validation and on-device runtime checks.
-- `DualMatteSegmenter.kt`: original adaptive/fixed dual MediaPipe path and EMA;
-  output mapped back into sensor space. See [model selection and checks](design/BOKEH_MODELS.md).
+- `BokehProcessor.kt` / `BokehEngines.kt`: worker-owned Auto MediaPipe with
+  validated NNAPI/CPU fallback, optional MODNet quality, hash validation and checks.
+- `InferenceBackend.kt`: bounded accelerator attempts with warmup and cleanup.
 - `jni/src/`: Vulkan/YUV pipeline and a synchronized JNI lifetime boundary.
 - `jni/shaders/`: CoC, matte refinement, gather and composition.
-- `src/com/zenith/auxcam/ui/`: Compose camera UI, thumbnail atmosphere, floating controls, settings and shutter.
+- `src/com/zenith/auxcam/ui/`: Compose camera UI, neutral matte surfaces, floating controls, settings and shutter.
 
-The [BitChord-inspired UI](design/DESIGN.md) has only Photo/Video modes, a white
-sliding selection pill, floating borderless glass controls and a title/metadata
-hierarchy. Soft background color comes from a tiny saved-thumbnail palette,
-computed off the main thread; the viewer follows the selected capture's color.
-The portrait-effect button remains in the viewfinder corner, not the mode selector.
-This is an independent visual adaptation, not copied BitChord code, fonts or branding.
-Translucent fills and restrained interior gradients provide glass depth without
-rims. Native controls do not claim live SurfaceView backdrop blur or refraction.
+The [Nothing-inspired matte UI](design/DESIGN.md) keeps Photo/Video only, rounded
+framing, neutral surfaces, white selections and restrained red recording accents.
+Controls have padded >=48 dp hit targets; video format uses separate resolution
+and rate lines. Surroundings stay neutral rather than sampling photo colors.
+This is an independent interpretation, not official Nothing branding; system fonts
+are used instead of redistributing proprietary NType/NDot assets. No native
+SurfaceView backdrop blur or refraction is claimed.
 Traveling mode/zoom indicators, direct-drag sliders, capture pulses, busy state,
 filmstrip selection and a successful-save thumbnail handoff provide motion
 without animating camera commands, grading captured pixels or resizing the Vulkan
@@ -110,8 +108,8 @@ Lens/mode changes invalidate auxiliary frames.
   The previous code used `[-1, 1]`.
 - Models now receive an upright image; their matte is transformed back to the
   sensor orientation expected by Vulkan.
-- Prepared inference tier is held across preprocessing/inference so a thermal
-  tier change cannot make inference consume an unprepared general-model tensor.
+- Auto uses one validated General float model, not dual max-union or temporal EMA.
+  Accelerator failure retries explicit CPU rather than silently dropping matting.
 - Preview and still CoC use the same 720-pixel reference width. Zero blur really
   means zero, and Photo without the portrait effect selects the sharp original.
 - Missing depth no longer creates a fabricated central oval. A real matte can
@@ -124,19 +122,23 @@ Lens/mode changes invalidate auxiliary frames.
 
 ## Bokeh model comparison
 
-**Camera controls → Bokeh model** selects MediaPipe Auto (original baseline),
-fixed Dual, Landscape, General, MODNet or RVM MobileNetV3. Selection persists and
-applies through the corner portrait button; it does not alter normal JPEG/50 MP
-capture. **CHECK SELECTED / CHECK ALL** run hash/tensor/alpha checks and a short
-same-frame timing comparison on the phone. Results include load time, median/p95,
-runtime/effective mode and mask statistics, with cancellation and a copyable
-report. A runtime PASS is not an image-quality score or sustained-FPS claim.
+**Camera controls → Portrait** selects **Auto** (MediaPipe General with discovered
+NNAPI accelerator requests / explicit CPU fallback) or **Portrait quality**
+(MODNet CPU). Removed selections migrate to Auto. Both identify people, not
+arbitrary object classes; synchronized main-lens depth can assist foreground
+objects. No foreground plus no usable depth means a sharp photo, not whole-frame
+blur. Expired masks are rejected. Live masking may pause for a persistently slow
+model; the received-still inference remains available.
 
-Model weights are bundled at build time from pinned, SHA-256-verified downloads;
-no runtime downloads or image uploads. The new FP32 files total ~39 MiB before
-APK compression plus ONNX Runtime. RVM weights are **GPL-3.0-only**; review
-redistribution/source obligations before publishing binaries. See
-[models, limitations, build and device checks](design/BOKEH_MODELS.md).
+“Check selected” / “Compare both” check the same frame with one untimed warmup and
+five timed runs per model. Reports distinguish backend, load time, latency and
+flat masks. A runtime PASS does not prove accuracy, sustained FPS or NPU placement.
+
+`python3 tools/fetch_bokeh_models.py` fetches checksum-pinned MODNet to an ignored
+folder for APK bundling; `--verify` checks both retained assets offline. MediaPipe
+General float and MODNet are Apache-2.0; ONNX Runtime's MIT notice remains. No
+runtime image uploads/downloads. See [portrait details](design/BOKEH_MODELS.md)
+and [validation / remaining gates](design/NOTHING_UI_PORTRAIT.md).
 
 ## Video and viewer
 

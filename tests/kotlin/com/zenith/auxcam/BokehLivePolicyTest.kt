@@ -6,7 +6,7 @@ import org.junit.Test
 class BokehLivePolicyTest {
     @Test fun coldLoadIsNotAReasonToSuspend() {
         assertEquals(0, BokehLivePolicy.nextSlowCount(0, false, 900.0))
-        // The user's RVM cold 448ms + warm 194ms must NOT disable the effect.
+        // A cold model run of 448ms + warm 194ms must NOT disable the effect.
         assertEquals(0, BokehLivePolicy.nextSlowCount(0, true, 194.4))
     }
     @Test fun requiresTwoConsecutiveSlowWarmCyclesAndResetsAfterRecovery() {
