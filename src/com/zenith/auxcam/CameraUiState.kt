@@ -43,11 +43,11 @@ enum class FrameRatio(val label: String, val aspect: Float?) {
 data class CameraUiState(
     val mode: CaptureMode = CaptureMode.Photo,
     val bokehEnabled: Boolean = false,
-    val bokehModel: BokehModel = BokehModel.MediaPipeAuto,
+    val bokehModel: BokehModel = BokehModel.MobileNetV4Int8,
     val bokehModelReady: Boolean = false,
     val bokehLiveSuspended: Boolean = false,
     val bokehModelError: String? = null,
-    val bokehModelStatus: String = "Model loads on first portrait frame or when checks run",
+    val bokehModelStatus: String = PortraitRuntime.blockedReason,
     val bokehChecksRunning: Boolean = false,
     val bokehCheckStatus: String = "No model checks run yet",
     val bokehCheckResults: List<BokehCheckResult> = emptyList(),
@@ -62,6 +62,9 @@ data class CameraUiState(
     val previewHeight: Int = DeviceProfile.COLOR_HEIGHT,
     val previewTargetFps: Int = 30,
     val videoTargetFps: Int = 30,
+    val videoQuality: Int = VideoPolicy.HD,
+    val videoProfilesChecked: Boolean = false,
+    val videoSupportedProfiles: Set<Int> = emptySet(),
     val previewMeasuredFps: Float = 0f,
     val previewFallback: String = "Checking advertised 60 fps support",
     val zoomBlendImage: ImageBitmap? = null,
@@ -86,11 +89,16 @@ data class CameraUiState(
     val manualExposure: Boolean = false,
     val sensorIso: Int = 100,
     val sensorExposureNs: Long = 8_000_000L,
+    val whiteBalanceKelvin: Int = 0, // 0 = Auto; approximate 2000–10000 K sensor-gain control
     val whiteBalance: WhiteBalancePreset = WhiteBalancePreset.Auto,
     val sensorControlStatus: String = "Checking current lens controls…",
 
     val raw: Boolean = false,
     val rawFrames: Int = 1,
+    val rawStandardWidth: Int = 0,
+    val rawStandardHeight: Int = 0,
+    val rawHighWidth: Int = 0,
+    val rawHighHeight: Int = 0,
     val rawSensorWidth: Int = 0,
     val rawSensorHeight: Int = 0,
     val rawCapabilityChecked: Boolean = false,
@@ -139,7 +147,7 @@ data class CameraUiState(
     val zoomDialVisible: Boolean = false,
 ) {
     val bokehActive: Boolean
-        get() = mode == CaptureMode.Photo && bokehEnabled && resolution == Resolution.Standard
+        get() = PortraitRuntime.available && mode == CaptureMode.Photo && bokehEnabled && resolution == Resolution.Standard
 
     val supportsHighResolution: Boolean
         get() = CaptureOutput.is50MpSize(highResolutionWidth, highResolutionHeight)
@@ -154,7 +162,7 @@ data class CameraUiState(
         get() = SensorControlPolicy.maxExposure(sensorControls, mode == CaptureMode.Video, videoTargetFps)
 
     val manualExposureAvailable: Boolean
-        get() = sensorControls.hasManualExposure && resolution == Resolution.Standard && maxManualExposureNs > 0L &&
+        get() = sensorControls.hasManualExposure && maxManualExposureNs > 0L &&
             SensorControlPolicy.liveExposure(sensorExposureNs, sensorControls, if (mode == CaptureMode.Video) videoTargetFps else previewTargetFps) > 0L
 
     val supportsRaw: Boolean
@@ -168,7 +176,8 @@ data class CameraUiState(
 
     val canUseShutter: Boolean
         get() = if (mode == CaptureMode.Photo) canTakePhoto
-        else videoRecording || (sessionReady && !captureBusy && !videoStarting && !previewTransitioning && !bokehChecksRunning)
+        else videoRecording || (sessionReady && !captureBusy && !videoStarting && !previewTransitioning && !bokehChecksRunning &&
+            videoProfilesChecked && VideoPolicy.profileKey(videoQuality, videoTargetFps) in videoSupportedProfiles)
 
     val photoSizeLabel: String
         get() {

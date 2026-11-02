@@ -45,7 +45,7 @@ class CaptureOutputTest {
     }
 
     @Test fun highResolutionCannotSilentlyApply12MpBokeh() {
-        assertTrue(CameraUiState(bokehEnabled = true).bokehActive)
+        assertFalse(CameraUiState(bokehEnabled = true).bokehActive)
         assertFalse(CameraUiState(bokehEnabled = true, resolution = Resolution.High).bokehActive)
     }
 

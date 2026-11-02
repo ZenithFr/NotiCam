@@ -33,13 +33,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import com.zenith.auxcam.CameraActions
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.SensorControlPolicy
-import com.zenith.auxcam.WhiteBalancePreset
 import com.zenith.auxcam.ui.effects.cameraGlass
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraType
 
-private enum class RailControl { Exposure, Iso, Shutter, Focus }
+private enum class RailControl { Exposure, Iso, Shutter, Temperature, Focus }
 
 /** Original implementation of an instrument rail: real controls, not preset looks.
  * Fixed height across selections; interpolated presentation never feeds capture requests.
@@ -48,7 +47,7 @@ private enum class RailControl { Exposure, Iso, Shutter, Focus }
 fun CaptureControlRail(state: CameraUiState, actions: CameraActions) {
     var selected by remember { mutableStateOf(RailControl.Exposure) }
     val ready = state.canAdjustSensorControls
-    Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp)) {
+    Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 5.dp)) {
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
             InstrumentChip(if (state.manualExposure) "AE" else "AUTO", if (state.manualExposure) "Manual" else state.evLabel, selected == RailControl.Exposure,
                 ready && (!state.manualExposure || state.manualExposureAvailable)) {
@@ -60,15 +59,14 @@ fun CaptureControlRail(state: CameraUiState, actions: CameraActions) {
                 selected = RailControl.Iso
                 if (!state.manualExposure) actions.onManualExposureToggle()
             }
-            InstrumentChip("TIME", if (state.manualExposure) SensorControlPolicy.shutterLabel(state.sensorExposureNs) else "Auto",
+            InstrumentChip("SHUTTER", if (state.manualExposure) SensorControlPolicy.shutterLabel(state.sensorExposureNs) else "Auto",
                 selected == RailControl.Shutter, ready && state.manualExposureAvailable) {
                 selected = RailControl.Shutter
                 if (!state.manualExposure) actions.onManualExposureToggle()
             }
-            val presets = WhiteBalancePreset.entries.filter { state.sensorControls.supportsWhiteBalance(it.mode) }
-            InstrumentChip("WB", state.whiteBalance.label, false, ready && presets.isNotEmpty()) {
-                val next = presets[(presets.indexOf(state.whiteBalance) + 1).mod(presets.size)]
-                actions.onWhiteBalanceSelected(next)
+            InstrumentChip("WB", if (state.whiteBalanceKelvin == 0) "Auto" else "≈${state.whiteBalanceKelvin}K",
+                selected == RailControl.Temperature, ready && state.sensorControls.supportsTemperature) {
+                selected = RailControl.Temperature
             }
             InstrumentChip("FOCUS", state.focusLabel, selected == RailControl.Focus, ready) {
                 selected = RailControl.Focus
@@ -84,12 +82,22 @@ fun CaptureControlRail(state: CameraUiState, actions: CameraActions) {
                     else Text("Switching to Auto exposure…", style = CameraType.Caption, color = CameraColors.LabelSecondary)
                     RailControl.Iso -> if (state.manualExposure && state.manualExposureAvailable) IosSlider(
                         SensorControlPolicy.fraction(state.sensorIso.toLong(), state.sensorControls.minIso.toLong(), state.sensorControls.maxIso.toLong()),
-                        0f..1f, { if (selected == control) actions.onSensorIsoChanged(it) }, Modifier.height(CameraSpacing.railSlider))
+                        0f..1f, { if (selected == control) actions.onSensorIsoChanged(it) }, Modifier.height(CameraSpacing.railSlider),
+                        detents = SensorControlPolicy.isoStops(state.sensorControls.minIso, state.sensorControls.maxIso)
+                            .map { SensorControlPolicy.fraction(it, state.sensorControls.minIso.toLong(), state.sensorControls.maxIso.toLong()) })
                     else Text("Tap ISO to enable manual exposure", style = CameraType.Caption, color = CameraColors.LabelSecondary)
                     RailControl.Shutter -> if (state.manualExposure && state.manualExposureAvailable) IosSlider(
                         SensorControlPolicy.fraction(state.sensorExposureNs, state.sensorControls.minExposureNs, state.maxManualExposureNs),
-                        0f..1f, { if (selected == control) actions.onSensorShutterChanged(it) }, Modifier.height(CameraSpacing.railSlider))
-                    else Text("Tap TIME to enable manual exposure", style = CameraType.Caption, color = CameraColors.LabelSecondary)
+                        0f..1f, { if (selected == control) actions.onSensorShutterChanged(it) }, Modifier.height(CameraSpacing.railSlider),
+                        detents = SensorControlPolicy.shutterStops(state.sensorControls.minExposureNs, state.maxManualExposureNs)
+                            .map { SensorControlPolicy.fraction(it, state.sensorControls.minExposureNs, state.maxManualExposureNs) })
+                    else Text("Tap SHUTTER to enable manual exposure", style = CameraType.Caption, color = CameraColors.LabelSecondary)
+                    RailControl.Temperature -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        IosSlider((state.whiteBalanceKelvin.takeIf { it > 0 } ?: 6500).toFloat(), 2000f..10000f,
+                            { if (selected == control) actions.onWhiteBalanceTemperatureChanged(it.toInt()) },
+                            Modifier.weight(1f).height(CameraSpacing.railSlider))
+                        ResetChip(onClick = { actions.onWhiteBalanceTemperatureChanged(0) })
+                    }
                     RailControl.Focus -> Row(verticalAlignment = Alignment.CenterVertically) {
                         IosSlider(state.focusFraction, 0f..1f, { if (selected == control) actions.onManualFocusChanged(it) }, Modifier.weight(1f).height(CameraSpacing.railSlider))
                         ResetChip(actions::onFocusReset)
@@ -103,13 +111,14 @@ fun CaptureControlRail(state: CameraUiState, actions: CameraActions) {
 @Composable
 private fun InstrumentChip(label: String, value: String, active: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val opacity by animateFloatAsState(if (enabled) 1f else 0.4f, CameraMotion.fade(), label = "instrument-availability")
-    val foreground = if (active) CameraColors.OnLight else CameraColors.Label
-    Column(Modifier.widthIn(min = 72.dp).height(CameraSpacing.touch * LocalDensity.current.fontScale.coerceAtLeast(1f))
+    val foreground = CameraColors.Label
+    Column(Modifier.widthIn(min = 64.dp).height(CameraSpacing.touch * LocalDensity.current.fontScale.coerceAtLeast(1f))
         .graphicsLayer { alpha = opacity }
-        .cameraGlass(RoundedCornerShape(CameraSpacing.controlRadius), if (active) CameraColors.Accent else CameraColors.Matte)
         .semantics { selected = active }
         .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-        .padding(horizontal = 10.dp, vertical = 6.dp),
+        .padding(vertical = 4.dp)
+        .cameraGlass(RoundedCornerShape(CameraSpacing.controlRadius), if (active) CameraColors.Accent else CameraColors.Matte)
+        .padding(horizontal = 8.dp, vertical = 3.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
         Text(label, style = CameraType.Telemetry, color = foreground.copy(alpha = 0.65f), maxLines = 1)
         Text(value, style = CameraType.Value, color = foreground, maxLines = 1, overflow = TextOverflow.Ellipsis)

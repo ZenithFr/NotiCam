@@ -17,17 +17,18 @@ module.loader.exec_module(fetcher)
 
 
 class BokehModels(unittest.TestCase):
-    def test_picker_and_actions_are_wired_to_real_engines(self):
+    def test_only_requested_model_is_exposed_and_unavailable_is_explicit(self):
         models = (SRC / 'BokehModel.kt').read_text()
+        self.assertIn('MobileNetV4Int8(', models)
+        self.assertNotIn('MediaPipeAuto(', models)
+        self.assertNotIn('MODNet(', models)
         engines = (SRC / 'BokehEngines.kt').read_text()
+        self.assertIn('throw PortraitUnavailableException', engines)
+        for forbidden in ('Interpreter(', 'NnApiDelegate(', 'OrtEnvironment', 'CPU/XNNPACK', 'OnnxBokehEngine'):
+            self.assertNotIn(forbidden, engines)
         settings = (SRC / 'ui/components/BokehModelSettings.kt').read_text()
-        for value in ('MediaPipeAuto', 'MODNet'):
-            self.assertIn(value, models)
-            self.assertIn('BokehModel.' + value, engines)
-        self.assertIn('BokehModelSettings(state, actions)', (SRC / 'ui/components/CameraSettings.kt').read_text())
-        for action in ('onBokehModelSelected', 'onRunBokehChecks(false)', 'onRunBokehChecks(true)', 'onCancelBokehChecks', 'onCopyBokehChecks'):
-            self.assertIn(action, settings)
-        self.assertIn('role = Role.RadioButton', settings)
+        self.assertIn('PortraitRuntime.blockedReason', settings)
+        self.assertIn('INT8', settings)
 
     def test_selecting_model_is_persistent_and_does_not_rebuild_camera_or_reduce_still_size(self):
         controller = (SRC / 'CameraController.kt').read_text()
@@ -55,21 +56,19 @@ class BokehModels(unittest.TestCase):
         self.assertNotIn('matteSegmenter?.close()', controller)
         self.assertNotIn('matteExecutor.awaitTermination', controller)
 
-    def test_stateless_quality_closes_results_and_retired_models_are_absent(self):
+    def test_legacy_models_and_fallback_implementation_removed(self):
         engines = (SRC / 'BokehEngines.kt').read_text()
-        self.assertIn('session.run(mapOf("input" to tensor), setOf("output")).use', engines)
-        self.assertIn('nchw = true, signed = true', engines)
-        self.assertIn('session.close(); throw failure', engines)
-        for retired in ('MediaPipeDual', 'MediaPipeLandscape', 'MediaPipeGeneral', 'BokehModel.RVM', 'recurrent =', 'DualMatteSegmenter'):
+        for retired in ('MediaPipeDual', 'MediaPipeLandscape', 'MediaPipeGeneral', 'BokehModel.RVM', 'DualMatteSegmenter'):
             self.assertNotIn(retired, engines)
+        self.assertFalse((SRC / 'InferenceBackend.kt').exists())
         self.assertFalse((SRC / 'DualMatteSegmenter.kt').exists())
-        self.assertEqual(['mp_general_fixed_float.tflite'], [p.name for p in (ROOT / 'assets/models').glob('*.tflite')])
+        self.assertEqual([], list((ROOT / 'assets/models').glob('*.tflite')))
 
     def test_optional_folders_do_not_break_legacy_asset_refresh(self):
         activity = (SRC / 'MainActivity.kt').read_text()
         self.assertIn('if (!name.endsWith(".tflite")) continue', activity)
         self.assertIn('Cannot replace model $name', activity)
-        self.assertIn('context.assets.open(asset)', (SRC / 'BokehEngines.kt').read_text())
+        self.assertIn('PortraitRuntime.blockedReason', (SRC / 'BokehEngines.kt').read_text())
 
     def test_runtime_pass_is_not_claimed_as_quality_or_display_fps(self):
         processor = (SRC / 'BokehProcessor.kt').read_text()
@@ -85,22 +84,13 @@ class BokehModels(unittest.TestCase):
         self.assertNotIn('bokehModelError', gate)
         self.assertNotIn('bokehLiveSuspended', gate)
 
-    def test_all_assets_have_licenses_and_checksums_and_are_bundled_at_build(self):
+    def test_no_untrained_or_unlicensed_substitute_is_bundled(self):
         manifest = json.loads((ROOT / 'assets/models/bokeh-models.json').read_text())
-        self.assertEqual(2, len(manifest['files']))
-        for spec in manifest['files']:
-            self.assertEqual(64, len(spec['sha256']))
-            self.assertIn(spec['license'], ('Apache-2.0',))
-            path = ROOT / 'assets' / spec['asset']
-            if path.exists():
-                self.assertTrue(fetcher.valid(path, spec), spec['asset'])
-            if spec['asset'].endswith('.onnx'):
-                self.assertTrue(any('/git/blobs/' in url for url in spec['urls']))
+        self.assertEqual([], manifest['files'])
         gradle = (ROOT / 'build.gradle.kts').read_text()
-        self.assertIn('onnxruntime-android:1.20.0', gradle)
+        self.assertNotIn('onnxruntime-android:', gradle)
         self.assertIn('dependsOn(fetchBokehModels)', gradle)
-        for name in ('MODNet-Apache-2.0.txt', 'ONNX-Runtime-MIT.txt', 'MediaPipe-Apache-2.0.txt'):
-            self.assertTrue((ROOT / 'assets/models/licenses' / name).is_file())
+        self.assertIn('"models/optional/modnet.onnx"', gradle)
 
     def test_retired_generated_weight_is_pruned_without_touching_other_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -114,10 +104,10 @@ class BokehModels(unittest.TestCase):
                 path.write_bytes(b'fixture')
             fetcher.prune_retired_assets(root)
             self.assertFalse(retired.exists())
-            self.assertTrue(current.exists())
+            self.assertFalse(current.exists())
             self.assertTrue(custom.exists())
             fetcher.prune_retired_assets(root)  # Idempotent.
-        self.assertIn('assets.exclude("models/optional/rvm_mobilenetv3_fp32.onnx")', (ROOT / 'build.gradle.kts').read_text())
+        self.assertIn('assets.exclude("models/optional/rvm_mobilenetv3_fp32.onnx",', (ROOT / 'build.gradle.kts').read_text())
 
     def test_fetcher_rejects_corruption_and_accepts_only_verified_fallback(self):
         expected = b'verified model bytes'

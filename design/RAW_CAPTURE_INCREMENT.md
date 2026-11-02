@@ -1,5 +1,9 @@
 # RAW acquisition + controls increment
 
+> Subsequent chrome, 50 MP manual/RAW gating, sidecar v11 and HDR status:
+> [latest controls increment](CONTROLS_RAW_HDR_STATUS.md). Older counts/contracts
+> below describe the earlier increment.
+
 Date: 2026-11-02. Implementation status: host-checked; not APK/device validated.
 
 ## Implemented

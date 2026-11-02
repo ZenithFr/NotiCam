@@ -9,8 +9,8 @@ UI = ROOT / 'src/com/zenith/auxcam/ui'
 class UiContracts(unittest.TestCase):
     def test_glass_surface_retains_body_without_decorative_rim(self):
         surface = (UI / 'effects/ControlSurface.kt').read_text()
-        self.assertIn('background(baseColor, shape)', surface)
-        self.assertIn('Brush.linearGradient', surface)
+        self.assertIn('baseColor.copy(alpha = 0.10f)', surface)
+        self.assertIn('rememberMatteGrain()', surface)
         for forbidden in ('.border(', 'drawRoundRect', 'blur('):
             self.assertNotIn(forbidden, surface)
         self.assertTrue(any('cameraGlass' in p.read_text() for p in UI.rglob('*.kt')))
@@ -19,7 +19,8 @@ class UiContracts(unittest.TestCase):
         controller = (ROOT / 'src/com/zenith/auxcam/CameraController.kt').read_text()
         controls = (UI / 'components/Controls.kt').read_text()
         self.assertNotIn('onSwitchLens', controller + controls)
-        self.assertIn('Spacer(Modifier.size(CameraSpacing.gallery))', controls)
+        self.assertIn('Switch to Video', controls)
+        self.assertIn('NotiIcons.Video else NotiIcons.Photo', controls)
         self.assertIn('override fun onZoomSelected', controller)
         self.assertIn('ZoomChips(zoom = state.zoom', (UI / 'CameraScreen.kt').read_text())
 

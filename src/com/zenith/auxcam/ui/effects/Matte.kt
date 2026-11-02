@@ -5,7 +5,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageShader
 import androidx.compose.ui.graphics.Outline
@@ -71,9 +71,8 @@ fun Modifier.matte(
     grain: ShaderBrush,
     shape: Shape = CircleShape,
     strength: Float = 1f,
-): Modifier = drawWithContent {
-    drawContent()
-
+): Modifier = drawWithCache {
+    // Cache shape geometry rather than allocating a Path for every button/frame.
     val outline = shape.createOutline(size, layoutDirection, this)
     val path = Path().apply {
         when (outline) {
@@ -83,8 +82,9 @@ fun Modifier.matte(
         }
     }
 
-    // One flat pass. No gradient, so the surface has no direction of light.
-    clipPath(path) {
-        drawRect(brush = grain, alpha = 0.8f * strength)
+    onDrawWithContent {
+        drawContent()
+        // One flat pass. No gradient, so the surface has no direction of light.
+        clipPath(path) { drawRect(brush = grain, alpha = 0.8f * strength) }
     }
 }

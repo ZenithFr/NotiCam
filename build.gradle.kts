@@ -61,7 +61,7 @@ android {
             res.setSrcDirs(listOf("res"))
             assets.setSrcDirs(listOf("assets"))
             // Also exclude an old ignored/downloaded weight on incremental builds.
-            assets.exclude("models/optional/rvm_mobilenetv3_fp32.onnx")
+            assets.exclude("models/optional/rvm_mobilenetv3_fp32.onnx", "models/optional/modnet.onnx", "models/mp_*.tflite")
             // TFLite JNI binaries ship as prebuilts next to the NDK output.
             jniLibs.setSrcDirs(listOf("tflite_extracted/jni"))
         }
@@ -108,8 +108,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     // Shizuku + TensorFlow Lite ship as local jars (no network needed).
     implementation(fileTree("libs") { include("*.jar") })
-    // The optional Portrait quality choice uses the original MODNet FP32 ONNX export.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.20.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))
     implementation("androidx.compose.ui:ui")
@@ -183,11 +181,11 @@ val verifySources = tasks.register<Exec>("verifySources") {
 }
 tasks.named("check") { dependsOn(verifySources) }
 
-// All picker models ship inside the APK; no runtime download or placeholders.
+// Replacement portrait model/runtime are not supplied; the asset ledger is intentionally empty.
 // Large weights stay out of Git, following assets/models/*.onnx conventions.
 val fetchBokehModels = tasks.register<Exec>("fetchBokehModels") {
     group = "build"
-    description = "Fetches and SHA-256 verifies pinned MediaPipe/MODNet assets for APK bundling"
+    description = "Verifies the portrait asset ledger; replacement export is not yet supplied"
     inputs.files("tools/fetch_bokeh_models.py", "assets/models/bokeh-models.json")
     outputs.dir("assets/models/optional")
     outputs.upToDateWhen { false } // Rehash cached assets; download only missing/corrupt files.

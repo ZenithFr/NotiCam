@@ -33,7 +33,7 @@ import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraType
 
-/** Independently built, searchable controls: capture, manual, portrait, aids and diagnostics.
+/** Independently built, searchable controls: capture, portrait, aids and diagnostics.
  * Resource evidence supports this grouping; it is not a pixel-exact rendering of MereFrame.
  */
 @Composable
@@ -78,9 +78,9 @@ fun CameraSettings(state: CameraUiState, actions: CameraActions, modifier: Modif
                     else "${state.photoSizeLabel} · original sensor JPEG · quality 100",
                     style = CameraType.Caption, color = CameraColors.LabelSecondary)
                 Spacer(Modifier.height(12.dp))
+                if (state.mode == CaptureMode.Video) VideoProfileSettings(state, actions)
                 if (state.mode == CaptureMode.Photo) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TogglePill("RAW (DNG)", state.raw, actions::onRawToggle, Modifier.weight(1f))
                         TogglePill(if (state.timerSeconds == 0) "TIMER OFF" else "${state.timerSeconds}s TIMER", state.timerSeconds > 0,
                             actions::onTimerCycle, Modifier.weight(1f))
                     }
@@ -95,19 +95,8 @@ fun CameraSettings(state: CameraUiState, actions: CameraActions, modifier: Modif
                         "RAW advertised · ${state.rawSensorWidth} × ${state.rawSensorHeight}. Session support is checked when opened."
                         else "No eligible RAW_SENSOR stream within the capture payload budget. JPEG remains available.",
                         style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                    if (state.raw) {
-                        Spacer(Modifier.height(16.dp))
-                        Text("RAW sequence", style = CameraType.Heading, color = CameraColors.Label)
-                        Text("Separately saved DNG frames. No alignment, merging or HDR processing is applied. Single frame remains the default.",
-                            style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                        Spacer(Modifier.height(10.dp))
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            for (count in 1..state.maxRawFrames) TogglePill(if (count == 1) "1 frame" else "$count frames",
-                                state.rawFrames == count, { actions.onRawFramesSelected(count) }, Modifier.weight(1f))
-                        }
-                        Text("Up to 4 frames, 128 MiB acquired RAW payload budget. Flash and portrait are off. Each DNG retains its own matched capture metadata.",
-                            style = CameraType.Caption, color = CameraColors.LabelTertiary)
-                    }
+                    Text("RAW size and frame count: hold the top-left RAW button for 3 seconds. HDR merge and Ultra HDR export are not implemented yet.",
+                        style = CameraType.Caption, color = CameraColors.LabelSecondary)
                 }
                 Spacer(Modifier.height(20.dp))
             }
@@ -157,74 +146,6 @@ fun CameraSettings(state: CameraUiState, actions: CameraActions, modifier: Modif
                         }
                         Spacer(Modifier.height(14.dp))
                     }
-                }
-
-            }
-            if (visible(ControlSection.Manual)) {
-                SensorControlSettings(state, actions)
-                Spacer(Modifier.height(20.dp))
-
-                // ── Exposure ───────────────────────────────────────────────────────
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("EXPOSURE", style = CameraType.Section, color = CameraColors.LabelTertiary)
-                    Spacer(Modifier.weight(1f))
-                    Text(if (state.manualExposure) "MANUAL" else state.evLabel, style = CameraType.Value, color = CameraColors.Label)
-                }
-                if (!state.manualExposure) {
-                    IosSlider(
-                        value = state.evFraction,
-                        valueRange = 0f..1f,
-                        onValueChange = { actions.onEvChanged(it * 8f - 4f) },
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                    Row(modifier = Modifier.fillMaxWidth()) {
-                        Text("−4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                        Spacer(Modifier.weight(1f))
-                        Text("0", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                        Spacer(Modifier.weight(1f))
-                        Text("+4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    }
-                } else {
-                    Text("EV compensation is inactive while sensor exposure is manual.", style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                }
-
-                Spacer(Modifier.height(16.dp))
-
-                // ── Focus: Manual slider with Reset chip ───────────────────────────
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = NotiIcons.Focus,
-                        contentDescription = "Focus",
-                        tint = if (state.manualFocus) CameraColors.Accent else CameraColors.LabelSecondary,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Text("FOCUS", style = CameraType.Section, color = CameraColors.LabelTertiary)
-                    Spacer(Modifier.weight(1f))
-                    Text(
-                        state.focusLabel,
-                        style = CameraType.Value,
-                        color = if (state.manualFocus) CameraColors.Accent else CameraColors.Label,
-                    )
-                    if (state.manualFocus || state.aeAfLocked) {
-                        Spacer(Modifier.width(8.dp))
-                        ResetChip(onClick = actions::onFocusReset)
-                    }
-                }
-                IosSlider(
-                    value = state.focusFraction,
-                    valueRange = 0f..1f,
-                    onValueChange = actions::onManualFocusChanged,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    Text("∞", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("FAR", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("NEAR", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                    Spacer(Modifier.weight(1f))
-                    Text("MACRO", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
                 }
 
             }

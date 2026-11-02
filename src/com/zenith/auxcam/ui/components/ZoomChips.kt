@@ -30,6 +30,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.zenith.auxcam.ui.effects.cameraGlass
 import com.zenith.auxcam.DeviceProfile
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
 import com.zenith.auxcam.ui.theme.CameraColors
@@ -113,7 +114,7 @@ fun ZoomChips(
                     alpha = discAlpha
                     clip = false
                 }
-                .background(Color.White, CircleShape),
+                .cameraGlass(CircleShape, Color.White),
         )
 
         Row(
@@ -165,7 +166,7 @@ private fun ZoomChip(
         label = "chip-label-alpha",
     )
     val labelColor by animateColorAsState(
-        targetValue = if (selected) CameraColors.OnLight else CameraColors.Label,
+        targetValue = CameraColors.Label,
         animationSpec = CameraMotion.select(), label = "zoom-label-color",
     )
 

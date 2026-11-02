@@ -19,7 +19,7 @@ class RawCaptureContracts(unittest.TestCase):
         for name, number in (("getRawSensorSize", 19), ("triggerRawBurst", 20), ("cancelRawCapture", 21)):
             self.assertRegex(aidl, rf"\b{name}\([^;]+\)\s*=\s*{number}\s*;")
         self.assertIn("onRawCaptureFinished", (SRC / "IAuxCamCallback.aidl").read_text())
-        self.assertIn("version(9)", self.controller)
+        self.assertIn("version(11)", self.controller)
         self.assertIn("finishRawCapture(request, savedCount, error)", self.controller)
 
     def test_raw_capability_requires_both_flag_and_bounded_advertised_stream(self):
@@ -27,7 +27,7 @@ class RawCaptureContracts(unittest.TestCase):
         for required in ("REQUEST_AVAILABLE_CAPABILITIES_RAW", "getOutputSizes(ImageFormat.RAW_SENSOR)", "RawFrameMatcher.maxFramesForSize"):
             self.assertIn(required, caps)
         reader = self.controller.split("private fun createStillReader", 1)[1].split("private fun", 1)[0]
-        self.assertIn("getRawSensorSize", reader)
+        self.assertIn("getRawConfiguration", reader)
         self.assertIn("checkNotNull(rawSize)[0]", reader)
         self.assertIn("checkNotNull(rawSize)[1]", reader)
 
@@ -79,8 +79,9 @@ class RawCaptureContracts(unittest.TestCase):
         self.assertNotIn("latestPhotoUri =", save.split("post { if (pendingRawCapture === job", 1)[0])
 
     def test_raw_ui_exposes_only_supported_counts_and_truthful_sequence_semantics(self):
-        for required in ("1..state.maxRawFrames", "actions.onRawFramesSelected(count)", "state.rawCapabilityChecked", "state.supportsRaw", "No alignment, merging or HDR", "Single frame remains the default"):
-            self.assertIn(required, self.settings)
+        chooser = (SRC / "ui/components/RawCaptureButton.kt").read_text()
+        for required in ("1..state.maxRawFrames", "currentActions.onRawFramesSelected(count)", "state.rawCapabilityChecked", "state.supportsRaw", "not HDR/merged", "tween(3000"):
+            self.assertIn(required, chooser)
         self.assertNotIn("16-bit DNG", self.settings)
         screen = (SRC / "ui/CameraScreen.kt").read_text()
         self.assertIn("state.raw && state.captureBusy", screen)
@@ -89,18 +90,18 @@ class RawCaptureContracts(unittest.TestCase):
 
     def test_searchable_sections_retain_existing_controls(self):
         sections = (SRC / "ui/components/ControlSection.kt").read_text()
-        for label in ("Capture", "Manual", "Portrait", "Aids", "System"):
+        for label in ("Capture", "Portrait", "Aids", "System"):
             self.assertIn(f'{label}("{label}"', sections)
-        for required in ("BasicTextField", "Search camera controls", "SensorControlSettings(state, actions)", "BokehModelSettings(state, actions)", "actions::onCameraReport", "actions::onFramingGuideCycle", "actions::onTimerCycle"):
+        for required in ("BasicTextField", "Search camera controls", "BokehModelSettings(state, actions)", "actions::onCameraReport", "actions::onFramingGuideCycle", "actions::onTimerCycle"):
             self.assertIn(required, self.settings)
         self.assertNotIn(".border(", self.settings)
 
     def test_instrument_rail_commands_are_real_and_not_interpolated_requests(self):
         rail = (SRC / "ui/components/CaptureControlRail.kt").read_text()
-        for action in ("onManualExposureToggle", "onSensorIsoChanged", "onSensorShutterChanged", "onWhiteBalanceSelected", "onManualFocusChanged", "onFocusReset", "onEvChanged"):
+        for action in ("onManualExposureToggle", "onSensorIsoChanged", "onSensorShutterChanged", "onWhiteBalanceTemperatureChanged", "onManualFocusChanged", "onFocusReset", "onEvChanged"):
             self.assertIn(action, rail)
         self.assertIn("state.canAdjustSensorControls", rail)
-        self.assertIn("supportsWhiteBalance(it.mode)", rail)
+        self.assertIn("supportsTemperature", rail)
         self.assertNotIn(".border(", rail)
         self.assertNotIn("onValueChange = { actions.onSensor", rail)
 

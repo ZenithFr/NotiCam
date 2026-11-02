@@ -282,9 +282,6 @@ bool VulkanPipeline::init(ANativeWindow* window, uint32_t previewWidth, uint32_t
         return false;
     }
 
-    mNpuWorker = std::make_unique<NpuWorker>();
-    mNpuWorker->start();
-
     mInitialized = true;
     LOGI("VulkanPipeline initialized successfully (%ux%u)", mWidth, mHeight);
 
@@ -3586,10 +3583,6 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
 
 void VulkanPipeline::destroy() {
     if (!mInitialized) return;
-    if (mNpuWorker) {
-        mNpuWorker->stop();
-        mNpuWorker.reset();
-    }
     mYuvConverter.reset();
 
     if (mStillBokehInitialized && mDevice != VK_NULL_HANDLE) {

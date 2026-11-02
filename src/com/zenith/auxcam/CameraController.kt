@@ -130,6 +130,8 @@ interface CameraActions {
     fun onSensorShutterChanged(fraction: Float) {}
     fun onWhiteBalanceSelected(preset: WhiteBalancePreset) {}
 
+    fun onWhiteBalanceTemperatureChanged(kelvin: Int) {}
+    fun onRawResolutionSelected(high: Boolean) {}
     fun onRawFramesSelected(frames: Int) {}
     fun onRawCaptureCancel() {}
     fun onRawToggle()
@@ -137,6 +139,8 @@ interface CameraActions {
 
     /** 12MP <-> 50MP. */
     fun onResolutionToggle()
+    fun onVideoRateSelected(fps: Int) {}
+    fun onVideoQualitySelected(quality: Int) {}
 
     /** Cycle 1:1 -> 4:3 -> 16:9 -> Full. */
     fun onFrameRatioCycle()
@@ -711,7 +715,7 @@ class CameraController(
         )
             .daemon(false)
             .tag("noticam-${android.os.Process.myPid()}-${System.identityHashCode(this)}")
-            .version(9)
+            .version(11)
             .processNameSuffix("auxcam_privileged")
         serviceArgs = args
         try { Shizuku.bindUserService(args, this) }
@@ -778,7 +782,7 @@ class CameraController(
     private fun configurePreviewReader(svc: IAuxCamService) {
         val prefer60 = previewKey() !in preview30Fallbacks && recordingSurface == null
         val profile = svc.getPreviewConfiguration(currentLens, state.bokehActive,
-            state.resolution == Resolution.High, prefer60)
+            state.resolution == Resolution.High && !state.raw, prefer60)
         check(profile.size == 4 && profile[0] > 0 && profile[1] > 0) { "No advertised full-field preview profile" }
         val old = colorReader
         // A fresh queue excludes pre-switch buffers from the new-frame handoff signal.
@@ -830,10 +834,11 @@ class CameraController(
                     post { if (token == sessionToken) finishRawCapture(request, savedCount, error) }
                 }
                 override fun onSensorControlsResult(request: Int, selection: LongArray?, error: String?) {
-                    post { if (token == sessionToken && request == sensorControlToken && selection?.size == 4) {
+                    post { if (token == sessionToken && request == sensorControlToken && selection != null && selection.size >= 4) {
                         update { it.copy(manualExposure = selection[0] == 1L,
                             sensorIso = selection[1].coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(), sensorExposureNs = selection[2],
                             whiteBalance = WhiteBalancePreset.fromMode(selection[3].toInt()),
+                            whiteBalanceKelvin = selection.getOrElse(4) { 0L }.toInt(),
                             sensorControlStatus = error ?: "Camera accepted requested controls · live exposure may be capped",
                             status = error ?: if (it.status.startsWith("Camera controls rejected:")) "Ready" else it.status) }
                         if (error != null) Toast.makeText(activity, error, Toast.LENGTH_LONG).show()
@@ -850,7 +855,7 @@ class CameraController(
                 still.surface, stillW, stillH, still.imageFormat,
                 currentLens, recordingSurface.takeIf { state.videoStarting || state.videoRecording },
                 state.mode == CaptureMode.Video, state.zoom,
-                if (state.mode == CaptureMode.Video && state.videoTargetFps >= 60) 60 else state.previewTargetFps,
+                if (state.mode == CaptureMode.Video && recordingSurface != null) state.videoTargetFps else state.previewTargetFps,
             )
             update { it.copy(status = if (ok) "Starting engine…" else "Retrying session…") }
             if (!ok) {
@@ -900,19 +905,7 @@ class CameraController(
                 lensCount = physicalLenses.size.coerceAtLeast(1),
             )
         }
-        if (state.mode == CaptureMode.Video && !state.videoStarting && !state.videoRecording) {
-            val lens = currentLens
-            val generation = sessionToken
-            val svc = service
-            update { it.copy(videoWidth = 0, videoHeight = 0) }
-            io.execute {
-                val size = try { svc?.getVideoSize(lens) } catch (_: Exception) { null }
-                post { if (generation == sessionToken && state.mode == CaptureMode.Video && currentLens == lens) {
-                    update { it.copy(videoWidth = size?.getOrNull(0) ?: 0, videoHeight = size?.getOrNull(1) ?: 0,
-                        status = if (size?.size == 3) "Ready · native-aspect video" else "Native-aspect recorder unavailable on this lens") }
-                } }
-            }
-        }
+        if (state.mode == CaptureMode.Video && !state.videoStarting && !state.videoRecording) refreshVideoProfiles()
         if (state.videoStarting && recordingSurface != null) {
             val generation = videoGeneration
             io.execute {
@@ -945,8 +938,8 @@ class CameraController(
                 catch (e: Exception) { SensorControlCapabilities() }
             post { if (generation == sessionToken && request == sensorControlToken && foreground && service === svc) {
                 val maxExposure = SensorControlPolicy.maxExposure(caps, state.mode == CaptureMode.Video, state.videoTargetFps)
-                update { it.copy(sensorControls = caps, sensorControlsLoaded = true,
-                    manualExposure = it.manualExposure && caps.hasManualExposure && maxExposure > 0 && it.resolution == Resolution.Standard,
+                update { it.copy(sensorControls = caps, sensorControlsLoaded = true, whiteBalanceKelvin = 0,
+                    manualExposure = it.manualExposure && caps.hasManualExposure && maxExposure > 0,
                     sensorIso = SensorControlPolicy.iso(it.sensorIso, caps).takeIf { iso -> iso > 0 } ?: 100,
                     sensorExposureNs = SensorControlPolicy.exposure(it.sensorExposureNs, caps, it.mode == CaptureMode.Video, it.videoTargetFps).takeIf { ns -> ns > 0 } ?: 8_000_000L,
                     whiteBalance = it.whiteBalance.takeIf { preset -> caps.supportsWhiteBalance(preset.mode) } ?: WhiteBalancePreset.Auto,
@@ -981,7 +974,7 @@ class CameraController(
     override fun onSensorIsoChanged(fraction: Float) {
         if (!state.canAdjustSensorControls || !state.manualExposure || !fraction.isFinite()) return
         val caps = state.sensorControls
-        val iso = SensorControlPolicy.fromFraction(fraction, caps.minIso.toLong(), caps.maxIso.toLong()).toInt()
+        val iso = SensorControlPolicy.snapped(fraction, SensorControlPolicy.isoStops(caps.minIso, caps.maxIso)).toInt()
         if (iso == state.sensorIso) return
         update { it.copy(sensorIso = iso) }
         sendSensorControls()
@@ -989,7 +982,7 @@ class CameraController(
 
     override fun onSensorShutterChanged(fraction: Float) {
         if (!state.canAdjustSensorControls || !state.manualExposure || !fraction.isFinite()) return
-        val ns = SensorControlPolicy.fromFraction(fraction, state.sensorControls.minExposureNs, state.maxManualExposureNs)
+        val ns = SensorControlPolicy.snapped(fraction, SensorControlPolicy.shutterStops(state.sensorControls.minExposureNs, state.maxManualExposureNs))
         if (ns == state.sensorExposureNs) return
         update { it.copy(sensorExposureNs = ns) }
         sendSensorControls()
@@ -1002,16 +995,26 @@ class CameraController(
         haptic()
     }
 
+    override fun onWhiteBalanceTemperatureChanged(kelvin: Int) {
+        if (!state.canAdjustSensorControls || (kelvin != 0 && !state.sensorControls.supportsTemperature)) return
+        val value = if (kelvin == 0) 0 else ((kelvin.coerceIn(2000, 10000) + 25) / 50) * 50
+        if (value == state.whiteBalanceKelvin) return
+        val request = ++sensorControlToken
+        try { service?.setWhiteBalanceTemperature(request, value) }
+        catch (_: RemoteException) { update { it.copy(sensorControlStatus = "Could not send WB temperature") }; return }
+        update { it.copy(whiteBalanceKelvin = value) }
+    }
+
     private fun refreshHighResolutionCapability() {
         val svc = service ?: return
         val generation = frameGeneration
         val lens = currentLens
         io.execute {
-            val size = try { svc.getHighResolutionJpegSize() } catch (e: RemoteException) { null }
+            val size = try { svc.getHighResolutionJpegConfiguration(lens) } catch (e: RemoteException) { null }
             post {
-                if (generation == frameGeneration) {
-                    val width = if (lens == "3") 8192 else (size?.getOrNull(0) ?: 8160)
-                    val height = size?.getOrNull(1) ?: 6144
+                if (generation == frameGeneration && lens == currentLens && service === svc && foreground) {
+                    val width = size?.getOrNull(0) ?: 0
+                    val height = size?.getOrNull(1) ?: 0
                     update { it.copy(highResolutionWidth = width, highResolutionHeight = height, highResolutionChecked = true,
                         status = if (it.status.startsWith("Checking all exposed") || it.status.startsWith("Checking 50 MP")) {
                             if (CaptureOutput.is50MpSize(width, height)) "50 MP available • tap resolution to enable"
@@ -1043,7 +1046,9 @@ class CameraController(
         }
         if (state.raw) {
             finishCapture("RAW session rejected")
-            update { it.copy(raw = false, sessionReady = false) }
+            update { it.copy(raw = false, sessionReady = false,
+                resolution = if (it.resolution == Resolution.High && it.highResolutionChecked && it.supportsHighResolution)
+                    Resolution.High else Resolution.Standard) }
             rebuildStillSession("RAW unavailable for this stream combination · restoring JPEG…")
             return
         }
@@ -1078,10 +1083,14 @@ class CameraController(
         val lens = currentLens
         update { it.copy(rawCapabilityChecked = false, rawSensorWidth = 0, rawSensorHeight = 0) }
         io.execute {
-            val size = try { svc.getRawSensorSize(lens) } catch (_: Exception) { null }
-            post { if (generation == sessionToken && lens == currentLens) {
+            val standard = try { svc.getRawConfiguration(lens, false) } catch (_: Exception) { null }
+            val high = try { svc.getRawConfiguration(lens, true) } catch (_: Exception) { null }
+            post { if (generation == sessionToken && lens == currentLens && foreground && service === svc) {
+                val size = if (state.resolution == Resolution.High) high else standard
                 update { it.copy(rawCapabilityChecked = true, rawSensorWidth = size?.getOrNull(0) ?: 0,
-                    rawSensorHeight = size?.getOrNull(1) ?: 0) }
+                    rawSensorHeight = size?.getOrNull(1) ?: 0,
+                    rawStandardWidth = standard?.getOrNull(0) ?: 0, rawStandardHeight = standard?.getOrNull(1) ?: 0,
+                    rawHighWidth = high?.getOrNull(0) ?: 0, rawHighHeight = high?.getOrNull(1) ?: 0) }
                 update { it.copy(rawFrames = it.rawFrames.coerceIn(1, it.maxRawFrames.coerceAtLeast(1))) }
             } }
         }
@@ -2260,6 +2269,12 @@ class CameraController(
     }
 
     override fun onBokehToggle() {
+        if (!PortraitRuntime.available) {
+            update { it.copy(bokehEnabled = false, bokehModelReady = false, bokehModelError = PortraitRuntime.blockedReason,
+                bokehModelStatus = PortraitRuntime.blockedReason, status = "Portrait: APU model/runtime required") }
+            return
+        }
+
         if (state.previewTransitioning || state.bokehChecksRunning) return
         if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
         val enabled = !state.bokehEnabled
@@ -2272,25 +2287,69 @@ class CameraController(
         haptic()
     }
 
+    private var videoProfileToken = 0
+    private fun refreshVideoProfiles() {
+        val token = ++videoProfileToken
+        val session = sessionToken
+        val lens = currentLens
+        val svc = service ?: return
+        val quality = state.videoQuality
+        val fps = state.videoTargetFps
+        update { it.copy(videoProfilesChecked = false, videoWidth = 0, videoHeight = 0) }
+        io.execute {
+            val supported = mutableSetOf<Int>()
+            var selected: IntArray? = null
+            for (q in listOf(VideoPolicy.HD, VideoPolicy.UHD)) for (rate in listOf(24, 30, 60)) {
+                if (!VideoPolicy.allowedRate(q, rate)) continue
+                val size = try { svc.getVideoConfiguration(lens, q, rate) } catch (_: Exception) { null }
+                if (size?.size == 3) {
+                    supported += VideoPolicy.profileKey(q, rate)
+                    if (q == quality && rate == fps) selected = size
+                }
+            }
+            val size = selected
+            post { if (!disposed && foreground && session == sessionToken && token == videoProfileToken && currentLens == lens && state.mode == CaptureMode.Video &&
+                !state.videoStarting && !state.videoRecording && state.videoQuality == quality && state.videoTargetFps == fps) {
+                update { it.copy(videoProfilesChecked = true, videoSupportedProfiles = supported,
+                    videoWidth = size?.getOrNull(0) ?: 0, videoHeight = size?.getOrNull(1) ?: 0,
+                    status = if (size != null) "Ready · ${size[0]}×${size[1]} · $fps fps target" else "Selected video profile unavailable: no crop, upscale or rate fallback") }
+            } }
+        }
+    }
+
+    override fun onVideoQualitySelected(quality: Int) {
+        if (state.mode != CaptureMode.Video || state.captureBusy || state.videoStarting || state.videoRecording ||
+            state.previewTransitioning || state.manualExposure || quality !in listOf(VideoPolicy.HD, VideoPolicy.UHD)) return
+        val fps = if (VideoPolicy.allowedRate(quality, state.videoTargetFps)) state.videoTargetFps else 30
+        update { it.copy(videoQuality = quality, videoTargetFps = fps) }
+        haptic()
+        refreshVideoProfiles()
+    }
+
+    override fun onVideoRateSelected(fps: Int) {
+        if (state.mode != CaptureMode.Video || state.captureBusy || state.videoStarting || state.videoRecording ||
+            state.previewTransitioning || state.manualExposure || !VideoPolicy.allowedRate(state.videoQuality, fps)) return
+        update { it.copy(videoTargetFps = fps) }
+        haptic()
+        refreshVideoProfiles()
+    }
+
     override fun onResolutionToggle() {
-        if (state.manualExposure) {
-            update { it.copy(sensorControlStatus = "Return to Auto exposure before changing resolution or video rate") }
+        if (state.manualExposure && state.mode == CaptureMode.Video) {
+            update { it.copy(sensorControlStatus = "Return to Auto exposure before changing video rate") }
             return
         }
 
         if (state.previewTransitioning || state.bokehChecksRunning) return
         if (state.mode == CaptureMode.Video) {
             if (state.videoRecording || state.videoStarting) return
-            val nextFps = if (state.videoTargetFps == 30) 60 else 30
-            update { it.copy(videoTargetFps = nextFps, status = if (nextFps == 60) "Video: 4K+ (Overclocked Max)" else "Video: 4K 30 FPS") }
-            haptic()
-            startStereoSession()
+            if (state.captureBusy) return
+            onVideoQualitySelected(if (state.videoQuality == VideoPolicy.HD) VideoPolicy.UHD else VideoPolicy.HD)
             return
         }
         if (state.mode != CaptureMode.Photo || state.captureBusy || !state.sessionReady) return
         if (state.raw) {
-            update { it.copy(raw = false) }
-            rebuildStillSession("Returning to 12 MP JPEG…")
+            onRawResolutionSelected(state.resolution != Resolution.High)
             haptic()
             return
         }
@@ -2323,17 +2382,17 @@ class CameraController(
         val bokeh = state.bokehActive && !raw
         val advertised = if (!high && !bokeh && !raw) try { service?.getStandardJpegSize(currentLens) } catch (e: Exception) { null } else null
         if (!high && !bokeh && !raw && service != null) check(advertised?.size == 2) { "This lens has no advertised native JPEG output" }
-        val rawSize = if (raw) service?.getRawSensorSize(currentLens) else null
+        val rawSize = if (raw) service?.getRawConfiguration(currentLens, state.resolution == Resolution.High) else null
         check(!raw || (rawSize?.size == 2 && rawSize[0] > 0 && rawSize[1] > 0)) { "This lens exposes no RAW_SENSOR output" }
         val width = when {
             raw -> checkNotNull(rawSize)[0]
-            high -> if (currentLens == "3") 8192 else (state.highResolutionWidth.takeIf { it > 0 } ?: 8160)
+            high -> state.highResolutionWidth
             bokeh -> DeviceProfile.STILL_WIDTH
             else -> advertised?.getOrNull(0) ?: DeviceProfile.STILL_WIDTH
         }
         val height = when {
             raw -> checkNotNull(rawSize)[1]
-            high -> if (currentLens == "3") 6144 else (state.highResolutionHeight.takeIf { it > 0 } ?: 6144)
+            high -> state.highResolutionHeight
             bokeh -> DeviceProfile.STILL_HEIGHT
             else -> advertised?.getOrNull(1) ?: DeviceProfile.STILL_HEIGHT
         }
@@ -2447,6 +2506,25 @@ class CameraController(
         haptic()
     }
 
+    override fun onRawResolutionSelected(high: Boolean) {
+        if (state.mode != CaptureMode.Photo || !state.sessionReady || state.captureBusy || state.previewTransitioning) return
+        val width = if (high) state.rawHighWidth else state.rawStandardWidth
+        val height = if (high) state.rawHighHeight else state.rawStandardHeight
+        if (!state.rawCapabilityChecked || RawFrameMatcher.maxFramesForSize(width, height) == 0) {
+            Toast.makeText(activity, "${if (high) "50" else "12"} MP RAW is not advertised for this lens", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (state.raw && (state.resolution == Resolution.High) == high) return
+        val nativeZoom = if (!high) state.zoom else when (currentLens) { "3" -> 2f; "2" -> .6f; else -> 1f }
+        lastSentZoom = nativeZoom
+        try { service?.setZoom(nativeZoom) } catch (_: RemoteException) { }
+        try { service?.setFlashMode(0) } catch (_: RemoteException) { }
+        update { it.copy(raw = true, resolution = if (high) Resolution.High else Resolution.Standard,
+            rawSensorWidth = width, rawSensorHeight = height, rawFrames = 1, zoom = nativeZoom, flash = FlashMode.Off, bokehEnabled = false) }
+        rebuildStillSession("Opening native ${if (high) "50" else "12"} MP RAW…")
+        haptic()
+    }
+
     override fun onRawFramesSelected(frames: Int) {
         if (state.mode != CaptureMode.Photo || !state.raw || !state.sessionReady || state.captureBusy || state.previewTransitioning) return
         if (frames !in 1..state.maxRawFrames) return
@@ -2471,11 +2549,12 @@ class CameraController(
         }
         if (newRaw) {
             try { service?.setFlashMode(0) } catch (_: Exception) { }
-            update { it.copy(raw = true, flash = FlashMode.Off, resolution = Resolution.Standard, bokehEnabled = false) }
+            update { it.copy(raw = true, flash = FlashMode.Off, bokehEnabled = false) }
             rebuildStillSession("Enabling advertised RAW (DNG) capture…")
         } else {
-            update { it.copy(raw = false) }
-            rebuildStillSession("Returning to standard JPEG…")
+            update { it.copy(raw = false, resolution = if (it.resolution == Resolution.High && it.highResolutionChecked && it.supportsHighResolution)
+                Resolution.High else Resolution.Standard) }
+            rebuildStillSession("Returning to advertised JPEG capture…")
         }
         haptic()
     }
@@ -2525,17 +2604,23 @@ class CameraController(
         }
         val svc = service ?: return
         val lens = currentLens
+        val quality = state.videoQuality
+        val fps = state.videoTargetFps
+        if (!state.videoProfilesChecked || VideoPolicy.profileKey(quality, fps) !in state.videoSupportedProfiles) {
+            update { it.copy(status = "Choose a supported video resolution/rate; selected profile is unavailable") }
+            return
+        }
         val generation = ++videoGeneration
         update { it.copy(videoStarting = true, captureBusy = true, sessionReady = false,
             settingsOpen = false, videoHasAudio = audio, status = "Preparing video…") }
         main.postDelayed(videoStartTimeout, 15_000)
         io.execute {
             try {
-                val size = svc.getVideoSize(lens)
-                check(size.size == 3) { "No native-aspect 30 fps recorder + AVC encoder stream on this lens. No 16:9 substitute." }
+                val size = svc.getVideoConfiguration(lens, quality, fps)
+                check(size.size == 3) { "Selected native-aspect resolution/FPS is unavailable. No substitute." }
                 val capture = VideoCapture(activity.applicationContext)
                 videoCapture = capture
-                capture.prepare(size[0], size[1], audio, size[2], state.videoTargetFps,
+                capture.prepare(size[0], size[1], audio, size[2], fps,
                     onFailure = { post { if (generation == videoGeneration) stopVideo(false, true) } },
                     onLimit = { post { if (generation == videoGeneration) stopVideo(true, true) } })
                 recordingSurface = capture.surface
@@ -2691,7 +2776,7 @@ class CameraController(
         bokehThermal = status
         val severe = status >= PowerManager.THERMAL_STATUS_SEVERE
         native.setThermalThrottled(severe)
-        update { it.copy(telemetry = "THERMAL · " + thermalName(status) + if (severe) " · throttled" else "") }
+        update { it.copy(telemetry = "THERMAL · " + thermalName(status) + if (severe) " · high temperature" else "") }
     }
 
     private fun thermalName(status: Int): String = when (status) {

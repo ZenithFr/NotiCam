@@ -1,23 +1,4 @@
 {
   "schema": 1,
-  "files": [
-    {
-      "asset": "models/mp_general_fixed_float.tflite",
-      "size": 249536,
-      "sha256": "62fb4bda888231741ae9be98bff2dc1bced55a6e474db5b3ba5cb37e83c1ec07",
-      "license": "Apache-2.0",
-      "source": "https://github.com/google-ai-edge/mediapipe"
-    },
-    {
-      "asset": "models/optional/modnet.onnx",
-      "size": 25888640,
-      "sha256": "07c308cf0fc7e6e8b2065a12ed7fc07e1de8febb7dc7839d7b7f15dd66584df9",
-      "license": "Apache-2.0",
-      "source": "https://github.com/ZHKKKe/MODNet",
-      "urls": [
-        "https://github.com/NongfuSpringSweet/vztool-models/releases/download/modnet-webnn-6af52070d14deafc5e55ce6cc4d752a322cdff76/onnx-model.onnx",
-        "https://api.github.com/repos/qianbin1989228/MODNet_onnx/git/blobs/929e054b0d6f001898d309f92b7a70b9530ec301"
-      ]
-    }
-  ]
+  "files": []
 }

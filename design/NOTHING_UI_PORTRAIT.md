@@ -1,5 +1,9 @@
 # Nothing-inspired UI / two-choice portrait increment
 
+> Portrait/model and video-profile details below are historical where they conflict
+> with the current [APU-only replacement report](APU_PORTRAIT_VIDEO_PROFILES.md).
+> Auto/MODNet inference is now removed; the replacement is blocked pending artifacts.
+
 Date: 2026-11-02. Implementation on `arena/ae08650c-noticam`.
 
 ## Delivered source changes

@@ -139,8 +139,13 @@ final class CameraCapabilities {
         return null;
     }
 
-    /** Largest advertised RAW_SENSOR stream within the app's single-frame payload budget. */
+    /** Default-pixel-mode RAW only. Maximum-resolution RAW needs a distinct session path. */
     static Size rawSize(CameraManager cm, String lensId) {
+        Size high = rawSize(cm, lensId, true);
+        return high != null ? high : rawSize(cm, lensId, false);
+    }
+
+    static Size rawSize(CameraManager cm, String lensId, boolean high) {
         try {
             String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
             CameraCharacteristics c = cm.getCameraCharacteristics(id);
@@ -151,11 +156,14 @@ final class CameraCapabilities {
             if (!raw) return null;
             StreamConfigurationMap map = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             Size best = null;
-            if (map != null) {
-                Size[] sizes = map.getOutputSizes(ImageFormat.RAW_SENSOR);
+            if (map != null) for (Size[] sizes : new Size[][]{map.getOutputSizes(ImageFormat.RAW_SENSOR), map.getHighResolutionOutputSizes(ImageFormat.RAW_SENSOR)}) {
                 if (sizes != null) for (Size size : sizes) {
+                    long pixels = (long) size.getWidth() * size.getHeight();
+                    if (high != (pixels >= 45_000_000L)) continue;
+                    // 12 MP means a native binned class, never a 50 MP file with a 12 MP label.
+                    if (!high && (pixels < 10_000_000L || pixels > 16_000_000L)) continue;
                     if (RawFrameMatcher.maxFramesForSize(size.getWidth(), size.getHeight()) == 0) continue;
-                    if (best == null || (long) size.getWidth() * size.getHeight() > (long) best.getWidth() * best.getHeight()) best = size;
+                    if (best == null || pixels > (long) best.getWidth() * best.getHeight()) best = size;
                 }
             }
             return best;
@@ -208,20 +216,49 @@ final class CameraCapabilities {
         }
         return best == null ? new int[0] : new int[]{best.getWidth(), best.getHeight(), rate.getLower(), rate.getUpper()};
     }
-    static Size fourKVideoSize(CameraManager cm, String id) {
-        try {
-            CameraCharacteristics chars = cm.getCameraCharacteristics(id);
-            StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
-            if (map == null) return null;
-            Size[] sizes = map.getOutputSizes(MediaRecorder.class);
-            if (sizes != null) for (Size size : sizes) {
-                if (size.getWidth() == 3840 && size.getHeight() == 2160) {
-                    return size;
-                }
-            }
-        } catch (Throwable ignored) {}
+    /** A declared constant capture rate, never an invented [30,60] range. */
+    static android.util.Range<Integer> recordingRange(CameraManager cm, String id, int fps) throws Exception {
+        android.util.Range<Integer>[] ranges = cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+        if (ranges != null) for (android.util.Range<Integer> range : ranges) {
+            if (VideoPolicy.fixedRate(range.getLower(), range.getUpper(), fps)) return range;
+        }
         return null;
     }
+
+    /** User-requested quality/rate, preserving the sensor field. 4K requires
+     * a genuine 3840-wide native-aspect output; no upscale or silent 16:9 crop. */
+    static Size videoProfile(CameraManager cm, String id, int quality, int fps) throws Exception {
+        if (!VideoPolicy.allowedRate(quality, fps) || recordingRange(cm, id, fps) == null) return null;
+        CameraCharacteristics chars = cm.getCameraCharacteristics(id);
+        StreamConfigurationMap map = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        Rect active = chars.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+        if (map == null || active == null) return null;
+        // The repeating request drives both recorder and YUV preview targets.
+        int[] preview = previewConfig(cm, id, fps >= 60);
+        if (preview.length != 4) return null;
+        long previewDuration = map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, new Size(preview[0], preview[1]));
+        if (previewDuration <= 0 || previewDuration > 1_000_000_000L / fps + 1) return null;
+        Size[] sizes = map.getOutputSizes(MediaRecorder.class);
+        if (sizes == null) return null;
+        for (Size size : sizes) {
+            if (!VideoPolicy.matchesQuality(size.getWidth(), size.getHeight(), quality) ||
+                !VideoPolicy.matchesSensor(size.getWidth(), size.getHeight(), active.width(), active.height())) continue;
+            long duration = map.getOutputMinFrameDuration(MediaRecorder.class, size);
+            if (duration <= 0 || duration > 1_000_000_000L / fps + 1) continue;
+            for (MediaCodecInfo codec : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
+                if (!codec.isEncoder() || !codec.isHardwareAccelerated()) continue;
+                try {
+                    MediaCodecInfo.CodecCapabilities caps = codec.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC);
+                    boolean surface = false;
+                    for (int format : caps.colorFormats) if (format == MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface) surface = true;
+                    if (surface && caps.getVideoCapabilities() != null &&
+                        caps.getVideoCapabilities().areSizeAndRateSupported(size.getWidth(), size.getHeight(), fps)) return size;
+                } catch (IllegalArgumentException ignored) { }
+            }
+        }
+        return null;
+    }
+
     /** Largest advertised native-aspect recorder stream supported by hardware AVC
      * at 30 fps. Not unbinned sensor RAW, and not proof of combined-session throughput.
      * Never silently substitutes a wide crop when a native stream is unavailable.

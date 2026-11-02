@@ -83,7 +83,7 @@ class MediaFeatures(unittest.TestCase):
         video = (SRC / 'VideoCapture.kt').read_text()
         self.assertIn('VideoPolicy.bitrate(width, height)', video)
         self.assertIn('bitrateRange.clamp', video)
-        self.assertIn('No 16:9 substitute', (SRC / 'CameraController.kt').read_text())
+        self.assertIn('No substitute.', (SRC / 'CameraController.kt').read_text())
         self.assertNotIn('16:9', (SRC / 'ui/CameraScreen.kt').read_text())
 
     def test_gallery_uses_rotated_video_metadata_not_hardcoded_portrait_crop(self):
@@ -106,10 +106,10 @@ class MediaFeatures(unittest.TestCase):
         import re
         aidl = (SRC / 'IAuxCamService.aidl').read_text()
         methods = re.findall(r'(?:void|boolean|int\[\]|long\[\]|String)\s+(\w+)\([^;]*?\)\s*=\s*(\d+);', aidl)
-        self.assertEqual([int(code) for _, code in methods[:-1]], list(range(22)))
+        self.assertEqual([int(code) for _, code in methods[:-1]], list(range(26)))
         self.assertEqual(methods[-1], ('destroy', '16777114'))
         controller = (SRC / 'CameraController.kt').read_text()
-        self.assertIn('.version(9)', controller)
+        self.assertIn('.version(11)', controller)
         self.assertIn('.daemon(false)', controller)
         self.assertIn('.tag("noticam-', controller)
         self.assertIn('exitingService?.destroy()', controller)

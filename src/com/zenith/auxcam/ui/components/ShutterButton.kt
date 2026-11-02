@@ -33,6 +33,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.zenith.auxcam.ui.feedback.rememberCameraHaptics
+import com.zenith.auxcam.ui.effects.rememberMatteGrain
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraSpacing
@@ -61,6 +62,7 @@ fun ShutterButton(
     busy: Boolean = false,
     recording: Boolean = false,
 ) {
+    val grain = rememberMatteGrain()
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val haptics = rememberCameraHaptics()
@@ -170,7 +172,7 @@ fun ShutterButton(
 
             // 2. Outer ring — dims slightly while pressed, like the iPhone shutter.
             drawCircle(
-                color = Color.White.copy(alpha = if (pressScale < 0.99f) 0.7f else 1f),
+                color = Color.White.copy(alpha = if (pressScale < 0.99f) 0.7f else .9f),
                 radius = outerRadius,
                 center = center,
                 style = Stroke(width = ringWidth),
@@ -180,10 +182,23 @@ fun ShutterButton(
                 (1f - 0.04f * (1f - pulseProgress.value).coerceIn(0f, 1f))
             val halfSize = radius * (1f - 0.48f * recordingShape)
             drawRoundRect(
-                color = discColor.copy(alpha = enabledAmount),
+                color = discColor.copy(alpha = enabledAmount * .10f),
                 topLeft = Offset(center.x - halfSize, center.y - halfSize),
                 size = Size(halfSize * 2f, halfSize * 2f),
                 cornerRadius = CornerRadius(radius * (1f - 0.88f * recordingShape)),
+            )
+            drawRoundRect(
+                brush = grain, alpha = .22f * enabledAmount,
+                topLeft = Offset(center.x - halfSize, center.y - halfSize),
+                size = Size(halfSize * 2f, halfSize * 2f),
+                cornerRadius = CornerRadius(radius * (1f - 0.88f * recordingShape)),
+            )
+            if (videoMode) drawRoundRect(
+                color = CameraColors.Red.copy(alpha = .9f * enabledAmount),
+                topLeft = Offset(center.x - halfSize, center.y - halfSize),
+                size = Size(halfSize * 2f, halfSize * 2f),
+                cornerRadius = CornerRadius(radius * (1f - 0.88f * recordingShape)),
+                style = Stroke(2.dp.toPx()),
             )
 
         }

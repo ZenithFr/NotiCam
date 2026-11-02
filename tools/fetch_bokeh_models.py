@@ -48,7 +48,8 @@ def fetch(spec):
 def prune_retired_assets(root):
     # This exact path was a generated APK weight, never a user's camera media.
     # Do not recursively clean optional/: unrelated user-supplied files survive.
-    (root / 'assets/models/optional/rvm_mobilenetv3_fp32.onnx').unlink(missing_ok=True)
+    for name in ('rvm_mobilenetv3_fp32.onnx', 'modnet.onnx'):
+        (root / 'assets/models/optional' / name).unlink(missing_ok=True)
 
 
 def main():

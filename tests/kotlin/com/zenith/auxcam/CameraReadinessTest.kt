@@ -6,7 +6,7 @@ import org.junit.Test
 class CameraReadinessTest {
     @Test fun portraitShutterDoesNotDependOnLiveMaskFreshnessOrModelFailure() {
         val ready = CameraUiState(sessionReady = true, bokehEnabled = true)
-        assertTrue(ready.bokehActive)
+        assertFalse(ready.bokehActive)
         assertTrue(ready.canTakePhoto)
         assertTrue(ready.copy(bokehModelReady = true).canTakePhoto)
         assertTrue(ready.copy(bokehModelReady = false, bokehLiveSuspended = true).canTakePhoto)

@@ -32,7 +32,8 @@ class CameraZoomTest {
         assertEquals("0", CameraZoom.lensForZoom(Float.NaN))
     }
     @Test fun videoAndPhotoHaveSeparateShutterPolicies() {
-        assertTrue(CameraUiState(mode = CaptureMode.Video, sessionReady = true).canUseShutter)
+        assertTrue(CameraUiState(mode = CaptureMode.Video, sessionReady = true, videoProfilesChecked = true,
+            videoSupportedProfiles = setOf(VideoPolicy.profileKey(VideoPolicy.HD, 30))).canUseShutter)
         assertFalse(CameraUiState(mode = CaptureMode.Video, sessionReady = true).canTakePhoto)
         assertFalse(CameraUiState(mode = CaptureMode.Video, videoStarting = true, captureBusy = true).canUseShutter)
         assertTrue(CameraUiState(mode = CaptureMode.Video, videoRecording = true).canUseShutter)
