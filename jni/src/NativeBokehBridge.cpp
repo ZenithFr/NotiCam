@@ -2,6 +2,9 @@
 #include <android/native_window_jni.h>
 #include <android/hardware_buffer_jni.h>
 #include <android/log.h>
+#include <NeuralNetworks.h>
+#include <string>
+#include <vector>
 #include <memory>
 #include <mutex>
 #include <cmath>
@@ -276,4 +279,35 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_zenith_auxcam_MainActivity_nativeGetAhbRefcount(JNIEnv* env, jobject thiz) {
     std::lock_guard<std::mutex> lock(gPipelineMutex);
     return gPipeline ? gPipeline->getAhbRefcount() : 0;
+}
+
+// Query the platform; never assume a driver name on a particular MediaTek SKU.
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_zenith_auxcam_NnapiDevices_acceleratorNames(JNIEnv* env, jobject) {
+    std::vector<std::string> names;
+    uint32_t count = 0;
+    if (ANeuralNetworks_getDeviceCount(&count) == ANEURALNETWORKS_NO_ERROR) {
+        for (uint32_t i = 0; i < count; ++i) {
+            ANeuralNetworksDevice* device = nullptr;
+            int32_t type = ANEURALNETWORKS_DEVICE_UNKNOWN;
+            const char* name = nullptr;
+            if (ANeuralNetworks_getDevice(i, &device) == ANEURALNETWORKS_NO_ERROR &&
+                ANeuralNetworksDevice_getType(device, &type) == ANEURALNETWORKS_NO_ERROR &&
+                type == ANEURALNETWORKS_DEVICE_ACCELERATOR &&
+                ANeuralNetworksDevice_getName(device, &name) == ANEURALNETWORKS_NO_ERROR && name) {
+                names.emplace_back(name);
+            }
+        }
+    }
+    jclass stringType = env->FindClass("java/lang/String");
+    if (!stringType) return nullptr;
+    jobjectArray result = env->NewObjectArray(static_cast<jsize>(names.size()), stringType, nullptr);
+    if (!result) return nullptr;
+    for (size_t i = 0; i < names.size(); ++i) {
+        jstring name = env->NewStringUTF(names[i].c_str());
+        if (!name) return nullptr;
+        env->SetObjectArrayElement(result, static_cast<jsize>(i), name);
+        env->DeleteLocalRef(name);
+    }
+    return result;
 }

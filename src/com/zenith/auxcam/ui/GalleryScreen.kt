@@ -123,14 +123,8 @@ fun GalleryScreen(onClose: () -> Unit) {
         val list = media
         val pager = rememberPagerState(pageCount = { media?.size ?: 0 })
         val selected = list?.takeIf { it.isNotEmpty() }?.let { it[pager.currentPage.coerceIn(0, it.lastIndex)] }
-        val backdrop by produceState<ImageBitmap?>(null, selected?.uri) {
-            value = withContext(Dispatchers.IO) {
-                try { selected?.let { context.contentResolver.loadThumbnail(it.uri, Size(128, 128), null).asImageBitmap() } }
-                catch (_: Exception) { null }
-            }
-        }
         Box(Modifier.fillMaxSize().background(CameraColors.Black)) {
-            SceneAtmosphere(backdrop, Modifier.matchParentSize())
+            SceneAtmosphere(Modifier.matchParentSize())
             Column(Modifier.fillMaxSize().padding(gallerySafePadding())) {
                 if (list == null) {
                     Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }

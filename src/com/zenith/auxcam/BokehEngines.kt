@@ -13,7 +13,6 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import java.security.MessageDigest
 
 /** A bounded upright YUV sample. Only byte copies cross the camera callback boundary. */
@@ -58,101 +57,68 @@ internal object BokehAssets {
 }
 
 internal fun createBokehEngine(context: Context, model: BokehModel): BokehEngine = when (model) {
-    BokehModel.MediaPipeAuto, BokehModel.MediaPipeDual -> LegacyBokehEngine(context, model)
-    BokehModel.MediaPipeLandscape, BokehModel.MediaPipeGeneral -> SingleMediaPipeEngine(context, model)
-    BokehModel.MODNet, BokehModel.RVM -> OnnxBokehEngine(context, model)
+    BokehModel.MediaPipeAuto -> AutoPortraitEngine(context)
+    BokehModel.MODNet -> OnnxBokehEngine(context)
 }
 
-private class LegacyBokehEngine(context: Context, private val model: BokehModel) : BokehEngine {
-    private val segmenter = DualMatteSegmenter(context, packagedOnly = true)
-    init {
-        try {
-            // Verify both float assets before allowing the original loader/delegate path.
-            BokehAssets.bytes(context, "models/mp_landscape_fixed_float.tflite")
-            BokehAssets.bytes(context, "models/mp_general_fixed_float.tflite")
-            check(segmenter.initialize()) { "MediaPipe initialization/delegation failed" }
-            check(segmenter.currentMode == DualMatteSegmenter.TierMode.DUAL) { "General model unavailable" }
-        } catch (t: Throwable) { segmenter.close(); throw t }
-    }
-    override val description: String
-        get() = "TFLite · NNAPI requested (placement unverified) · ${segmenter.currentMode}"
-    override fun infer(frame: BokehFrame): ByteArray {
-        check(segmenter.preprocessRgb(frame) && segmenter.runInference()) { "MediaPipe inference failed" }
-        return ByteArray(256 * 256).also { segmenter.getLatestAlphaMatte(it) }
-    }
-    override fun policy(thermal: Int, fps: Float) {
-        if (model == BokehModel.MediaPipeAuto) {
-            segmenter.onThermalStatusChanged(thermal)
-            // Thermal takes precedence over FPS recovery.
-            if (thermal < 2) segmenter.onFpsMeasured(fps)
-        }
-    }
-    override fun reset() = segmenter.resetTemporalState()
-    override fun close() = segmenter.close()
-}
-
-private class SingleMediaPipeEngine(context: Context, model: BokehModel) : BokehEngine {
-    private val h = if (model == BokehModel.MediaPipeLandscape) 144 else 256
-    private val bytes = BokehAssets.bytes(context, if (h == 144) "models/mp_landscape_fixed_float.tflite" else "models/mp_general_fixed_float.tflite")
+/** One general person model; no max-fusion false positives or lagging dual EMA. */
+private class AutoPortraitEngine(context: Context) : BokehEngine {
+    private val bytes = BokehAssets.bytes(context, "models/mp_general_fixed_float.tflite")
     private val modelBuffer = ByteBuffer.allocateDirect(bytes.size).order(ByteOrder.nativeOrder()).apply { put(bytes); rewind() }
-    private var nnapiDelegate: NnApiDelegate? = null
-    private val interpreter: Interpreter
-    private val input = ByteBuffer.allocateDirect(256 * h * 3 * 4).order(ByteOrder.nativeOrder())
-    private val output = ByteBuffer.allocateDirect(256 * h * 4).order(ByteOrder.nativeOrder())
-    override val description: String
-    init {
+    private val input = ByteBuffer.allocateDirect(256 * 256 * 3 * 4).order(ByteOrder.nativeOrder())
+    private val output = ByteBuffer.allocateDirect(256 * 256 * 4).order(ByteOrder.nativeOrder())
+    private class Session(val interpreter: Interpreter, val delegate: NnApiDelegate?, val label: String) : AutoCloseable {
+        override fun close() { try { interpreter.close() } finally { delegate?.close() } }
+    }
+    private val session = InferenceBackend.open(NnapiDevices.available(), accelerated = { device ->
         var delegate: NnApiDelegate? = null
-        val options = Interpreter.Options().apply {
-            setNumThreads(4)
-            try {
-                val nnOpts = NnApiDelegate.Options().apply {
-                    setAcceleratorName("mtk-mdla_shim")
-                }
-                delegate = NnApiDelegate(nnOpts)
-                addDelegate(delegate)
-            } catch (t: Throwable) {
-                delegate = null
-                setUseXNNPACK(true)
-            }
-        }
-        interpreter = Interpreter(modelBuffer, options)
-        nnapiDelegate = delegate
-        description = (if (delegate != null) "TFLite APU (mtk-mdla_shim)" else "TFLite CPU/XNNPACK · 4 threads") + " · 256 × $h"
         try {
-            require(interpreter.getInputTensor(0).shape().contentEquals(intArrayOf(1, h, 256, 3)))
-            require(interpreter.getOutputTensor(0).shape().contentEquals(intArrayOf(1, h, 256, 1)))
-            require(interpreter.getInputTensor(0).dataType() == DataType.FLOAT32)
-            require(interpreter.getOutputTensor(0).dataType() == DataType.FLOAT32)
-        } catch (t: Throwable) {
-            interpreter.close()
-            nnapiDelegate?.close()
-            throw t
-        }
-    }
-    override fun infer(frame: BokehFrame): ByteArray {
-        frame.writeTensor(input.asFloatBuffer(), 256, h, nchw = false)
+            modelBuffer.rewind()
+            val nnOptions = NnApiDelegate.Options().apply {
+                setUseNnapiCpu(false)
+                setExecutionPreference(NnApiDelegate.Options.EXECUTION_PREFERENCE_FAST_SINGLE_ANSWER)
+                if (device != null) setAcceleratorName(device)
+            }
+            delegate = NnApiDelegate(nnOptions)
+            val interpreter = Interpreter(modelBuffer, Interpreter.Options().apply { setNumThreads(2); addDelegate(delegate) })
+            Session(interpreter, delegate, "NNAPI · ${device ?: "system selection"} · placement unverified")
+        } catch (failure: Throwable) { delegate?.close(); throw failure }
+    }, cpu = {
+        modelBuffer.rewind()
+        Session(Interpreter(modelBuffer, Interpreter.Options().apply { setNumThreads(2); setUseXNNPACK(true) }), null,
+            "CPU/XNNPACK fallback · accelerator unavailable or rejected")
+    }, validate = { active ->
+        require(active.interpreter.getInputTensor(0).shape().contentEquals(intArrayOf(1, 256, 256, 3)))
+        require(active.interpreter.getOutputTensor(0).shape().contentEquals(intArrayOf(1, 256, 256, 1)))
+        require(active.interpreter.getInputTensor(0).dataType() == DataType.FLOAT32)
+        require(active.interpreter.getOutputTensor(0).dataType() == DataType.FLOAT32)
+        // A constructed delegate is not evidence that a model can actually run.
         input.rewind(); output.rewind()
-        interpreter.run(input, output)
-        val alpha = FloatArray(256 * h)
+        active.interpreter.run(input, output)
+        val warmup = FloatArray(256 * 256)
+        output.rewind(); output.asFloatBuffer().get(warmup)
+        require(warmup.all { it.isFinite() && it >= -.001f && it <= 1.001f })
+    })
+    override val description: String get() = "Auto · ${session.label} · 256 × 256"
+    override fun infer(frame: BokehFrame): ByteArray {
+        frame.writeTensor(input.asFloatBuffer(), 256, 256, nchw = false)
+        input.rewind(); output.rewind()
+        session.interpreter.run(input, output)
+        val alpha = FloatArray(256 * 256)
         output.rewind(); output.asFloatBuffer().get(alpha)
-        return BokehMask.sensorBytes(alpha, 256, h, DeviceProfile.PREVIEW_ROTATION_90)
+        return BokehMask.sensorBytes(alpha, 256, 256, DeviceProfile.PREVIEW_ROTATION_90)
     }
-    override fun close() {
-        interpreter.close()
-        nnapiDelegate?.close()
-    }
+    override fun close() = session.close()
 }
 
-private class OnnxBokehEngine(context: Context, private val model: BokehModel) : BokehEngine {
-    private val env = OrtEnvironment.getEnvironment() // Process-owned singleton; never close per engine.
+/** Quality option is MODNet only. No recurrent model or unused tensors retained. */
+private class OnnxBokehEngine(context: Context) : BokehEngine {
+    private val env = OrtEnvironment.getEnvironment()
     private val session: OrtSession
     private val input = ByteBuffer.allocateDirect(BokehInput.WIDTH * BokehInput.HEIGHT * 3 * 4).order(ByteOrder.nativeOrder()).asFloatBuffer()
-    private data class Recurrent(val data: FloatArray, val shape: LongArray)
-    private var recurrent: List<Recurrent> = emptyList()
-    override val description = "ONNX CPU · 2 threads · 384 × 512" + if (model == BokehModel.RVM) " · ds 0.5 · recurrent" else " · RGB [-1,1]"
+    override val description = "Portrait quality · MODNet · CPU · 384 × 512 · RGB [-1,1]"
     init {
-        val path = if (model == BokehModel.MODNet) "models/optional/modnet.onnx" else "models/optional/rvm_mobilenetv3_fp32.onnx"
-        val bytes = BokehAssets.bytes(context, path)
+        val bytes = BokehAssets.bytes(context, "models/optional/modnet.onnx")
         session = OrtSession.SessionOptions().use { options ->
             options.setIntraOpNumThreads(2)
             options.setInterOpNumThreads(1)
@@ -160,50 +126,24 @@ private class OnnxBokehEngine(context: Context, private val model: BokehModel) :
             env.createSession(bytes, options)
         }
         try {
-            val expected = if (model == BokehModel.MODNet) setOf("input") else setOf("src", "r1i", "r2i", "r3i", "r4i", "downsample_ratio")
-            require(session.inputNames == expected) { "Unexpected ONNX input names" }
-            require(session.inputInfo.values.all { (it.info as? TensorInfo)?.type == OnnxJavaType.FLOAT }) { "Expected FP32 inputs" }
-            val outputName = if (model == BokehModel.MODNet) "output" else "pha"
-            require(session.outputNames.contains(outputName)) { "Missing alpha output" }
-            require((session.outputInfo.getValue(outputName).info as TensorInfo).type == OnnxJavaType.FLOAT)
-            val imageInfo = session.inputInfo.getValue(if (model == BokehModel.MODNet) "input" else "src").info as TensorInfo
-            require(imageInfo.shape.size == 4 && imageInfo.shape[1] == 3L) { "Expected RGB NCHW" }
-        } catch (t: Throwable) { session.close(); throw t }
+            require(session.inputNames == setOf("input")) { "Unexpected MODNet inputs" }
+            val imageInfo = session.inputInfo.getValue("input").info as TensorInfo
+            require(imageInfo.type == OnnxJavaType.FLOAT && imageInfo.shape.size == 4 && imageInfo.shape[1] == 3L)
+            require(session.outputNames.contains("output"))
+            require((session.outputInfo.getValue("output").info as TensorInfo).type == OnnxJavaType.FLOAT)
+        } catch (failure: Throwable) { session.close(); throw failure }
     }
     override fun infer(frame: BokehFrame): ByteArray {
-        frame.writeTensor(input, BokehInput.WIDTH, BokehInput.HEIGHT, nchw = true, signed = model == BokehModel.MODNet)
-        val tensors = linkedMapOf<String, OnnxTensor>()
-        try {
-            tensors[if (model == BokehModel.MODNet) "input" else "src"] = OnnxTensor.createTensor(env, input,
-                longArrayOf(1, 3, BokehInput.HEIGHT.toLong(), BokehInput.WIDTH.toLong()))
-            if (model == BokehModel.RVM) {
-                repeat(4) { i ->
-                    val history = recurrent.getOrNull(i) ?: Recurrent(floatArrayOf(0f), longArrayOf(1, 1, 1, 1))
-                    tensors["r${i + 1}i"] = OnnxTensor.createTensor(env, FloatBuffer.wrap(history.data), history.shape)
-                }
-                tensors["downsample_ratio"] = OnnxTensor.createTensor(env, FloatBuffer.wrap(floatArrayOf(.5f)), longArrayOf(1))
-            }
-            val names = if (model == BokehModel.MODNet) setOf("output") else setOf("pha", "r1o", "r2o", "r3o", "r4o")
-            session.run(tensors, names).use { result ->
-                val alpha = result.get(if (model == BokehModel.MODNet) "output" else "pha").get() as OnnxTensor
-                val shape = alpha.info.shape
-                require(shape.contentEquals(longArrayOf(1, 1, BokehInput.HEIGHT.toLong(), BokehInput.WIDTH.toLong()))) { "Unexpected alpha shape" }
+        frame.writeTensor(input, BokehInput.WIDTH, BokehInput.HEIGHT, nchw = true, signed = true)
+        OnnxTensor.createTensor(env, input, longArrayOf(1, 3, BokehInput.HEIGHT.toLong(), BokehInput.WIDTH.toLong())).use { tensor ->
+            session.run(mapOf("input" to tensor), setOf("output")).use { result ->
+                val alpha = result.get("output").get() as OnnxTensor
+                require(alpha.info.shape.contentEquals(longArrayOf(1, 1, BokehInput.HEIGHT.toLong(), BokehInput.WIDTH.toLong())))
                 val values = FloatArray(BokehInput.WIDTH * BokehInput.HEIGHT)
                 alpha.floatBuffer.get(values)
-                val mask = BokehMask.sensorBytes(values, BokehInput.WIDTH, BokehInput.HEIGHT, DeviceProfile.PREVIEW_ROTATION_90)
-                if (model == BokehModel.RVM) {
-                    recurrent = (1..4).map { i ->
-                        val tensor = result.get("r${i}o").get() as OnnxTensor
-                        val buffer = tensor.floatBuffer
-                        val history = FloatArray(buffer.remaining()).also { buffer.get(it) }
-                        require(history.all { it.isFinite() }) { "Nonfinite recurrent state" }
-                        Recurrent(history, tensor.info.shape.clone()) // Copy before Result.close().
-                    }
-                }
-                return mask
+                return BokehMask.sensorBytes(values, BokehInput.WIDTH, BokehInput.HEIGHT, DeviceProfile.PREVIEW_ROTATION_90)
             }
-        } finally { tensors.values.forEach { it.close() } }
+        }
     }
-    override fun reset() { recurrent = emptyList() }
-    override fun close() { reset(); session.close() }
+    override fun close() = session.close()
 }

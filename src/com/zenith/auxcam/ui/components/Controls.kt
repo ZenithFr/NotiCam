@@ -143,7 +143,7 @@ fun MatteIconButton(
     ) {
         Box(
             modifier = Modifier
-                .size(34.dp)
+                .size(CameraSpacing.iconButton)
                 .graphicsLayer {
                     scaleX = scale
                     scaleY = scale
@@ -156,7 +156,7 @@ fun MatteIconButton(
                 imageVector = icon,
                 contentDescription = contentDescription,
                 tint = foreground.copy(alpha = foreground.alpha * availability),
-                modifier = Modifier.size(18.dp),
+                modifier = Modifier.size(CameraSpacing.iconSize),
             )
         }
     }
@@ -274,7 +274,7 @@ private fun ModeLabel(label: String, selected: Boolean, onClick: () -> Unit, mod
         // Selected labels sit a hair larger — Apple does the same in the carousel.
         targetValue = when {
             pressed -> 0.92f
-            selected -> 1.06f
+            selected -> 1f
             else -> 1f
         },
         animationSpec = if (pressed) CameraMotion.press() else CameraMotion.release(),
@@ -406,24 +406,28 @@ fun TogglePill(
     val haptics = rememberCameraHaptics()
     Box(
         modifier = modifier
-            .height(CameraSpacing.capsuleHeight)
+            .heightIn(min = CameraSpacing.capsuleHeight)
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
                 clip = false
             }
             .background(background, RoundedCornerShape(CameraSpacing.capsuleHeight / 2))
+            .semantics { selected = active }
             .clickable(
+                role = Role.Button,
                 interactionSource = interaction,
                 indication = null,
                 onClick = {
                     haptics.select()
                     onClick()
                 },
-            ),
+            )
+            .padding(horizontal = 12.dp, vertical = 12.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text = label, style = CameraType.Value, color = foreground, fontSize = 12.sp)
+        Text(text = label, style = CameraType.Value, color = foreground, fontSize = 12.sp,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center)
     }
 }
 
@@ -693,39 +697,34 @@ fun TopBar(
     modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth().height(60.dp).padding(horizontal = 16.dp),
+        modifier = modifier.fillMaxWidth().heightIn(min = 72.dp).padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text("NotiCam", style = CameraType.Mode, color = CameraColors.Label, maxLines = 1)
+            Text("NotiCam", style = CameraType.Value, color = CameraColors.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(if (state.status.isNotBlank() && state.status != "Ready") state.status else if (state.mode == CaptureMode.Photo) "Photo · native frame" else "Video · native frame",
-                style = CameraType.Caption, color = CameraColors.LabelSecondary, maxLines = 1)
+                style = CameraType.Caption, color = CameraColors.LabelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Box(Modifier.size(64.dp, 48.dp), contentAlignment = Alignment.Center) {
-            if (state.mode == CaptureMode.Photo) {
-                Text(
-                    text = if (state.raw) "RAW" else if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel,
-                    style = CameraType.Value,
-                    color = CameraColors.Label,
-                    modifier = Modifier.cameraGlass(RoundedCornerShape(24.dp))
-                        .clickable(enabled = state.sessionReady && !state.captureBusy, onClick = actions::onResolutionToggle)
-                        .padding(horizontal = 10.dp, vertical = 9.dp),
-                )
-            } else {
-                val is4K = state.videoHeight >= 2160 || state.videoHeight <= 0
-                val fpsText = if (state.videoTargetFps >= 60) {
-                    if (is4K) "4K+" else "${state.videoHeight}p+"
-                } else {
-                    if (is4K) "4K · 30" else "${state.videoHeight}p · ${state.videoTargetFps}"
-                }
-                Text(
-                    text = fpsText,
-                    style = CameraType.Value,
-                    color = CameraColors.Label,
-                    modifier = Modifier.cameraGlass(RoundedCornerShape(24.dp))
-                        .clickable(enabled = state.sessionReady && !state.videoRecording && !state.videoStarting, onClick = actions::onResolutionToggle)
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
-                )
+        // Resolution + rate have separate lines, not an overlong "1080p · 30"
+        // forced into a fixed capsule. The entire >=48dp surface is interactive.
+        Box(Modifier.width(80.dp).heightIn(min = CameraSpacing.touch), contentAlignment = Alignment.Center) {
+            val photo = state.mode == CaptureMode.Photo
+            val label = if (photo) {
+                if (state.raw) "RAW" else if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel
+            } else when {
+                state.videoHeight > 0 -> "${state.videoHeight}p"
+                else -> "Video"
+            }
+            Column(Modifier.fillMaxWidth().heightIn(min = CameraSpacing.touch)
+                .cameraGlass(RoundedCornerShape(CameraSpacing.controlRadius))
+                .clickable(enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.videoStarting,
+                    role = Role.Button, onClick = actions::onResolutionToggle)
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text(label, style = CameraType.Value, color = CameraColors.Label,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (!photo) Text("${state.videoTargetFps} fps", style = CameraType.Telemetry,
+                    color = CameraColors.LabelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
         MatteIconButton(

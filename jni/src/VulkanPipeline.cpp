@@ -1,4 +1,5 @@
 #include "VulkanPipeline.h"
+#include "PortraitGeometry.h"
 #include "PreviewSubmission.h"
 #include <android/log.h>
 #include <android/thermal.h>
@@ -902,11 +903,11 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     // Sharp preview is one color composite + present. Do not upload/compute a
     // depth, alpha, CoC or gather result that the bypass shader never samples.
     // The full-resolution processStill() path is separate and unchanged.
-    const bool usableAlpha = alphaMatte != nullptr && alphaW == 256 && alphaH == 256;
+    const bool usableAlpha = alphaW == 256 && alphaH == 256 && portrait::hasForeground(alphaMatte, alphaW, alphaH);
     bool hasDepthSignal = false;
     if (depthY8Buffer != nullptr && depthW > 0 && depthH > 0) {
         for (size_t i = 0; i < static_cast<size_t>(depthW) * depthH; i += 16) {
-            if (depthY8Buffer[i] > 5) { hasDepthSignal = true; break; }
+            if (depthY8Buffer[i] > 5 && portrait::validDisparity(depthY8Buffer[i])) { hasDepthSignal = true; break; }
         }
     }
     if (targetFarFieldPx == 0.0f || (!usableAlpha && !hasDepthSignal)) {
@@ -923,7 +924,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     uint8_t* alphaDst = reinterpret_cast<uint8_t*>(depthDst + (mStillW * mStillH));
     uint8_t* alphaLowDst = alphaDst + (mStillW * mStillH);
 
-    bool hasRealAlpha = (alphaMatte != nullptr && alphaW == 256 && alphaH == 256);
+    bool hasRealAlpha = alphaW == 256 && alphaH == 256 && portrait::hasForeground(alphaMatte, alphaW, alphaH);
     if (hasRealAlpha) {
         memcpy(alphaLowDst, alphaMatte, alphaLowSize);
     } else {
@@ -1010,7 +1011,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         uint32_t totalDepthPx = depthW * depthH;
         if (depthY8Buffer != nullptr && totalDepthPx > 0) {
             for (uint32_t i = 0; i < totalDepthPx; i += 16) {
-                if (depthY8Buffer[i] > 5) sampledGt5++;
+                if (depthY8Buffer[i] > 5 && portrait::validDisparity(depthY8Buffer[i])) sampledGt5++;
             }
             for (uint32_t i = 0; i < totalDepthPx; ++i) {
                 if (depthY8Buffer[i] > 0) validBytes++;
@@ -1047,7 +1048,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         uint32_t invalidCount = 0;
         for (uint32_t i = 0; i < depthW * depthH; ++i) {
             uint8_t y8 = depthY8Buffer[i];
-            if (y8 > 0) {
+            if (portrait::validDisparity(y8)) {
                 float disp = static_cast<float>(y8);
                 float zm = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
                 gridDepth[i] = std::clamp(zm, 0.25f, 10.0f);
@@ -1065,7 +1066,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
         if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
             for (uint32_t dy = 0; dy < depthH; ++dy) {
-                uint32_t aY = (dy * alphaH) / depthH;
+                uint32_t aY = portrait::matteRowForDepth(dy, depthH, alphaH);
                 for (uint32_t dx = 0; dx < depthW; ++dx) {
                     uint32_t aX = (dx * alphaW) / depthW;
                     uint8_t aByte = alphaMatte[aY * alphaW + aX];
@@ -1101,11 +1102,12 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
         } else {
             double holdSec = (tsNowFocusCalc.tv_sec - sLastConfidentTime.tv_sec) +
                              (tsNowFocusCalc.tv_nsec - sLastConfidentTime.tv_nsec) * 1e-9;
-            if (holdSec < 3.0) {
+            if (holdSec < 3.0 && hasRealAlpha) {
                 mOpticalParams.s1FocusM = std::clamp(mOpticalParams.s1FocusM, 0.3f, 5.0f);
                 focusSource = "hold";
             } else {
-                // After 3s of no confident pixels, use depth p10 as s1 (nearest valid background surface)
+                // Without a person mask, use measured depth immediately; with
+                // sparse person depth, hold at most 3s before this p10 fallback.
                 std::vector<float> validDepths;
                 validDepths.reserve(totalGridPx);
                 for (uint32_t i = 0; i < totalGridPx; ++i) {
@@ -1148,7 +1150,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
             if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
                 for (uint32_t dy = 0; dy < depthH; ++dy) {
-                    uint32_t aY = (dy * alphaH) / depthH;
+                    uint32_t aY = portrait::matteRowForDepth(dy, depthH, alphaH);
                     bool inRoiY = (dy >= ry0 && dy < ry1);
                     for (uint32_t dx = 0; dx < depthW; ++dx) {
                         uint32_t aX = (dx * alphaW) / depthW;
@@ -1231,7 +1233,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
                     if (dilatedValid[idx] == 0) {
                         bool isForeground = false;
                         if (hasRealAlpha && alphaMatte != nullptr && alphaW > 0 && alphaH > 0) {
-                            uint32_t aY = (dy * alphaH) / depthH;
+                            uint32_t aY = portrait::matteRowForDepth(dy, depthH, alphaH);
                             uint32_t aX = (dx * alphaW) / depthW;
                             if (alphaMatte[aY * alphaW + aX] >= kMatteThresholdByte) {
                                 isForeground = true;
@@ -1294,12 +1296,12 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
 
         // 4. Map inpainted metric depth to staging buffer
         for (uint32_t y = 0; y < mStillH; ++y) {
-            uint32_t srcY = (y * depthH) / mStillH;
+            int srcY = portrait::depthRowForColor(y, mStillH, depthH);
             for (uint32_t x = 0; x < mStillW; ++x) {
                 uint32_t srcX = (x * depthW) / mStillW;
-                float z_m = gridDepth[srcY * depthW + srcX];
+                float z_m = srcY >= 0 ? gridDepth[static_cast<uint32_t>(srcY) * depthW + srcX] : 10.0f;
                 depthDst[y * mStillW + x] = z_m;
-                float a = (z_m <= 0.9f) ? 1.0f : (z_m >= 1.6f ? 0.0f : (1.6f - z_m) / 0.7f);
+                float a = portrait::foregroundAtDepth(z_m, s1);
                 alphaDst[y * mStillW + x] = static_cast<uint8_t>(a * 255.0f);
             }
         }
@@ -1994,7 +1996,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
     static bool sEdgePhaseStarted = false;
     static std::vector<AlphaBandMetrics> sEdgeBandMetrics;
 
-    uint32_t curEdgeRefine = 3u; // Preview: guided + contrast; no 25-tap bilateral sweep.
+    uint32_t curEdgeRefine = 0u; // Soft joint-bilateral refinement; never harden hair by default.
     if (sEdgeRefineOverride >= 0) {
         curEdgeRefine = static_cast<uint32_t>(sEdgeRefineOverride);
         if (sEdgeRefineOverrideChanged) {
@@ -2022,7 +2024,7 @@ bool VulkanPipeline::renderFrame(AHardwareBuffer* colorBuffer, const uint8_t* de
             case EdgeRefineState::SEQ_3: curEdgeRefine = 3u; break;
             case EdgeRefineState::HOLD_3:
             default:
-                curEdgeRefine = 3u;
+                curEdgeRefine = 0u;
                 break;
         }
     }
@@ -3033,17 +3035,17 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     float* depthDst = reinterpret_cast<float*>(mappedStaging);
     uint8_t* alphaDst = reinterpret_cast<uint8_t*>(depthDst + (mStillGatherW * mStillGatherH));
 
-    bool hasRealAlpha = (alphaMatte != nullptr && alphaW == 256 && alphaH == 256);
+    bool hasRealAlpha = alphaW == 256 && alphaH == 256 && portrait::hasForeground(alphaMatte, alphaW, alphaH);
     if (hasRealAlpha) {
         // Bilinear upsample 256x256 MediaPipe matte to 1020x768 alphaDst
         for (uint32_t y = 0; y < mStillGatherH; ++y) {
-            float srcY = (y + 0.5f) * (256.0f / mStillGatherH) - 0.5f;
+            float srcY = std::clamp((y + 0.5f) * (256.0f / mStillGatherH) - 0.5f, 0.0f, 255.0f);
             int y0 = std::clamp(static_cast<int>(std::floor(srcY)), 0, 255);
             int y1 = std::clamp(y0 + 1, 0, 255);
             float fy = srcY - std::floor(srcY);
 
             for (uint32_t x = 0; x < mStillGatherW; ++x) {
-                float srcX = (x + 0.5f) * (256.0f / mStillGatherW) - 0.5f;
+                float srcX = std::clamp((x + 0.5f) * (256.0f / mStillGatherW) - 0.5f, 0.0f, 255.0f);
                 int x0 = std::clamp(static_cast<int>(std::floor(srcX)), 0, 255);
                 int x1 = std::clamp(x0 + 1, 0, 255);
                 float fx = srcX - std::floor(srcX);
@@ -3065,7 +3067,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     bool hasDepthSignal = false;
     if (depthY8Buffer != nullptr && depthW > 0 && depthH > 0) {
         for (uint32_t i = 0; i < depthW * depthH; i += 16) {
-            if (depthY8Buffer[i] > 5) {
+            if (depthY8Buffer[i] > 5 && portrait::validDisparity(depthY8Buffer[i])) {
                 hasDepthSignal = true;
                 break;
             }
@@ -3076,7 +3078,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
     const float cy = mStillGatherH * 0.5f;
     const float radiusFg = mStillGatherW * 0.24f;
 
-    const float s1Still = (mOpticalParams.s1FocusM > 0.05f) ? mOpticalParams.s1FocusM : 0.6f;
+    float s1Still = (mOpticalParams.s1FocusM > 0.05f) ? mOpticalParams.s1FocusM : 0.6f;
     static constexpr uint8_t kMatteThresholdByte = 166; // 0.65f * 255 = 166
 
     if (hasDepthSignal) {
@@ -3085,13 +3087,45 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         uint32_t invalidCount = 0;
         for (uint32_t i = 0; i < depthW * depthH; ++i) {
             uint8_t y8 = depthY8Buffer[i];
-            if (y8 > 0) {
+            if (portrait::validDisparity(y8)) {
                 float disp = static_cast<float>(y8);
                 float zm = (5.56f * 15.0f) / (disp * 0.8571f + 0.0713f);
                 gridDepth[i] = std::clamp(zm, 0.25f, 10.0f);
                 gridValid[i] = 1;
             } else {
                 invalidCount++;
+            }
+        }
+
+        // The captured matte/depth pair selects its own person plane rather
+        // than borrowing a possibly moving preview subject's focus distance.
+        if (hasRealAlpha) {
+            std::vector<float> subjectDepths;
+            for (uint32_t dy = 0; dy < depthH; ++dy) {
+                const uint32_t ay = portrait::matteRowForDepth(dy, depthH, alphaH);
+                for (uint32_t dx = 0; dx < depthW; ++dx) {
+                    const uint32_t index = dy * depthW + dx;
+                    const uint32_t ax = dx * alphaW / depthW;
+                    if (gridValid[index] && alphaMatte[ay * alphaW + ax] >= 230) subjectDepths.push_back(gridDepth[index]);
+                }
+            }
+            if (subjectDepths.size() >= std::max<size_t>(1, static_cast<size_t>(depthW) * depthH / 50)) {
+                auto median = subjectDepths.begin() + subjectDepths.size() / 2;
+                std::nth_element(subjectDepths.begin(), median, subjectDepths.end());
+                s1Still = std::clamp(*median, 0.3f, 5.0f);
+            }
+        } else {
+            // No semantic person: select a measured near surface immediately,
+            // not a stale/default portrait plane. This is geometry, not an
+            // invented central silhouette or arbitrary-object classification.
+            std::vector<float> validDepths;
+            for (uint32_t i = 0; i < depthW * depthH; ++i) {
+                if (gridValid[i]) validDepths.push_back(gridDepth[i]);
+            }
+            if (!validDepths.empty()) {
+                auto nearSurface = validDepths.begin() + validDepths.size() / 10;
+                std::nth_element(validDepths.begin(), nearSurface, validDepths.end());
+                s1Still = std::clamp(*nearSurface, 0.3f, 5.0f);
             }
         }
 
@@ -3130,7 +3164,7 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
                     if (dilatedValid[idx] == 0) {
                         bool isForeground = false;
                         if (hasRealAlpha) {
-                            uint32_t aY = (dy * alphaH) / depthH;
+                            uint32_t aY = portrait::matteRowForDepth(dy, depthH, alphaH);
                             uint32_t aX = (dx * alphaW) / depthW;
                             if (alphaMatte[aY * alphaW + aX] >= kMatteThresholdByte) {
                                 isForeground = true;
@@ -3160,13 +3194,13 @@ bool VulkanPipeline::processStillBokeh(AHardwareBuffer* colorBuffer, const uint8
         }
 
         for (uint32_t y = 0; y < mStillGatherH; ++y) {
-            uint32_t srcY = (y * depthH) / mStillGatherH;
+            int srcY = portrait::depthRowForColor(y, mStillGatherH, depthH);
             for (uint32_t x = 0; x < mStillGatherW; ++x) {
                 uint32_t srcX = (x * depthW) / mStillGatherW;
-                float z_m = gridDepth[srcY * depthW + srcX];
+                float z_m = srcY >= 0 ? gridDepth[static_cast<uint32_t>(srcY) * depthW + srcX] : 10.0f;
                 depthDst[y * mStillGatherW + x] = z_m;
                 if (!hasRealAlpha) {
-                    float a = (z_m <= 0.9f) ? 1.0f : (z_m >= 1.6f ? 0.0f : (1.6f - z_m) / 0.7f);
+                    float a = portrait::foregroundAtDepth(z_m, s1Still);
                     alphaDst[y * mStillGatherW + x] = static_cast<uint8_t>(a * 255.0f);
                 }
             }

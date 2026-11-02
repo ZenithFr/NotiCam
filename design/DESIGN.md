@@ -2,17 +2,15 @@
 
 ## Direction
 
-The latest visual reference is [BitChord](https://github.com/kushagrasinghx/BitChord):
-its warm, artwork-derived atmosphere, white traveling selection pill, floating
-round controls and clear title/secondary-label hierarchy. Those visual ideas are
-adapted to a scene-first camera for the CMF Phone 2 Pro, not copied music screens.
-The earlier iOS-camera layout constraints remain: only Photo/Video, a corner
-portrait-effect button, native-quality originals and a stable viewfinder.
-
-The implementation is independently written. No BitChord source, font, artwork,
-branding or new UI library is packaged. Upstream's GPL-3.0 code was studied as a
-reference, not transplanted. System sans-serif typography is used rather than
-bundling its SF Pro font assets. This is not a pixel-verified Apple/iOS 27 clone.
+The latest direction is Nothing-inspired neutral matte glass, using the
+[community brand reference](https://nothing.wiki/nothing/brand_reference): black,
+white, N-Grey `#DCD7D2`, Window Grey `#B1B3B3`, and restrained N-Red `#C8102E`
+for functional recording/error accents. This supersedes the earlier warm BitChord
+atmosphere. It is an interpretation, not an official Nothing OS 5 specification
+or an affiliated Nothing app. System sans/mono fonts are used; no proprietary
+NType/NDot fonts or Nothing logos are distributed. Mono readouts have zero tracking;
+regular sentence-case body labels have light tracking. Photo/Video, the corner
+portrait button, native-quality originals and rounded framing remain.
 
 The Android app remains Kotlin/Jetpack Compose over the native Vulkan viewfinder.
 Changing the camera stack just for chrome would add risk without improving
@@ -21,27 +19,25 @@ translucent neutral fills and soft interior light gradients, without decorative
 strokes, rim highlights or native SurfaceView backdrop blur. Functional
 shutter/focus rings and keyboard focus outlines remain.
 
-### Atmosphere, not image processing
+### Neutral surroundings, not image processing
 
-`SceneAtmosphere` samples a 12×12 grid from the last saved thumbnail, once per
-thumbnail on `Dispatchers.Default`. The viewer loads only a 128 px thumbnail for
-its current item. Hardware bitmaps are copied for readable pixels and only the
-owned copy is recycled. Saturation-weighted color drives two soft radial washes
-behind chrome with a 900 ms transition; a warm fallback is used before capture.
-There is no live-frame readback, native backdrop blur, image grading, shader or
-JPEG change. The browser samples only the bundled demonstration image and uses
-CSS glass blur, not the native camera implementation.
+`SceneAtmosphere` draws a low-alpha white radial diffusion behind chrome. It no
+longer samples or loads thumbnails for scene tint. Matte surfaces have neutral
+fills and very low-contrast interior light; no decorative borders. No live-frame
+readback, image grading, or native SurfaceView blur is added. The browser companion
+uses the same neutral direction, but its CSS blur and sample photo remain a
+**simulation**, not an Android rendering or capture test.
 
 ## Layout
 
-1. Fixed-height 76 dp header: NotiCam title, Photo/Video framing subtitle,
-   resolution and floating flash/settings actions.
+1. Minimum-72 dp, content-growing header: NotiCam title, Photo/Video framing subtitle,
+   an 80 dp resolution control with a separate video-rate line, and flash/settings actions. Text is bounded and ellipsized, never allowed to paint outside its button.
 2. Largest fitting native 3:4 portrait viewfinder with rounded corners.
    - Person-in-frame portrait-effect button in the top-right corner.
    - Active-effect or 50 MP / 1× badge near the top.
    - Lens selector centered near the lower edge, on a contrast gradient.
    - Tap-to-focus, pinch/scrub zoom and AE/AF lock retain their camera actions.
-3. Reserved 48 dp strip: status/capture information, or the bokeh aperture slider.
+3. Reserved strip: status/capture information, the manual rail or bokeh aperture slider. It reserves 48 × fontScale dp for the rail plus a 44 dp slider, stable across selections.
    Toggling bokeh never resizes the native surface.
 4. Glass mode capsule with **Video / Photo only**; a single white selection
    pill slides behind dark selected text. Tabs expose selection semantics.
@@ -75,7 +71,7 @@ there is no separate Pro capture mode.
   the target phone), not a promise of full-pixel/unbinned sensor readout. Scale
   bitrate with encoded pixel count, within encoder limits.
 - **Gallery:** in-app full-frame viewer with a large date/title hierarchy,
-  selected-thumbnail atmosphere, horizontal paging, pinch/pan/double-tap zoom,
+  neutral matte surroundings, horizontal paging, pinch/pan/double-tap zoom,
   spring-animated filmstrip selection, floating share/favorite/delete circles
   and actual rotated-metadata-fit video playback. Physical dialog window insets
   plus a 20 dp lift keep actions clear of navigation/cutouts. Smaller visible
@@ -130,3 +126,9 @@ Quality/FPS negotiation and explicit fallback never resize the saved JPEG.
 Physical zoom handoffs overlay a one-shot outgoing PixelCopy image and dissolve
 only after fresh rendered frames; they are not concurrent-camera optical flow.
 See [the full contract and phone test matrix](PREVIEW_SMOOTHNESS.md).
+
+## Current implementation validation
+
+See [NOTHING_UI_PORTRAIT.md](NOTHING_UI_PORTRAIT.md). Structural checks and the
+browser companion do not establish Compose layout correctness. A full APK build,
+font-scale screenshots and device validation of the live SurfaceView remain gates.

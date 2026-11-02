@@ -9,7 +9,7 @@ class BokehMathTest {
         BokehModel.entries.forEach { assertEquals(it, BokehModel.fromId(it.id)) }
         assertEquals(BokehModel.MediaPipeAuto, BokehModel.fromId(null))
         assertEquals(BokehModel.MediaPipeAuto, BokehModel.fromId("removed_model"))
-        assertEquals(6, BokehModel.entries.map { it.id }.distinct().size)
+        assertEquals(2, BokehModel.entries.map { it.id }.distinct().size)
     }
     @Test fun mediaPipeReceivesUnsignedNhwcRgb() {
         val frame = BokehFrame(2, 1, byteArrayOf(-1, 0, -128, 0, -1, 64), 10L)
@@ -18,15 +18,15 @@ class BokehMathTest {
         val actual = FloatArray(6).also { out.get(it) }
         assertArrayEquals(floatArrayOf(1f, 0f, 128f / 255f, 0f, 1f, 64f / 255f), actual, .00001f)
     }
-    @Test fun rvmReceivesUnsignedNchwAndModnetReceivesSignedNchw() {
+    @Test fun tensorPackingKeepsUnsignedAndSignedNchwDistinct() {
         val frame = BokehFrame(2, 1, byteArrayOf(-1, 0, -128, 0, -1, 64), 10L)
         val out = FloatBuffer.allocate(6)
         frame.writeTensor(out, 2, 1, nchw = true)
-        val rvm = FloatArray(6).also { out.get(it) }
-        assertArrayEquals(floatArrayOf(1f, 0f, 0f, 1f, 128f / 255f, 64f / 255f), rvm, .00001f)
+        val unsigned = FloatArray(6).also { out.get(it) }
+        assertArrayEquals(floatArrayOf(1f, 0f, 0f, 1f, 128f / 255f, 64f / 255f), unsigned, .00001f)
         frame.writeTensor(out, 2, 1, nchw = true, signed = true)
         val modnet = FloatArray(6).also { out.get(it) }
-        assertArrayEquals(rvm.map { it * 2f - 1f }.toFloatArray(), modnet, .00001f)
+        assertArrayEquals(unsigned.map { it * 2f - 1f }.toFloatArray(), modnet, .00001f)
     }
     @Test fun modelResizeKeepsChannelsTogether() {
         val frame = BokehFrame(1, 1, byteArrayOf(-1, 0, 0), 10L)

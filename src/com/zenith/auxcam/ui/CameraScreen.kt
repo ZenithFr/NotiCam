@@ -75,6 +75,7 @@ import com.zenith.auxcam.ui.icons.NotiIcons
 import com.zenith.auxcam.ui.theme.CameraColors
 import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraType
+import com.zenith.auxcam.ui.theme.CameraSpacing
 import kotlin.math.roundToInt
 
 /**
@@ -85,10 +86,11 @@ import kotlin.math.roundToInt
 @Composable
 fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifier = Modifier) {
     BackHandler(enabled = state.settingsOpen) { actions.onSettingsToggle() }
+    val railHeight = CameraSpacing.touch * LocalDensity.current.fontScale.coerceAtLeast(1f) + CameraSpacing.railSlider
     var shutterCenter by remember { mutableStateOf(Offset.Zero) }
     var galleryCenter by remember { mutableStateOf(Offset.Zero) }
     Box(modifier.fillMaxSize().background(CameraColors.Black)) {
-        SceneAtmosphere(state.lastThumbnail, Modifier.matchParentSize())
+        SceneAtmosphere(Modifier.matchParentSize())
         Column(
             modifier = Modifier.fillMaxSize()
                 .windowInsetsPadding(WindowInsets.safeDrawing),
@@ -195,7 +197,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                 }
             }
             // Reserved height keeps the Vulkan surface stable as portrait controls appear.
-            Box(Modifier.fillMaxWidth().height(80.dp), contentAlignment = Alignment.Center) {
+            Box(Modifier.fillMaxWidth().height(railHeight), contentAlignment = Alignment.Center) {
                 Crossfade(
                     targetState = state.bokehActive && state.sessionReady && !state.captureBusy,
                     animationSpec = tween(220), label = "aperture-strip",
@@ -246,7 +248,7 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
         ModalBottomSheet(
             onDismissRequest = actions::onSettingsToggle,
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = Color(0xFF191A1D),
+            containerColor = CameraColors.MatteScrim,
             contentColor = Color.White,
             shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
         ) {

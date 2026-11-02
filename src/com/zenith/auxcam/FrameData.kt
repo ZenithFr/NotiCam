@@ -8,6 +8,10 @@ internal object FrameData {
     const val DEPTH_MAX_AGE_NS = 100_000_000L
     const val MATTE_MAX_AGE_NS = 500_000_000L
 
+    /** Same sentinel/sampling rule as the native preview and still pipeline. */
+    fun hasUsableDepth(bytes: ByteArray?): Boolean = bytes != null &&
+        (bytes.indices step 16).any { (bytes[it].toInt() and 255) in 6..254 }
+
     data class DepthFrame(val timestamp: Long, val bytes: ByteArray)
 
     /** Read only valid pixels, including when the last row has no trailing padding. */

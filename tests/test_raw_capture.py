@@ -85,7 +85,7 @@ class RawCaptureContracts(unittest.TestCase):
         screen = (SRC / "ui/CameraScreen.kt").read_text()
         self.assertIn("state.raw && state.captureBusy", screen)
         self.assertIn("actions::onRawCaptureCancel", screen)
-        self.assertIn("Box(Modifier.fillMaxWidth().height(80.dp)", screen)
+        self.assertIn("Box(Modifier.fillMaxWidth().height(railHeight)", screen)
 
     def test_searchable_sections_retain_existing_controls(self):
         sections = (SRC / "ui/components/ControlSection.kt").read_text()

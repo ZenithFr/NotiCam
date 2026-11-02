@@ -50,9 +50,10 @@ void main() {
     float alpha = 0.0;
     if (pc.stubAlphaMode != 0) {
         // Stub-Alpha Debug Mode: derive alpha directly from depth map (no NPU)
-        vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
+        vec2 depthUv = uv; // Staging already aligned disparity to color; no second crop.
         float depth_m = texture(uDepth, depthUv).r;
-        alpha = 1.0 - smoothstep(s1 - 0.15, s1 + 0.15, depth_m);
+        float valid = step(0.05, depth_m) * step(depth_m, 9.95);
+        alpha = (1.0 - smoothstep(max(s1 * 1.02, 0.1), max(s1 * 1.15, max(s1 * 1.02, 0.1) + 0.05), depth_m)) * valid;
     } else {
         // ── Real Alpha Guided Filter Edge Refinement ───────────────────────
         // 1. Bilinear sample of the 256x256 soft semantic probability matte
@@ -62,30 +63,29 @@ void main() {
         if (pc.DISABLE_GUIDED != 0) {
             alpha = baseAlpha;
         } else {
-            // 2. High-resolution luma guidance
-            vec4 sharpColor = texture(uLuma, uv);
-            float centerLuma = dot(sharpColor.rgb, vec3(0.299, 0.587, 0.114));
-
-            // 3. Fast 5-tap cross window for local luma mean & variance
-            vec2 texel = 1.0 / vec2(pc.width, pc.height);
-            float lumaT = dot(texture(uLuma, uv + vec2(0.0, -texel.y)).rgb, vec3(0.299, 0.587, 0.114));
-            float lumaB = dot(texture(uLuma, uv + vec2(0.0,  texel.y)).rgb, vec3(0.299, 0.587, 0.114));
-            float lumaL = dot(texture(uLuma, uv + vec2(-texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
-            float lumaR = dot(texture(uLuma, uv + vec2( texel.x, 0.0)).rgb, vec3(0.299, 0.587, 0.114));
-
-            float meanLuma = (centerLuma + lumaT + lumaB + lumaL + lumaR) * 0.2;
-            float diff = centerLuma - meanLuma;
-
-            // Near soft segmentation boundaries (baseAlpha in [0.08, 0.92]), refine edges with luma contrast
-            float edgeGate = smoothstep(0.0, 0.35, baseAlpha) * (1.0 - smoothstep(0.65, 1.0, baseAlpha));
-            float refined = baseAlpha + diff * 1.2 * edgeGate;
-
-            alpha = clamp(refined, 0.0, 1.0);
+            // Joint bilateral upsampling at the SEMANTIC texel footprint.
+            // Brightness alone must not add/subtract foreground probability.
+            vec3 centerColor = texture(uLuma, uv).rgb;
+            vec2 semanticStep = 1.0 / vec2(256.0, 256.0);
+            float sum = 0.0;
+            float weights = 0.0;
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    vec2 q = clamp(uv + vec2(x, y) * semanticStep, vec2(0.0), vec2(1.0));
+                    vec3 delta = texture(uLuma, q).rgb - centerColor;
+                    float spatial = exp(-float(x*x + y*y) * 0.5);
+                    float range = exp(-dot(delta, delta) / (2.0 * 0.10 * 0.10));
+                    float weight = spatial * range;
+                    sum += texture(uAlphaIn, q).r * weight;
+                    weights += weight;
+                }
+            }
+            alpha = clamp(sum / max(weights, 0.00001), 0.0, 1.0);
         }
     }
 
     if (pc.stubAlphaMode == 0) {
-        vec2 depthUv = vec2(uv.x, (uv.y - 0.5) * 1.1667 + 0.5);
+        vec2 depthUv = uv; // Staging already aligned disparity to color; no second crop.
 
         // --- Edge refinement: joint bilateral in transition band ---
         if ((pc.edgeRefine == 1 || pc.edgeRefine == 2) && alpha > 0.02 && alpha < 0.98) {
@@ -110,7 +110,7 @@ void main() {
 
                     float aQ = texture(uAlphaIn, q).r;
                     float lQ = dot(texture(uLuma, q).rgb, vec3(0.299,0.587,0.114));
-                    float dQ = texture(uDepth, vec2(q.x, (q.y - 0.5) * 1.1667 + 0.5)).r;
+                    float dQ = texture(uDepth, q).r;
 
                     float wl = exp(-(lQ - lC)*(lQ - lC) / (2.0*sigmaL*sigmaL));
 
@@ -128,10 +128,6 @@ void main() {
             if (wsum > 1e-5) alpha = asum / wsum;
         }
 
-        // Lift-only low-light recovery (unchanged)
-        float lift = max(0.0, (alpha - 0.5) * 2.0);
-        alpha = clamp(alpha + (1.0 - alpha) * lift * lift, 0.0, 1.0);
-
         float alphaPreFusion = alpha;
 
         if (pc.gateBypass == 0) {
@@ -144,9 +140,10 @@ void main() {
             // y8=0 -> 0.0m and y8=255 -> ~10.0m both mean "no measurement".
             float validDepth = step(0.05, d) * step(d, 9.95);
 
-            float rescue = (1.0 - smoothstep(s1 * 0.9, s1 * 1.5, d))
-                         * validDepth
-                         * smoothstep(0.30, 0.80, alpha);
+            // A measured foreground object/hand need not be a recognized person.
+            // Unknown depth is neutral, never promoted to a synthetic subject.
+            float nearEnd = max(s1 * 1.15, max(s1 * 1.02, 0.1) + 0.05);
+            float rescue = (1.0 - smoothstep(max(s1 * 1.02, 0.1), nearEnd, d)) * validDepth;
             alpha = max(alpha, rescue);
 
             float veto = smoothstep(s1 * 1.5, s1 * 3.0, d) * validDepth;

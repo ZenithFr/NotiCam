@@ -153,7 +153,7 @@ class MediaFeatures(unittest.TestCase):
         controls = (SRC / 'ui/components/Controls.kt').read_text()
         button = controls.split('fun MatteIconButton(', 1)[1].split('fun ShutterButton(', 1)[0]
         self.assertIn('size(CameraSpacing.touch)', button)
-        self.assertIn('.size(34.dp)', button)
+        self.assertIn('.size(CameraSpacing.iconButton)', button)
         zoom = (SRC / 'ui/components/ZoomChips.kt').read_text()
         self.assertIn('chipSize: Dp = 48.dp', zoom)
         self.assertIn('.padding(8.dp)', zoom)
