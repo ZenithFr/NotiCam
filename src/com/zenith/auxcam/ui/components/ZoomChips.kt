@@ -114,7 +114,7 @@ fun ZoomChips(
                     alpha = discAlpha
                     clip = false
                 }
-                .cameraGlass(CircleShape, Color.White),
+                .background(Color.White, CircleShape),
         )
 
         Row(
@@ -160,14 +160,14 @@ private fun ZoomChip(
         targetValue = when {
             selected -> 1f
             dimmed -> 0.9f
-            else -> 0.6f
+            else -> 0.85f
         },
         animationSpec = CameraMotion.fade(180),
         label = "chip-label-alpha",
     )
     // The travelling disc is white; the label on it must be dark to read.
     val labelColor by animateColorAsState(
-        targetValue = if (selected) CameraColors.OnLight else CameraColors.Label,
+        targetValue = if (selected) CameraColors.OnLight else Color.White,
         animationSpec = CameraMotion.select(), label = "zoom-label-color",
     )
 

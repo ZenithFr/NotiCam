@@ -157,9 +157,7 @@ fun GalleryScreen(onClose: () -> Unit) {
                         if (item.video) GalleryVideo(item, active = pager.currentPage == index)
                         else GalleryPhoto(item)
                     }
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 14.dp)) {
-                        Text(current.name.substringBeforeLast('.'), style = CameraType.Heading,
-                            color = CameraColors.Label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp)) {
                         Text(if (current.video) "Video · MP4" else if (current.name.endsWith(".dng", ignoreCase = true)) "RAW · DNG" else "Photo · JPEG",
                             style = CameraType.Caption, color = CameraColors.LabelSecondary)
                     }
@@ -186,7 +184,7 @@ fun GalleryScreen(onClose: () -> Unit) {
                             }
                         }
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 2.dp, bottom = 22.dp),
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 2.dp, bottom = 42.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                         GalleryButton(NotiIcons.Share, "Share", {
                             try {

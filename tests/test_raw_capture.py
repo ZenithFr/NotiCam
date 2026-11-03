@@ -110,6 +110,13 @@ class RawCaptureContracts(unittest.TestCase):
         self.assertNotIn(".border(", rail)
         self.assertNotIn("onValueChange = { actions.onSensor", rail)
 
+    def test_raw_orientation_tracking_and_dng_exif_update(self):
+        self.assertIn("OrientationEventListener(activity)", self.controller)
+        self.assertIn("currentExifOrientation()", self.controller)
+        self.assertIn("updateDngExifOrientation(pfd, job.exifOrientation)", self.controller)
+        self.assertIn("android.system.Os.pread", self.controller)
+        self.assertIn("android.system.Os.pwrite", self.controller)
+
 
 if __name__ == "__main__":
     unittest.main()

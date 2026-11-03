@@ -15,6 +15,7 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -190,12 +191,14 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                         Box(
                             Modifier.matchParentSize()
                                 .clip(RoundedCornerShape(24.dp))
-                                .blur(20.dp, edgeTreatment = BlurredEdgeTreatment.Rectangle)
-                                .background(Color.Black.copy(alpha = 0.45f))
+                                .blur(16.dp, edgeTreatment = BlurredEdgeTreatment.Unbounded)
+                                .background(Color.Black.copy(alpha = 0.60f))
                         )
                         Box(
                             Modifier.clip(RoundedCornerShape(24.dp))
-                                .cameraGlass(RoundedCornerShape(24.dp)).padding(horizontal = 2.dp)
+                                .background(Color(0xB318181B))
+                                .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(24.dp))
+                                .padding(horizontal = 4.dp, vertical = 2.dp)
                         ) {
                             ZoomChips(zoom = state.zoom, onSelect = actions::onZoomSelected,
                                 stops = DeviceProfile.ZOOM_STOPS, enabled = state.sessionReady && !state.captureBusy && !state.videoRecording)

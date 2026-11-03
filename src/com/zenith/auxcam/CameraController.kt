@@ -32,6 +32,7 @@ import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
 import android.view.HapticFeedbackConstants
+import android.view.OrientationEventListener
 import android.view.Surface
 import android.view.PixelCopy
 import android.view.SurfaceHolder
@@ -246,6 +247,26 @@ class CameraController(
     @Volatile private var engineReady = false
     @Volatile private var disposed = false
     @Volatile private var foreground = false
+    private var deviceRotation = 0
+    private val orientationListener by lazy {
+        object : OrientationEventListener(activity) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                deviceRotation = when (orientation) {
+                    in 45..134 -> 90
+                    in 135..224 -> 180
+                    in 225..314 -> 270
+                    else -> 0
+                }
+            }
+        }
+    }
+    private fun currentExifOrientation(): Int = when (deviceRotation) {
+        90 -> ExifInterface.ORIENTATION_ROTATE_180
+        180 -> ExifInterface.ORIENTATION_ROTATE_270
+        270 -> ExifInterface.ORIENTATION_NORMAL
+        else -> ExifInterface.ORIENTATION_ROTATE_90
+    }
     private var timerRunning = false
     @Volatile private var captureState: CameraUiState? = null
     private val captureTimeout = Runnable {
@@ -307,7 +328,7 @@ class CameraController(
     private var maxPreviewGapNsDuringCapture = 0L
     private var capturePreviewFrames = 0
     private var latestPhotoUri: Uri? = null
-    private class PendingRawCapture(val token: Int, val generation: Int, val count: Int) {
+    private class PendingRawCapture(val token: Int, val generation: Int, val count: Int, val exifOrientation: Int) {
         val cancelled = AtomicBoolean(false)
         val uris = ArrayList<Uri>() // IO executor only.
         val destinations = AtomicReference<Array<android.os.ParcelFileDescriptor>?>(null)
@@ -472,6 +493,7 @@ class CameraController(
     fun start() {
         if (disposed) return
         foreground = true
+        if (orientationListener.canDetectOrientation()) orientationListener.enable()
         if (started) {
             if (!engineReady) surfaceHolder?.takeIf { it.surface.isValid }?.let { initializePreviewEngine(it) }
             if (!state.sessionReady) rebuildStillSession("Resuming native capture…")
@@ -530,6 +552,7 @@ class CameraController(
     fun pause() {
         if (disposed || !foreground) return
         foreground = false // Reject queued reads/opens before releasing any resources.
+        orientationListener.disable()
         if (pendingRawCapture != null) finishCapture("RAW capture cancelled on pause")
         engineReady = false
         abandonBokehChecks()
@@ -548,6 +571,7 @@ class CameraController(
 
     fun dispose() {
         if (disposed) return
+        orientationListener.disable()
         abandonRawCapture()
         abandonBokehChecks()
         if (state.videoStarting || state.videoRecording) stopVideo(save = state.videoRecording, restore = false)
@@ -1111,7 +1135,7 @@ class CameraController(
     }
 
     private fun beginRawCapture(svc: IAuxCamService, snapshot: CameraUiState) {
-        val job = PendingRawCapture(++nextRawToken, sessionToken, snapshot.rawFrames)
+        val job = PendingRawCapture(++nextRawToken, sessionToken, snapshot.rawFrames, currentExifOrientation())
         pendingRawCapture = job
         val commandNs = shutterClickNs
         io.execute {
@@ -1167,8 +1191,9 @@ class CameraController(
             try {
                 check(!job.cancelled.get() && !disposed && foreground && job.generation == sessionToken)
                 for (uri in job.uris) {
-                    activity.contentResolver.openFileDescriptor(uri, "r").use { pfd ->
-                        check(pfd != null && pfd.statSize > 0) { "Empty DNG output" }
+                    activity.contentResolver.openFileDescriptor(uri, "rw")?.use { pfd ->
+                        check(pfd.statSize > 0) { "Empty DNG output" }
+                        updateDngExifOrientation(pfd, job.exifOrientation)
                     }
                 }
                 val savedUri = job.uris.last()
@@ -1195,6 +1220,42 @@ class CameraController(
                 deleteRawAssets(job)
                 post { if (pendingRawCapture === job) finishCapture("RAW save failed: ${e.message?.take(100)}") }
             }
+        }
+    }
+
+    private fun updateDngExifOrientation(pfd: android.os.ParcelFileDescriptor, orientation: Int) {
+        try {
+            val fd = pfd.fileDescriptor
+            val header = java.nio.ByteBuffer.allocate(8).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            if (android.system.Os.pread(fd, header, 0) != 8) return
+            header.flip()
+            val order = header.short.toInt()
+            val byteOrder = if (order == 0x4949) java.nio.ByteOrder.LITTLE_ENDIAN else java.nio.ByteOrder.BIG_ENDIAN
+            header.order(byteOrder)
+            val magic = header.short.toInt()
+            if (magic != 42) return
+            val ifdOffset = header.int.toLong() and 0xFFFFFFFFL
+            val countBuf = java.nio.ByteBuffer.allocate(2).order(byteOrder)
+            if (android.system.Os.pread(fd, countBuf, ifdOffset) != 2) return
+            countBuf.flip()
+            val numEntries = countBuf.short.toInt() and 0xFFFF
+            val entryBuf = java.nio.ByteBuffer.allocate(12).order(byteOrder)
+            for (i in 0 until numEntries) {
+                entryBuf.clear()
+                val entryOffset = ifdOffset + 2 + i * 12
+                if (android.system.Os.pread(fd, entryBuf, entryOffset) != 12) break
+                entryBuf.flip()
+                val tag = entryBuf.short.toInt() and 0xFFFF
+                if (tag == 0x0112) {
+                    val valBuf = java.nio.ByteBuffer.allocate(2).order(byteOrder)
+                    valBuf.putShort(orientation.toShort())
+                    valBuf.flip()
+                    android.system.Os.pwrite(fd, valBuf, entryOffset + 8)
+                    break
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not update DNG orientation tag", e)
         }
     }
 
@@ -1702,7 +1763,7 @@ class CameraController(
             }
             descriptor.use { pfd ->
                 val exif = ExifInterface(pfd.fileDescriptor)
-                exif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_ROTATE_90.toString())
+                exif.setAttribute(ExifInterface.TAG_ORIENTATION, currentExifOrientation().toString())
                 exif.saveAttributes()
             }
 
