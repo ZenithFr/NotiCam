@@ -111,8 +111,12 @@ fun GalleryScreen(onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     var revision by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
-    val media by produceState<List<GalleryItem>?>(null, revision) {
-        this.value = withContext(Dispatchers.IO) {
+    // Equivalent to produceState's remember + LaunchedEffect implementation.
+    // Compose 1.7 / AGP 8.7 lint fails to resolve valid producer value writes;
+    // use explicit state/effect primitives, keeping IO off the UI dispatcher.
+    var media by remember { mutableStateOf<List<GalleryItem>?>(null) }
+    LaunchedEffect(revision) {
+        media = withContext(Dispatchers.IO) {
             try { loadMedia(context) } catch (e: Exception) { error = "Could not load your captures"; emptyList() }
         }
     }
@@ -161,8 +165,9 @@ fun GalleryScreen(onClose: () -> Unit) {
                     }
                     LazyRow(Modifier.fillMaxWidth().height(62.dp), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         itemsIndexed(list, key = { _, item -> item.uri.toString() }) { index, item ->
-                            val thumbnail by produceState<ImageBitmap?>(null, item.uri) {
-                                this.value = withContext(Dispatchers.IO) {
+                            var thumbnail by remember(item.uri) { mutableStateOf<ImageBitmap?>(null) }
+                            LaunchedEffect(item.uri) {
+                                thumbnail = withContext(Dispatchers.IO) {
                                     try { context.contentResolver.loadThumbnail(item.uri, Size(96, 96), null).asImageBitmap() }
                                     catch (_: Exception) { null }
                                 }
@@ -239,8 +244,9 @@ private fun GalleryButton(icon: ImageVector, label: String, onClick: () -> Unit)
 private fun GalleryPhoto(item: GalleryItem) {
     val context = LocalContext.current
     var loading by remember(item.uri) { mutableStateOf(true) }
-    val image by produceState<ImageBitmap?>(null, item.uri) {
-        this.value = withContext(Dispatchers.IO) {
+    var image by remember(item.uri) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(item.uri) {
+        image = withContext(Dispatchers.IO) {
             try {
                 ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, item.uri)) { decoder, info, _ ->
                     var sample = 1
@@ -284,8 +290,9 @@ private fun GalleryVideo(item: GalleryItem, active: Boolean) {
     var view by remember(item.uri) { mutableStateOf<VideoView?>(null) }
     var playing by remember(item.uri) { mutableStateOf(false) }
     val context = LocalContext.current
-    val displayAspect by produceState<Float?>(null, item.uri) {
-        this.value = withContext(Dispatchers.IO) {
+    var displayAspect by remember(item.uri) { mutableStateOf<Float?>(null) }
+    LaunchedEffect(item.uri) {
+        displayAspect = withContext(Dispatchers.IO) {
             val metadata = MediaMetadataRetriever()
             try {
                 metadata.setDataSource(context, item.uri)

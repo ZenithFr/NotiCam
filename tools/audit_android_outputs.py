@@ -51,9 +51,16 @@ def main():
         lint_errors.extend(serious)
         if variant == 'debug':
             nonfatal = [item for item in issues if item not in serious]
-            summary = '\n'.join(f"{item.get('id')}: {item.get('message')}" for item in nonfatal)
-            if summary:
-                emit('notice', 'Nonfatal lint findings for review', summary[:30000])
+            lines = []
+            for item in nonfatal:
+                location = item.find('location')
+                where = '' if location is None else f" ({location.get('file')}:{location.get('line', '?')})"
+                lines.append(f"{item.get('id')}: {item.get('message')}{where}")
+            summary = '\n'.join(lines)
+            # Checks API annotation messages are truncated near 4 KB. Chunk them
+            # so review includes the last finding, not just the first few.
+            for offset in range(0, len(summary), 3000):
+                emit('notice', f'Nonfatal lint review {offset // 3000 + 1}', summary[offset:offset + 3000])
 
     shaders = [f'assets/shaders/{p.stem}.spv' for p in (ROOT / 'jni/shaders').glob('*.comp')]
     for variant in ('debug', 'release'):
