@@ -4,6 +4,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class CaptureOutputTest {
+    @Test fun shareIntentKeepsRawMimeTypeIncludingUppercaseExtension() {
+        assertEquals("image/x-adobe-dng", CaptureOutput.shareMimeType(false, "NOTICAM_50MP.dng"))
+        assertEquals("image/x-adobe-dng", CaptureOutput.shareMimeType(false, "NOTICAM_12MP.DNG"))
+        assertEquals("image/jpeg", CaptureOutput.shareMimeType(false, "NOTICAM_photo.jpg"))
+        assertEquals("video/mp4", CaptureOutput.shareMimeType(true, "NOTICAM_video.mp4"))
+    }
+
     @Test fun acceptsAdvertised50MpShapes() {
         assertTrue(CaptureOutput.is50MpSize(8160, 6144))
         assertTrue(CaptureOutput.is50MpSize(8192, 6144))

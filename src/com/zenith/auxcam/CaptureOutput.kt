@@ -2,6 +2,13 @@ package com.zenith.auxcam
 
 /** Pure output contracts: a marketing badge must match the saved pixel data. */
 internal object CaptureOutput {
+    /** The receiving app must see the actual container, especially for sensor DNGs. */
+    fun shareMimeType(video: Boolean, name: String): String = when {
+        video -> "video/mp4"
+        name.endsWith(".dng", ignoreCase = true) -> "image/x-adobe-dng"
+        else -> "image/jpeg"
+    }
+
     fun is50MpSize(width: Int, height: Int): Boolean {
         val pixels = width.toLong() * height
         if (width <= 0 || height <= 0 || pixels !in 45_000_000L..55_000_000L) return false

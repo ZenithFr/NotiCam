@@ -45,6 +45,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.Icon
 import androidx.compose.ui.graphics.vector.ImageVector
 import com.zenith.auxcam.ui.icons.NotiIcons
+import com.zenith.auxcam.CaptureOutput
 import com.zenith.auxcam.VideoPolicy
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -185,7 +186,8 @@ fun GalleryScreen(onClose: () -> Unit) {
                         GalleryButton(NotiIcons.Share, "Share", {
                             try {
                                 context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
-                                    type = if (current.video) "video/mp4" else "image/jpeg"
+                                    // DNGs are not JPEGs: preserve the RAW type in the share intent.
+                                    type = CaptureOutput.shareMimeType(current.video, current.name)
                                     putExtra(Intent.EXTRA_STREAM, current.uri)
                                     clipData = ClipData.newRawUri("NotiCam capture", current.uri)
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
