@@ -24,8 +24,8 @@ android {
         applicationId = "com.zenith.auxcam"
         minSdk = 29
         targetSdk = 35
-        versionCode = 2
-        versionName = "2.0-compose"
+        versionCode = 3
+        versionName = "2.0a"
 
         // The engine and the CMF Phone 2 Pro (Dimensity 7300 Pro, Mali-G615) are
         // arm64 only.
