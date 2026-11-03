@@ -187,7 +187,6 @@ class CameraController(
     companion object {
         private const val TAG = "NotiCam/Controller"
         private const val SHIZUKU_REQUEST_CODE = 100
-        private const val Y8_FORMAT = 0x20203859
         private const val THUMB_W = 168
         private const val THUMB_H = 126
         const val CAPTURE_JPEG_QUALITY = 100
@@ -769,7 +768,7 @@ class CameraController(
         depthReader = ImageReader.newInstance(
             DeviceProfile.DEPTH_WIDTH,
             DeviceProfile.DEPTH_HEIGHT,
-            Y8_FORMAT,
+            ImageFormat.Y8, // Same 0x20203859 format, with the platform IntDef contract.
             3,
             HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or HardwareBuffer.USAGE_CPU_READ_OFTEN,
         ).also { reader ->

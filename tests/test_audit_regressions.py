@@ -26,3 +26,18 @@ class AuditRegressions(unittest.TestCase):
         self.assertIn('METADATA_KEY_CAPTURE_FRAMERATE', video)
         self.assertLess(video.index('VideoPolicy.matchesRecordedOutput('), video.index('IS_PENDING, 0'))
         self.assertIn('contentResolver.delete(destination', video)
+
+    def test_haptic_fallback_declares_normal_vibration_permission(self):
+        manifest = ET.parse(ROOT / 'AndroidManifest.xml').getroot()
+        permissions = [item.get(ANDROID + 'name') for item in manifest.findall('uses-permission')]
+        self.assertIn('android.permission.VIBRATE', permissions)
+
+    def test_depth_reader_uses_the_platform_y8_format_symbol(self):
+        controller = (SRC / 'CameraController.kt').read_text()
+        reader = controller.split('depthReader = ImageReader.newInstance(', 1)[1].split(').also', 1)[0]
+        self.assertIn('ImageFormat.Y8', reader)
+
+    def test_camera_open_has_explicit_denial_handling(self):
+        for name in ('CameraUserService.java', 'probe/DepthProbeService.java'):
+            source = (SRC / name).read_text()
+            self.assertRegex(source, r'catch \(SecurityException (?:denied|e)\)')

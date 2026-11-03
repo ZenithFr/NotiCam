@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.VibrationAttributes
 import android.os.VibrationEffect
 import android.os.Vibrator
+import android.provider.Settings
 import android.os.VibratorManager
 import android.view.HapticFeedbackConstants
 import android.view.View
@@ -128,6 +129,10 @@ class CameraHaptics(private val view: View) {
      * of 255 so a device without the view-haptic path still gets a *soft* nudge.
      */
     private fun fallback() {
+        // A failed view haptic can mean touch feedback was disabled, not missing
+        // hardware. Do not bypass that preference now that VIBRATE is granted.
+        if (!view.isHapticFeedbackEnabled || Settings.System.getInt(
+                view.context.contentResolver, Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 0) return
         val v = vibrator ?: return
         if (!runCatching { v.hasVibrator() }.getOrDefault(false)) return
         runCatching {
