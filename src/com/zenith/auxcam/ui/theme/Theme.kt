@@ -48,6 +48,19 @@ object CameraColors {
     val SliderFill = Color.White
     val Scrim = Color(0x99000000)
     val Black = Color(0xFF000000)
+
+    // ── Settings page surfaces ─────────────────────────────────────────────
+    // Elevation by lightness alone (one tone step per layer), never shadows.
+    /** Full-screen settings ground, a hair above the camera's pure black. */
+    val PageBackground = Color(0xFF0B0D0D)
+    /** Grouped settings card, one tone step above the page. */
+    val CardSurface = Color(0xFF161919)
+    /** Inset control track / raised chip inside a card. */
+    val CardRaised = Color(0xFF202424)
+    /** Switch track when off. */
+    val SwitchTrackOff = Color(0xFF2C3131)
+    /** Destructive tint used only for delete-style actions. */
+    val Danger = Color(0xFFC8102E)
 }
 
 /** 8-pt spacing grid. */
@@ -73,6 +86,14 @@ object CameraSpacing {
     val gallery = 48.dp
     val railSlider = 44.dp
     val controlRadius = 16.dp
+
+    // ── Settings page rhythm (8-pt grid) ───────────────────────────────────
+    val pageGutter = 20.dp
+    val cardRadius = 20.dp
+    val cardPadding = 4.dp
+    val rowMinHeight = 60.dp
+    val sectionGap = 24.dp
+    val rowIcon = 20.dp
 }
 
 /**
@@ -143,6 +164,42 @@ object CameraType {
         fontWeight = FontWeight.Medium,
         fontSize = 20.sp,
         letterSpacing = 0.2.sp,
+    )
+
+    /** Settings page title. */
+    val PageTitle = TextStyle(
+        fontFamily = sans,
+        fontWeight = FontWeight.Medium,
+        fontSize = 26.sp,
+        lineHeight = 30.sp,
+        letterSpacing = (-0.3).sp,
+    )
+
+    /** A settings row's primary label. */
+    val RowTitle = TextStyle(
+        fontFamily = sans,
+        fontWeight = FontWeight.Medium,
+        fontSize = 15.sp,
+        lineHeight = 20.sp,
+        letterSpacing = 0.1.sp,
+    )
+
+    /** A settings row's supporting description. */
+    val RowBody = TextStyle(
+        fontFamily = sans,
+        fontWeight = FontWeight.Normal,
+        fontSize = 13.sp,
+        lineHeight = 18.sp,
+        letterSpacing = 0.1.sp,
+    )
+
+    /** Sentence-case group label above a settings card. */
+    val SectionLabel = TextStyle(
+        fontFamily = sans,
+        fontWeight = FontWeight.Medium,
+        fontSize = 12.sp,
+        lineHeight = 16.sp,
+        letterSpacing = 0.4.sp,
     )
 
     val Mode = TextStyle(

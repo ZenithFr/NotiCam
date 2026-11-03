@@ -111,7 +111,8 @@ fun CaptureControlRail(state: CameraUiState, actions: CameraActions) {
 @Composable
 private fun InstrumentChip(label: String, value: String, active: Boolean, enabled: Boolean, onClick: () -> Unit) {
     val opacity by animateFloatAsState(if (enabled) 1f else 0.4f, CameraMotion.fade(), label = "instrument-availability")
-    val foreground = CameraColors.Label
+    // Active chip is a white fill, so its readout must be dark to stay legible.
+    val foreground = if (active) CameraColors.OnLight else CameraColors.Label
     Column(Modifier.widthIn(min = 64.dp).height(CameraSpacing.touch * LocalDensity.current.fontScale.coerceAtLeast(1f))
         .graphicsLayer { alpha = opacity }
         .semantics { selected = active }

@@ -4,6 +4,39 @@
 > with the current [APU-only replacement report](APU_PORTRAIT_VIDEO_PROFILES.md).
 > Auto/MODNet inference is now removed; the replacement is blocked pending artifacts.
 
+## UI/UX revamp — settings page + polish
+
+This pass applies the frontend-design / bencium / taste-skill (app-screens) /
+ui-ux-pro-max guidance while **keeping the pinned Nothing-inspired matte
+direction**. The goal was a more polished, easier-to-scan interface, not a new
+brand. Concretely:
+
+- **Full-screen Settings page** (`ui/components/SettingsPage.kt`) replaces the old
+  560 dp modal bottom sheet. Pressing the gear opens a calm, searchable page:
+  grouped flat cards, one row per setting (glyph + sentence-case title + one-line
+  description + control), real matte switches, segmented choices, and progressive
+  disclosure for RAW size/frames. System back and the header button return to the
+  camera. It is an overlay and never resizes the native preview. The grouped
+  content lives in `CameraSettings.kt`; search filters whole `ControlSection`
+  groups. Elevation is lightness alone (`PageBackground` → `CardSurface` →
+  `CardRaised`), never shadows.
+- **Fixed unreadable selected states.** Several controls painted white text on a
+  white selection (`TogglePill`, `LensChip`, `SegmentPill`, `InstrumentChip`,
+  `ZoomChips`, the RAW disc). Selected text now uses `OnLight` (black) so the
+  active state is legible.
+- **Labeled Photo / Video switch** (`ModeSwitch`) with one travelling white pill
+  replaces the icon-only toggle, matching the browser companion. The shutter stays
+  centered opposite the gallery tile.
+- **Clearer settings affordance.** A gear icon (`NotiIcons.Settings`) and "Open
+  settings" label replace the ambiguous sliders glyph.
+- **Type/spacing tokens.** Added `PageTitle`, `RowTitle`, `RowBody`,
+  `SectionLabel` and an 8-pt settings rhythm (`pageGutter`, `cardRadius`,
+  `rowMinHeight`, `sectionGap`). Sentence-case labels; mono kept for instrument
+  readouts. All rows keep ≥48 dp touch targets and semantics.
+
+The browser companion (`design/index.html`) mirrors the same full-screen settings
+page and labeled mode switch. It remains a clearly-labeled simulation.
+
 ## Direction
 
 The latest direction is Nothing-inspired neutral matte glass, using the
@@ -50,9 +83,10 @@ uses the same neutral direction, but its CSS blur and sample photo remain a
    selection remains available through zoom stops, pinch and horizontal scrubbing.
 6. Quiet NotiCam wordmark, inside the safe navigation area.
 
-Camera settings open in a scrollable modal bottom sheet with system back and
-outside-tap dismissal. Manual focus/exposure are still available as controls;
-there is no separate Pro capture mode.
+Camera settings open in a full-screen, searchable Settings page (grouped cards,
+one row per control) with system back and a header back button. Manual
+focus/exposure are still available as controls on the capture rail; there is no
+separate Pro capture mode.
 
 ## Interaction contract
 

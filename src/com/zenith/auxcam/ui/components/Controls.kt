@@ -211,7 +211,7 @@ fun LensChip(
         label = "chip-bg",
     )
     val foreground by animateColorAsState(
-        targetValue = CameraColors.Label,
+        targetValue = if (selected) CameraColors.OnLight else CameraColors.Label,
         animationSpec = tween(200),
         label = "chip-fg",
     )
@@ -331,8 +331,9 @@ fun TogglePill(
         animationSpec = tween(180),
         label = "toggle-bg",
     )
+    // White selection needs dark text; the old white-on-white was unreadable.
     val foreground by animateColorAsState(
-        targetValue = CameraColors.Label,
+        targetValue = if (active) CameraColors.OnLight else CameraColors.Label,
         animationSpec = tween(180),
         label = "toggle-fg",
     )
@@ -468,7 +469,7 @@ private fun SegmentPill(
         label = "segment-bg",
     )
     val fg by animateColorAsState(
-        targetValue = if (selected) CameraColors.Label else CameraColors.LabelSecondary,
+        targetValue = if (selected) CameraColors.OnLight else CameraColors.LabelSecondary,
         animationSpec = tween(190),
         label = "segment-fg",
     )
@@ -678,12 +679,68 @@ fun TopBar(
             selected = state.flash != FlashMode.Off,
         )
         MatteIconButton(
-            icon = if (state.settingsOpen) NotiIcons.Close else NotiIcons.Sliders,
-            contentDescription = "Camera controls",
+            icon = NotiIcons.Settings,
+            contentDescription = "Open settings",
             onClick = actions::onSettingsToggle,
             selected = state.settingsOpen,
             enabled = !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
         )
+    }
+}
+
+/**
+ * Labeled Photo / Video switch with one travelling white pill.
+ *
+ * Replaces the old icon-only toggle: the mode is now readable at a glance and
+ * each option is a named, >=48 dp target. Selection semantics are exposed for
+ * accessibility; the pill slides rather than blinking two separate fills.
+ */
+@Composable
+fun ModeSwitch(
+    state: CameraUiState,
+    actions: CameraActions,
+    modifier: Modifier = Modifier,
+) {
+    val enabled = state.sessionReady && !state.videoRecording && !state.videoStarting &&
+        !state.captureBusy && !state.previewTransitioning
+    val haptics = rememberCameraHaptics()
+    val photoSelected = state.mode == CaptureMode.Photo
+    val pillX by animateDpAsState(
+        targetValue = if (photoSelected) 96.dp else 0.dp,
+        animationSpec = CameraMotion.select(), label = "mode-pill",
+    )
+    Box(
+        modifier = modifier
+            .cameraGlass(RoundedCornerShape(24.dp))
+            .padding(4.dp)
+            .semantics { contentDescription = "Camera mode" },
+    ) {
+        Box(
+            modifier = Modifier.offset(x = pillX).width(96.dp).height(40.dp)
+                .clip(RoundedCornerShape(20.dp)).background(Color.White),
+        )
+        Row {
+            listOf(CaptureMode.Video, CaptureMode.Photo).forEach { mode ->
+                val selected = state.mode == mode
+                val fg by animateColorAsState(
+                    targetValue = if (selected) CameraColors.OnLight else CameraColors.LabelSecondary,
+                    animationSpec = tween(180), label = "mode-fg",
+                )
+                Box(
+                    modifier = Modifier.width(96.dp).heightIn(min = 40.dp)
+                        .clip(RoundedCornerShape(20.dp))
+                        .semantics { this.selected = selected }
+                        .clickable(enabled = enabled, role = Role.Button, onClick = {
+                            haptics.select()
+                            actions.onModeSelected(mode)
+                        })
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(mode.label, style = CameraType.Mode, color = fg, maxLines = 1)
+                }
+            }
+        }
     }
 }
 
@@ -702,12 +759,13 @@ fun BottomBar(
             .padding(horizontal = CameraSpacing.gutterWide),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // Settings use a modal overlay and never resize the native preview.
+        // Settings use a full-screen overlay and never resize the native preview.
+        ModeSwitch(state, actions, Modifier.padding(bottom = 10.dp))
 
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 8.dp, bottom = 8.dp),
+                .padding(top = 2.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             GalleryTile(
@@ -741,13 +799,8 @@ fun BottomBar(
 
             Spacer(Modifier.weight(1f))
 
-            MatteIconButton(
-                icon = if (state.mode == CaptureMode.Photo) NotiIcons.Video else NotiIcons.Photo,
-                contentDescription = if (state.mode == CaptureMode.Photo) "Switch to Video" else "Switch to Photo",
-                onClick = { actions.onModeSelected(if (state.mode == CaptureMode.Photo) CaptureMode.Video else CaptureMode.Photo) },
-                enabled = state.sessionReady && !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
-                modifier = Modifier.size(CameraSpacing.gallery),
-            )
+            // Equal-footprint spacer keeps the shutter centered opposite the gallery.
+            Spacer(Modifier.size(CameraSpacing.gallery))
         }
     }
 }
