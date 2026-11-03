@@ -77,6 +77,24 @@ class OpenGateRaw(unittest.TestCase):
         self.assertIn("Open gate RAW", companion)
         self.assertIn("OPEN GATE RAW", companion)
 
+    def test_open_gate_falls_back_to_native_sensor_array_when_no_remosaic(self):
+        raw = self.caps.split("static Size rawSize(", 1)[1].split("/** Pixel mode needed", 1)[0]
+        self.assertIn("if (high && best == null)", raw)
+        self.assertIn("best = rawSize(cm, lensId, false);", raw)
+
+    def test_raw_zoom_switches_physical_lenses(self):
+        apply_zoom = self.controller.split("private fun applyZoom(", 1)[1].split("private fun selectLens(", 1)[0]
+        self.assertIn("if (targetLens != currentLens)", apply_zoom)
+        self.assertIn("selectLens(targetLens)", apply_zoom)
+
+    def test_capture_format_options_exposed(self):
+        settings = (SRC / "ui/components/CameraSettings.kt").read_text()
+        self.assertIn('title = "Capture format"', settings)
+        self.assertIn('options = listOf("JPEG", "RAW (DNG)", "YUV")', settings)
+        self.assertIn("onCaptureFormatSelected", self.controller)
+        self.assertIn("receiveCameraYuv", self.controller)
+        self.assertIn("saveCameraYuv", self.controller)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -369,4 +369,12 @@ object NotiIcons {
             moveTo(15.96f, 8.04f); lineTo(18.08f, 5.92f)
         }
     }.build()
+
+    /** CMF Phone 2 Pro camera module glyph (dual large circles + dual right sensors). */
+    val Logo: ImageVector = builder("Logo").apply {
+        fillPath { circle(8.51f, 6.43f, 4.56f) }
+        fillPath { circle(8.51f, 17.57f, 4.56f) }
+        fillPath { circle(17.36f, 9.12f, 2.70f) }
+        fillPath { circle(17.33f, 14.87f, 1.32f) }
+    }.build()
 }

@@ -162,7 +162,7 @@ final class CameraCapabilities {
                     long pixels = (long) size.getWidth() * size.getHeight();
                     if (high != (pixels >= 45_000_000L)) continue;
                     // 12 MP means a native binned class, never a 50 MP file with a 12 MP label.
-                    if (!high && (pixels < 10_000_000L || pixels > 16_000_000L)) continue;
+                    if (!high && (pixels < 6_000_000L || pixels > 16_000_000L)) continue;
                     if (RawFrameMatcher.maxFramesForSize(size.getWidth(), size.getHeight()) == 0) continue;
                     if (best == null || pixels > (long) best.getWidth() * best.getHeight()) best = size;
                 }
@@ -182,6 +182,11 @@ final class CameraCapabilities {
                         if (best == null || pixels > (long) best.getWidth() * best.getHeight()) best = size;
                     }
                 }
+            }
+            if (high && best == null) {
+                // When no >=45MP stream is exposed in the max map, open gate captures the full
+                // native uncropped sensor array (e.g. 4080x3072 on 1x, 4096x3072 on 2x, 3264x2448 on 0.6x).
+                best = rawSize(cm, lensId, false);
             }
             return best;
         } catch (Exception ignored) { return null; }

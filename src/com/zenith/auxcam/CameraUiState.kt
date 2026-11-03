@@ -20,6 +20,13 @@ enum class Resolution(val label: String, val longEdge: Int) {
     fun next(): Resolution = if (this == Standard) High else Standard
 }
 
+/** Capture format: standard JPEG, unprocessed sensor RAW (DNG), or uncompressed YUV frame dump. */
+enum class CaptureFormat(val label: String) {
+    Jpeg("JPEG"),
+    RawDng("RAW (DNG)"),
+    Yuv("YUV");
+}
+
 /**
  * Viewfinder framing. `FourThree` is the sensor's native ratio and therefore the
  * default; the others crop the framebuffer (they never stretch it).
@@ -93,6 +100,7 @@ data class CameraUiState(
     val whiteBalance: WhiteBalancePreset = WhiteBalancePreset.Auto,
     val sensorControlStatus: String = "Checking current lens controls…",
 
+    val captureFormat: CaptureFormat = CaptureFormat.Jpeg,
     val raw: Boolean = false,
     val rawFrames: Int = 1,
     val rawStandardWidth: Int = 0,

@@ -11,6 +11,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.zenith.auxcam.CameraActions
 import com.zenith.auxcam.CameraUiState
+import com.zenith.auxcam.CaptureFormat
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
 import com.zenith.auxcam.Resolution
@@ -52,8 +53,34 @@ fun CameraSettings(
                 if (photo) {
                     SettingsChoiceRow(
                         icon = NotiIcons.Aspect,
+                        title = "Capture format",
+                        subtitle = when (state.captureFormat) {
+                            CaptureFormat.RawDng -> "RAW (DNG) · unprocessed sensor readout"
+                            CaptureFormat.Yuv -> "YUV (4:2:0) · uncompressed frame dump"
+                            else -> "JPEG · compressed image"
+                        },
+                        options = listOf("JPEG", "RAW (DNG)", "YUV"),
+                        selectedIndex = when (state.captureFormat) {
+                            CaptureFormat.Jpeg -> 0
+                            CaptureFormat.RawDng -> 1
+                            CaptureFormat.Yuv -> 2
+                        },
+                        onSelect = { index ->
+                            val format = when (index) {
+                                1 -> CaptureFormat.RawDng
+                                2 -> CaptureFormat.Yuv
+                                else -> CaptureFormat.Jpeg
+                            }
+                            actions.onCaptureFormatSelected(format)
+                        },
+                        enabled = captureEditable,
+                    )
+                    SettingsDivider()
+                    SettingsChoiceRow(
+                        icon = NotiIcons.Aspect,
                         title = "Photo size",
                         subtitle = if (state.raw) "Set by the open-gate readout below"
+                            else if (state.captureFormat == CaptureFormat.Yuv) "Uncompressed YUV 4:2:0 frame"
                             else "Largest native JPEG · quality 100",
                         options = listOf("12 MP", "50 MP"),
                         selectedIndex = if (state.resolution == Resolution.High) 1 else 0,

@@ -132,6 +132,7 @@ interface CameraActions {
     fun onWhiteBalanceSelected(preset: WhiteBalancePreset) {}
 
     fun onWhiteBalanceTemperatureChanged(kelvin: Int) {}
+    fun onCaptureFormatSelected(format: CaptureFormat) {}
     fun onRawResolutionSelected(high: Boolean) {}
     fun onRawFramesSelected(frames: Int) {}
     fun onRawCaptureCancel() {}
@@ -1476,6 +1477,10 @@ class CameraController(
             image.close()
             return
         }
+        if (frozen.captureFormat == CaptureFormat.Yuv && image.format == ImageFormat.YUV_420_888) {
+            receiveCameraYuv(image, frozen)
+            return
+        }
         val frozenW = image.width
         val frozenH = image.height
         var outPath: String? = null
@@ -1679,6 +1684,115 @@ class CameraController(
     } catch (e: Exception) {
         Log.w(TAG, "50 MP thumbnail unavailable", e)
         null
+    }
+
+    private fun receiveCameraYuv(image: android.media.Image, frozen: CameraUiState) {
+        val width = image.width
+        val height = image.height
+        val totalBytes = width * height * 3 / 2
+        val yuvBytes = ByteArray(totalBytes)
+        try {
+            val yPlane = image.planes[0]
+            val uPlane = image.planes[1]
+            val vPlane = image.planes[2]
+            val yBuf = yPlane.buffer
+            val uBuf = uPlane.buffer
+            val vBuf = vPlane.buffer
+            val yRowStride = yPlane.rowStride
+            val uRowStride = uPlane.rowStride
+            val vRowStride = vPlane.rowStride
+            val uPixelStride = uPlane.pixelStride
+            val vPixelStride = vPlane.pixelStride
+
+            var destOffset = 0
+            for (r in 0 until height) {
+                yBuf.position(r * yRowStride)
+                yBuf.get(yuvBytes, destOffset, width)
+                destOffset += width
+            }
+            val halfW = width / 2
+            val halfH = height / 2
+            for (r in 0 until halfH) {
+                val rowStart = r * uRowStride
+                for (c in 0 until halfW) {
+                    yuvBytes[destOffset++] = uBuf.get(rowStart + c * uPixelStride)
+                }
+            }
+            for (r in 0 until halfH) {
+                val rowStart = r * vRowStride
+                for (c in 0 until halfW) {
+                    yuvBytes[destOffset++] = vBuf.get(rowStart + c * vPixelStride)
+                }
+            }
+            io.execute { saveCameraYuv(yuvBytes, width, height, frozen.resolution == Resolution.High) }
+        } catch (e: Exception) {
+            Log.e(TAG, "YUV buffer read failed", e)
+            finishCapture("YUV capture failed")
+        } finally {
+            image.close()
+        }
+    }
+
+    private fun saveCameraYuv(yuv: ByteArray, width: Int, height: Int, high: Boolean) {
+        var uri: Uri? = null
+        var published = false
+        var pfd: android.os.ParcelFileDescriptor? = null
+        try {
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "NOTICAM_${stamp}_${width}x${height}${if (high) "_50MP" else ""}.yuv")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/x-raw-yuv")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NotiCam")
+                put(MediaStore.Images.Media.IS_PENDING, 1)
+                put(MediaStore.Images.Media.WIDTH, width)
+                put(MediaStore.Images.Media.HEIGHT, height)
+            }
+            val destination = checkNotNull(activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values))
+            uri = destination
+            pfd = activity.contentResolver.openFileDescriptor(destination, "w")
+            FileOutputStream(pfd!!.fileDescriptor).use { out ->
+                out.write(yuv)
+                out.flush()
+            }
+            pfd.close()
+            pfd = null
+
+            val complete = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+            activity.contentResolver.update(destination, complete, null, null)
+            published = true
+            latestPhotoUri = destination
+
+            // Fast preview thumbnail from luma plane
+            val thumbSize = 168
+            val sample = maxOf(1, width / thumbSize)
+            val thumbW = width / sample
+            val thumbH = height / sample
+            val thumbBmp = Bitmap.createBitmap(thumbW, thumbH, Bitmap.Config.ARGB_8888)
+            val pixels = IntArray(thumbW * thumbH)
+            for (y in 0 until thumbH) {
+                val srcY = y * sample
+                for (x in 0 until thumbW) {
+                    val srcX = x * sample
+                    val luma = yuv[srcY * width + srcX].toInt() and 0xFF
+                    pixels[y * thumbW + x] = (0xFF shl 24) or (luma shl 16) or (luma shl 8) or luma
+                }
+            }
+            thumbBmp.setPixels(pixels, 0, thumbW, 0, 0, thumbW, thumbH)
+            val thumbImg = thumbBmp.asImageBitmap()
+
+            post {
+                onThumbnailReady(thumbImg)
+                finishCapture("YUV frame saved (${width}×${height})")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "YUV save failed", e)
+            if (!published) uri?.let { incomplete ->
+                try { activity.contentResolver.delete(incomplete, null, null) } catch (_: Exception) {}
+            }
+            post { finishCapture("YUV save failed: ${e.message?.take(80)}") }
+        } finally {
+            try { pfd?.close() } catch (_: Exception) {}
+        }
     }
 
     private fun saveStillToMediaStore(
@@ -2221,13 +2335,18 @@ class CameraController(
 
     private fun applyZoom(requested: Float, force: Boolean) {
         if (!requested.isFinite() || state.bokehChecksRunning || state.captureBusy || state.videoRecording || state.videoStarting || !foreground || disposed) return
+        val zoom = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (state.raw) {
-            // Open gate RAW captures the full sensor field; a digital crop would defeat it.
-            val msg = "Open gate RAW keeps the full sensor field"
-            if (state.status != msg) update { it.copy(status = msg) }
+            val targetLens = CameraZoom.lensForZoom(zoom)
+            if (targetLens != currentLens) {
+                selectLens(targetLens)
+            } else {
+                // Open gate RAW captures the full sensor field; digital crop inside the same lens is avoided.
+                val msg = "Open gate RAW keeps the full sensor field"
+                if (state.status != msg) update { it.copy(status = msg) }
+            }
             return
         }
-        val zoom = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (zoomHandoffPending) { queuedZoom = zoom; return }
         if (!state.sessionReady) return
         if (!force && kotlin.math.abs(zoom - state.zoom) < .005f) return
@@ -2267,7 +2386,10 @@ class CameraController(
         currentLens = lens
         onTele = lens == "3"
         lensSwitching = true
-        update { it.copy(aeAfLocked = false, manualFocus = false) }
+        val nativeZoom = when (lens) { "3" -> 2f; "2" -> .6f; else -> 1f }
+        lastSentZoom = nativeZoom
+        try { service?.setZoom(nativeZoom) } catch (_: RemoteException) { }
+        update { it.copy(aeAfLocked = false, manualFocus = false, zoom = nativeZoom) }
         val keep50Mp = state.resolution == Resolution.High && (lens == "0" || lens == "3")
         if (!keep50Mp && state.resolution == Resolution.High || state.bokehEnabled) {
             update { it.copy(resolution = Resolution.Standard, bokehEnabled = false, aeAfLocked = false, manualFocus = false) }
@@ -2464,13 +2586,15 @@ class CameraController(
         }
         check(!high || CaptureOutput.is50MpSize(width, height)) { "50 MP was not advertised by this camera" }
         update { it.copy(photoWidth = width, photoHeight = height) }
+        val yuv = state.captureFormat == CaptureFormat.Yuv && !raw
         val reader = if (raw) {
             // The service owns the real RAW reader; this client surface only needs the
             // advertised dimensions. Size the queue to the payload budget so a 50 MP
             // open-gate frame never allocates two ~100 MiB buffers up front.
             ImageReader.newInstance(width, height, ImageFormat.RAW_SENSOR,
                 RawFrameMatcher.maxFramesForSize(width, height).coerceAtLeast(1))
-        } else if (!bokeh) ImageReader.newInstance(width, height, ImageFormat.JPEG, 2)
+        } else if (yuv) ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2)
+        else if (!bokeh) ImageReader.newInstance(width, height, ImageFormat.JPEG, 2)
         else ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2, HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
         return reader.also { it.setOnImageAvailableListener(::onStillImage, stillHandler) }
     }
@@ -2628,14 +2752,34 @@ class CameraController(
             val nativeZoom = when (currentLens) { "3" -> 2f; "2" -> .6f; else -> 1f }
             lastSentZoom = nativeZoom
             try { service?.setZoom(nativeZoom) } catch (_: RemoteException) { }
-            update { it.copy(raw = true, resolution = if (openGate) Resolution.High else Resolution.Standard,
+            update { it.copy(raw = true, captureFormat = CaptureFormat.RawDng, resolution = if (openGate) Resolution.High else Resolution.Standard,
                 rawSensorWidth = width, rawSensorHeight = height, rawFrames = 1, zoom = nativeZoom,
                 flash = FlashMode.Off, bokehEnabled = false) }
             rebuildStillSession(if (openGate) "Enabling open-gate RAW (full sensor)…" else "Enabling binned RAW (DNG)…")
         } else {
-            update { it.copy(raw = false, resolution = if (it.resolution == Resolution.High && it.highResolutionChecked && it.supportsHighResolution)
+            update { it.copy(raw = false, captureFormat = CaptureFormat.Jpeg, resolution = if (it.resolution == Resolution.High && it.highResolutionChecked && it.supportsHighResolution)
                 Resolution.High else Resolution.Standard) }
             rebuildStillSession("Returning to advertised JPEG capture…")
+        }
+        haptic()
+    }
+
+    override fun onCaptureFormatSelected(format: CaptureFormat) {
+        if (!state.sessionReady || state.captureBusy || state.videoRecording || state.videoStarting) return
+        if (state.captureFormat == format) return
+        when (format) {
+            CaptureFormat.RawDng -> {
+                if (!state.raw) onRawToggle()
+                else update { it.copy(captureFormat = CaptureFormat.RawDng) }
+            }
+            CaptureFormat.Yuv -> {
+                update { it.copy(captureFormat = CaptureFormat.Yuv, raw = false) }
+                rebuildStillSession("Configuring YUV frame capture…")
+            }
+            CaptureFormat.Jpeg -> {
+                update { it.copy(captureFormat = CaptureFormat.Jpeg, raw = false) }
+                rebuildStillSession("Configuring JPEG capture…")
+            }
         }
         haptic()
     }
