@@ -112,7 +112,7 @@ fun GalleryScreen(onClose: () -> Unit) {
     var revision by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     val media by produceState<List<GalleryItem>?>(null, revision) {
-        value = withContext(Dispatchers.IO) {
+        this.value = withContext(Dispatchers.IO) {
             try { loadMedia(context) } catch (e: Exception) { error = "Could not load your captures"; emptyList() }
         }
     }
@@ -162,7 +162,7 @@ fun GalleryScreen(onClose: () -> Unit) {
                     LazyRow(Modifier.fillMaxWidth().height(62.dp), contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                         itemsIndexed(list, key = { _, item -> item.uri.toString() }) { index, item ->
                             val thumbnail by produceState<ImageBitmap?>(null, item.uri) {
-                                value = withContext(Dispatchers.IO) {
+                                this.value = withContext(Dispatchers.IO) {
                                     try { context.contentResolver.loadThumbnail(item.uri, Size(96, 96), null).asImageBitmap() }
                                     catch (_: Exception) { null }
                                 }
@@ -240,7 +240,7 @@ private fun GalleryPhoto(item: GalleryItem) {
     val context = LocalContext.current
     var loading by remember(item.uri) { mutableStateOf(true) }
     val image by produceState<ImageBitmap?>(null, item.uri) {
-        value = withContext(Dispatchers.IO) {
+        this.value = withContext(Dispatchers.IO) {
             try {
                 ImageDecoder.decodeBitmap(ImageDecoder.createSource(context.contentResolver, item.uri)) { decoder, info, _ ->
                     var sample = 1
@@ -285,7 +285,7 @@ private fun GalleryVideo(item: GalleryItem, active: Boolean) {
     var playing by remember(item.uri) { mutableStateOf(false) }
     val context = LocalContext.current
     val displayAspect by produceState<Float?>(null, item.uri) {
-        value = withContext(Dispatchers.IO) {
+        this.value = withContext(Dispatchers.IO) {
             val metadata = MediaMetadataRetriever()
             try {
                 metadata.setDataSource(context, item.uri)
