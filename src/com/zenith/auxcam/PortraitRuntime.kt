@@ -13,7 +13,7 @@ internal object PortraitRuntime {
     const val MODEL_ID = "mobilenetv4_conv_medium_int8"
     const val blockedReason = "Portrait unavailable: trained INT8 MobileNetV4-Conv-Medium LRASPP/matting weights and verified APU-only runtime are not installed. No CPU/GPU fallback."
     // val available: Boolean get() = false
-    val available: Boolean get() = true
+    val available: Boolean get() = false
     fun requireAvailable() { if (!available) throw PortraitUnavailableException(blockedReason) }
 }
 internal class PortraitUnavailableException(message: String) : IllegalStateException(message)

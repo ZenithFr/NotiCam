@@ -2,21 +2,6 @@ package com.zenith.auxcam
 
 import android.os.Build
 
-/**
- * Hardware profile of the one device this build targets: **CMF Phone 2 Pro**
- * (CMF by Nothing), MediaTek Dimensity 7300 Pro + Mali-G615 MC2.
- *
- * Every number the UI needs is here rather than sprinkled through the layout,
- * so retargeting the app is a one-file change:
- *
- * | Property            | Value                | Why it matters                       |
- * |---------------------|----------------------|--------------------------------------|
- * | Display             | 1080 x 2392, 120 Hz  | chrome sizing, preview box fitting   |
- * | Sensor colour frame | 1440 x 1080 (4:3)    | preview + aspect ratio               |
- * | Disparity frame     | 448 x 288 (Y8)       | depth upload stride                  |
- * | Still frame         | 4080 x 3072 (12.5MP) | bokeh composite + thumbnails          |
- * | Logical camera id   | "5"                  | privileged multi-camera session      |
- */
 object DeviceProfile {
 
     const val MARKETING_NAME = "CMF Phone 2 Pro"
@@ -40,29 +25,71 @@ object DeviceProfile {
 
     const val CAMERA_ID = "5"
 
-    /**
-     * Sensor 4:3 as presented: width / height of the frame the engine emits.
-     *
-     * The Vulkan composite maps the full sensor frame onto the swapchain, so the
-     * SurfaceView must be laid out with *exactly* this aspect ratio. Historically
-     * the view was measured 4:3 but the swapchain was created once at a
-     * provisional size, which is what made the preview look stretched.
-     */
-    const val SENSOR_ASPECT = COLOR_WIDTH.toFloat() / COLOR_HEIGHT.toFloat()
+    // ── Device lock ─────────────────────────────────────────────────────────
+    // Exact values captured from the CMF Phone 2 Pro (Nothing A001 / Galaga):
+    //   ro.product.manufacturer=Nothing
+    //   ro.product.brand=Nothing
+    //   ro.product.model=A001
+    //   ro.product.device=Galaga
+    //   ro.soc.manufacturer=Mediatek
+    //   ro.soc.model=MT6878
+    //   ro.hardware=mt6878
+    // Fingerprint and product name are deliberately NOT pinned — they change
+    // with OTA updates.  The combination of manufacturer + model + device + SoC
+    // is sufficient to identify the target hardware model.
+    const val TARGET_MANUFACTURER = "Nothing"
+    const val TARGET_BRAND        = "Nothing"
+    const val TARGET_MODEL        = "A001"
+    const val TARGET_DEVICE       = "Galaga"
+    const val TARGET_SOC_MODEL    = "MT6878"
+    const val TARGET_HARDWARE     = "mt6878"
 
-    /**
-     * Presentation rotation applied by `composite.comp`.
-     *
-     * `true` → `composite.comp` rotates the 1440x1080 sensor frame 90° clockwise
-     * into the swapchain, so the viewfinder box is 3:4 portrait and the scene is
-     * upright when the phone is held normally. Keep in sync with
-     * `kPreviewRotate90` in `VulkanPipeline.cpp`.
-     */
-    const val PREVIEW_ROTATION_90 = true
+    data class DeviceCheck(
+        val supported: Boolean,
+        val reason: String? = null
+    )
 
-    /** Aspect the viewfinder composable must use. */
-    val previewAspect: Float
-        get() = if (PREVIEW_ROTATION_90) 1f / SENSOR_ASPECT else SENSOR_ASPECT
+    @JvmStatic
+    fun check(): DeviceCheck {
+        // ── manufacturer / brand ────────────────────────────────────────────
+        val m = Build.MANUFACTURER
+        val b = Build.BRAND
+        if (m !in listOf(TARGET_MANUFACTURER, TARGET_BRAND)) {
+            return DeviceCheck(false, "Manufacturer/brand not recognized: $m / $b")
+        }
+
+        // ── model ───────────────────────────────────────────────────────────
+        val md = Build.MODEL
+        if (md != TARGET_MODEL) {
+            return DeviceCheck(false, "Model not $TARGET_MODEL, got $md")
+        }
+
+        // ── device ─────────────────────────────────────────────────────────
+        val dv = Build.DEVICE
+        if (dv != TARGET_DEVICE) {
+            return DeviceCheck(false, "Device not $TARGET_DEVICE, got $dv")
+        }
+
+        // ── hardware ───────────────────────────────────────────────────────
+        val hw = Build.HARDWARE
+        if (hw != TARGET_HARDWARE) {
+            return DeviceCheck(false, "Hardware not $TARGET_HARDWARE, got $hw")
+        }
+
+        // ── SoC model (API 31+) ────────────────────────────────────────────
+        val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL else null
+        if (socModel != TARGET_SOC_MODEL) {
+            return DeviceCheck(false, "SoC model not $TARGET_SOC_MODEL, got $socModel")
+        }
+
+        return DeviceCheck(true, null)
+    }
+
+    @JvmStatic
+    fun isTargetDevice(): Boolean = check().supported
+
+    /** Returns a human‑readable string such as "Nothing A001 / Galaga". */
+    fun describe(): String = "${Build.MANUFACTURER} ${Build.MODEL}"
 
     // ── Lens ladder exposed by the CMF Phone 2 Pro ──────────────────────────
     /** 24 mm equivalent main sensor. */
@@ -90,22 +117,38 @@ object DeviceProfile {
         if (stop < 0.95f) String.format("%.1f×", stop) else null
 
     /**
-     * True when running on the target hardware. The app is tuned for this phone
-     * only (privileged camera id 5, Mali-G615 timings), so anything else gets a
-     * visible banner instead of silently wrong colours.
+     * Aspect the viewfinder composable must use.
+     *
+     * `true` → `composite.comp` rotates the 1440x1080 sensor frame 90° clockwise
+     * into the swapchain, so the viewfinder box is 3:4 portrait and the scene is
+     * upright when the phone is held normally. Keep in sync with
+     * `kPreviewRotate90` in `VulkanPipeline.cpp`.
      */
-    fun isTargetDevice(
-        manufacturer: String = Build.MANUFACTURER,
-        model: String = Build.MODEL,
-        device: String = Build.DEVICE,
-    ): Boolean {
-        val m = manufacturer.lowercase()
-        val md = model.lowercase()
-        val dv = device.lowercase()
-        val cmfByNothing = m.contains("nothing") || m.contains("cmf")
-        val phone2Pro = md.contains("a001") || md.contains("2 pro") || dv.contains("galaga")
-        return cmfByNothing && phone2Pro
-    }
+    const val PREVIEW_ROTATION_90 = true
 
-    fun describe(): String = "${Build.MANUFACTURER} ${Build.MODEL}"
+    /**
+     * Sensor 4:3 as presented: width / height of the frame the engine emits.
+     *
+     * The Vulkan composite maps the full sensor frame onto the swapchain, so the
+     * SurfaceView must be laid out with *exactly* this aspect ratio. Historically
+     * the view was measured 4:3 but the swapchain was created once at a
+     * provisional size, which is what made the preview look stretched.
+     */
+    const val SENSOR_ASPECT = COLOR_WIDTH.toFloat() / COLOR_HEIGHT.toFloat()
+
+    /**
+     * Presentation rotation applied by `composite.comp`.
+     *
+     * `true` → `composite.comp` rotates the 1440x1080 sensor frame 90° clockwise
+     * into the swapchain, so the viewfinder box is 3:4 portrait and the scene is
+     * upright when the phone is held normally. Keep in sync with
+     * `kPreviewRotate90` in `VulkanPipeline.cpp`.
+     */
+    const val PREVIEW_ROTATION_90_ALIAS = PREVIEW_ROTATION_90
+
+    /**
+     * Aspect the viewfinder composable must use.
+     */
+    val previewAspect: Float
+        get() = if (PREVIEW_ROTATION_90) 1f / SENSOR_ASPECT else SENSOR_ASPECT
 }

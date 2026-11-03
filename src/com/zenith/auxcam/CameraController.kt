@@ -493,6 +493,10 @@ class CameraController(
 
     fun start() {
         if (disposed) return
+        if (!DeviceProfile.isTargetDevice()) {
+            update { it.copy(status = "Unsupported device") }
+            return
+        }
         foreground = true
         if (orientationListener.canDetectOrientation()) orientationListener.enable()
         if (started) {

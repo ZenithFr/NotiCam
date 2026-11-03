@@ -234,7 +234,6 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                                 state.mode == CaptureMode.Video -> if (state.status == "Ready")
                                     "${state.videoHeight}p · ${state.videoTargetFps} fps · ${if (state.videoHasAudio) "Audio on" else "Mic permission requested on Record"}"
                                     else state.status
-                                !DeviceProfile.isTargetDevice() -> "Designed for CMF Phone 2 Pro"
                                 state.status == "Ready" -> "${state.photoSizeLabel}  ·  4:3  ·  JPEG"
                                 else -> state.status
                             }

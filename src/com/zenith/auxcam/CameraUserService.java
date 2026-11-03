@@ -423,6 +423,11 @@ public class CameraUserService extends IAuxCamService.Stub {
         }
         mPreviewFpsRange = null;
         loadCameraCharacteristics(cm);
+        // Lock the camera to the CMF Phone 2 Pro only
+        if (!DeviceProfile.isTargetDevice()) {
+            notifyError("Unsupported device: this build is tuned for CMF Phone 2 Pro only");
+            return;
+        }
         if (mPreviewFpsRange == null) { notifyError("No advertised frame rate for selected preview stream"); return; }
 
         try {

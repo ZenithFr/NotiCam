@@ -1,6 +1,7 @@
 package com.zenith.auxcam
 
 import android.content.Intent
+import android.widget.Toast
 import android.graphics.Color
 import android.hardware.HardwareBuffer
 import android.os.Build
