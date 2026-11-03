@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash # Includes pipefail: tee must never hide a compiler failure.
+
 permissions:
   contents: read
 
@@ -28,16 +32,9 @@ jobs:
         with:
           gradle-version: '8.9'
       - uses: android-actions/setup-android@v3
-        id: sdk
-      - name: Diagnose SDK bootstrap failure
-        if: failure() && steps.sdk.outcome == 'failure'
-        run: |
-          mkdir -p build/audit
-          entry=$(find "$(dirname "$RUNNER_WORKSPACE")/_actions/android-actions/setup-android" -path '*/dist/index.js' -print -quit)
-          status=0
-          env 'INPUT_CMDLINE-TOOLS-VERSION=12266719' 'INPUT_ACCEPT-ANDROID-SDK-LICENSES=true' 'INPUT_LOG-ACCEPTED-ANDROID-SDK-LICENSES=true' 'INPUT_PACKAGES=tools platform-tools' node "$entry" 2>&1 | tee build/audit/sdk-bootstrap.log || status=$?
-          python3 tools/ci_annotations.py build/audit/sdk-bootstrap.log
-          exit "$status"
+        with:
+          cmdline-tools-version: '12266719'
+          packages: 'platform-tools' # The old SDK package "tools" no longer exists.
       - name: Install Android and shader toolchains
         run: |
           mkdir -p build/audit
