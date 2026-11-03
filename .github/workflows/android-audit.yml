@@ -1,0 +1,113 @@
+name: Android audit
+
+on:
+  push:
+    branches: [main, 'arena/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash # Includes pipefail: tee must never hide a compiler failure.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v5
+        with:
+          gradle-version: '8.9'
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '12266719'
+          packages: 'platform-tools' # The old SDK package "tools" no longer exists.
+      - name: Install Android and shader toolchains
+        run: |
+          mkdir -p build/audit
+          command -v sdkmanager
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.1.12297006'
+          sudo apt-get update
+          sudo apt-get install -y glslc
+          mkdir -p build/audit
+      - name: Portable regression checks and shaders
+        id: portable
+        continue-on-error: true
+        run: ./build.sh check 2>&1 | tee build/audit/portable.log
+      - name: Actual Android JVM unit tests
+        id: unit
+        continue-on-error: true
+        run: |
+          status=0
+          gradle --no-daemon --stacktrace --console=plain testDebugUnitTest 2>&1 | tee build/audit/unit.log || status=$?
+          if [ "$status" -ne 0 ]; then python3 tools/ci_annotations.py build/audit/unit.log; fi
+          exit "$status"
+      - name: Android lint
+        id: lint
+        continue-on-error: true
+        run: |
+          status=0
+          gradle --no-daemon --stacktrace --console=plain lintDebug 2>&1 | tee build/audit/lint.log || status=$?
+          if [ "$status" -ne 0 ]; then python3 tools/ci_annotations.py build/audit/lint.log; fi
+          exit "$status"
+      - name: Full native and debug APK build
+        id: apk
+        continue-on-error: true
+        run: |
+          status=0
+          gradle --no-daemon --stacktrace --console=plain assembleDebug 2>&1 | tee build/audit/apk.log || status=$?
+          if [ "$status" -ne 0 ]; then python3 tools/ci_annotations.py build/audit/apk.log; fi
+          exit "$status"
+      - name: Release APK and release lint
+        id: release
+        continue-on-error: true
+        run: |
+          status=0
+          gradle --no-daemon --stacktrace --console=plain assembleRelease lintRelease 2>&1 | tee build/audit/release.log || status=$?
+          if [ "$status" -ne 0 ]; then python3 tools/ci_annotations.py build/audit/release.log; fi
+          exit "$status"
+      - name: Verify actual test counts and APK contents
+        if: always()
+        id: outputs
+        continue-on-error: true
+        run: python3 tools/audit_android_outputs.py
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: android-audit-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            build/audit/
+            build/reports/
+            build/test-results/
+            build/outputs/apk/debug/*.apk
+            build/outputs/apk/release/*.apk
+      - name: Require every check to pass
+        if: always()
+        env:
+          PORTABLE: ${{ steps.portable.outcome }}
+          UNIT: ${{ steps.unit.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          APK: ${{ steps.apk.outcome }}
+          RELEASE: ${{ steps.release.outcome }}
+          OUTPUTS: ${{ steps.outputs.outcome }}
+        run: |
+          printf 'Portable: %s\nUnit: %s\nLint: %s\nAPK: %s\n' "$PORTABLE" "$UNIT" "$LINT" "$APK" | tee -a "$GITHUB_STEP_SUMMARY"
+          printf 'Release: %s\nOutput verification: %s\n' "$RELEASE" "$OUTPUTS" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$PORTABLE" = success && test "$UNIT" = success && test "$LINT" = success && test "$APK" = success && test "$RELEASE" = success && test "$OUTPUTS" = success

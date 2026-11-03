@@ -427,6 +427,12 @@ public class CameraUserService extends IAuxCamService.Stub {
         try {
             cm.openCamera(mCurrentCameraId, new DeviceStateCallback(this, colorPhysicalId), mCameraHandler);
             return;
+        } catch (SecurityException denied) {
+            // Shizuku privilege can disappear independently of the app permission.
+            // Report denial explicitly; never retry with different attribution.
+            Log.e(TAG, "Camera permission denied", denied);
+            notifyError("Camera permission denied: " + denied.getMessage());
+            return;
         } catch (Throwable t) {
             Log.e(TAG, "Failed to open Camera " + mCurrentCameraId, t);
             notifyError("Failed to open Camera " + mCurrentCameraId + ": " + t.getMessage());

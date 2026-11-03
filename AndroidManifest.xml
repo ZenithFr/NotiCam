@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Normal permission required by the soft vibrator fallback; no runtime prompt. -->
+    <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="moe.shizuku.manager.permission.API_V23" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
@@ -45,10 +47,9 @@
             android:exported="true"
             android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
-        <service
-            android:name=".CameraUserService"
-            android:exported="true"
-            android:process=":auxcam_service" />
+        <!-- CameraUserService is an IBinder instantiated by Shizuku's app_process,
+             not an android.app.Service. Registering it here permits an invalid
+             framework Service instantiation (ClassCastException). -->
 
         <service
             android:name=".probe.DepthProbeService"

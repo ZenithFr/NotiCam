@@ -403,7 +403,7 @@ public class DepthProbeService extends Service {
         Log.i(TAG, "[G-F PROBE] Camera 0 LENS_INFO_FOCUS_DISTANCE_CALIBRATION=" + c0Cal);
 
         if (runCombos && !"depth512".equalsIgnoreCase(sComboArg) && !"still_yuv".equalsIgnoreCase(sComboArg)) {
-            sCameraManager.openCamera("5", new CameraStateCb(true), sHandler);
+            openCamera5WithPermissionHandling(new CameraStateCb(true));
             return;
         }
 
@@ -436,7 +436,18 @@ public class DepthProbeService extends Service {
         }
 
         Log.i(TAG, "Opening Camera 5 with Color=1440x1080 YUV, Depth=" + depthW + "x" + depthH + " Y8, StillTest=" + isStillYuvTest);
-        sCameraManager.openCamera("5", new CameraStateCb(false), sHandler);
+        openCamera5WithPermissionHandling(new CameraStateCb(false));
+    }
+
+    private static void openCamera5WithPermissionHandling(CameraDevice.StateCallback callback)
+            throws CameraAccessException {
+        try {
+            sCameraManager.openCamera("5", callback, sHandler);
+        } catch (SecurityException denied) {
+            // The caller's finally block releases readers on a denied probe too.
+            Log.e(TAG, "Depth probe camera permission denied", denied);
+            throw denied;
+        }
     }
 
     private static void configureSession(CameraDevice camera) {
