@@ -8,8 +8,10 @@ part of the default capture path today.
 ## Latest controls / RAW / HDR status
 
 The top-left title is replaced by RAW; hold it for **3 seconds** for native
-12/50 MP choices and bounded frame counts. The mode switch is now a circular
-button beside the shutter. ISO/SHUTTER snap to stops, 50 MP no longer has an
+12/50 MP choices and bounded frame counts. Photo/Video is a labeled two-option
+switch with a travelling selection pill, and the gear opens a full-screen,
+searchable Settings page (grouped rows, switches and segmented choices) instead
+of the old bottom sheet. ISO/SHUTTER snap to stops, 50 MP no longer has an
 artificial manual-control ban, and WB has an approximate temperature slider.
 All sensor/RAW choices remain hardware-gated. **HDR merging and Ultra HDR export
 are still unimplemented**, not hidden settings. True camera-backdrop blur is also

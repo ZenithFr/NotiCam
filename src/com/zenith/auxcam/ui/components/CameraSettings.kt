@@ -1,187 +1,223 @@
 package com.zenith.auxcam.ui.components
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Icon
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Text
-import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import com.zenith.auxcam.CameraActions
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
 import com.zenith.auxcam.Resolution
-import com.zenith.auxcam.ui.effects.cameraGlass
 import com.zenith.auxcam.ui.icons.NotiIcons
 import com.zenith.auxcam.ui.theme.CameraColors
-import com.zenith.auxcam.ui.theme.CameraMotion
 import com.zenith.auxcam.ui.theme.CameraType
 
-/** Independently built, searchable controls: capture, portrait, aids and diagnostics.
- * Resource evidence supports this grouping; it is not a pixel-exact rendering of MereFrame.
+/**
+ * The grouped settings content rendered inside [SettingsPage].
+ *
+ * Every implemented control is a plain-language row. Search filters whole groups
+ * through [ControlSection.matches]; with an empty query every group is shown.
+ * Nothing here advertises unimplemented processing (HDR, night, astro, waveform).
  */
 @Composable
-fun CameraSettings(state: CameraUiState, actions: CameraActions, modifier: Modifier = Modifier) {
-    var section by remember { mutableStateOf(ControlSection.Capture) }
-    var query by remember { mutableStateOf("") }
-    val bodyScroll = rememberScrollState()
-    LaunchedEffect(section, query) { bodyScroll.scrollTo(0) }
-    Column(modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Camera controls", style = CameraType.Heading, color = CameraColors.Label)
-                Text(if (state.mode == CaptureMode.Video) "VIDEO · NATIVE FRAME" else if (state.raw) "RAW · ${state.rawFrames} FRAME${if (state.rawFrames == 1) "" else "S"}"
-                    else "PHOTO · JPEG 100", style = CameraType.Caption, color = CameraColors.LabelSecondary)
-            }
-            MatteIconButton(NotiIcons.Close, "Close camera controls", actions::onSettingsToggle)
+fun CameraSettings(
+    state: CameraUiState,
+    actions: CameraActions,
+    modifier: Modifier = Modifier,
+    query: String = "",
+) {
+    fun visible(section: ControlSection) = query.isBlank() || section.matches(query)
+    val photo = state.mode == CaptureMode.Photo
+    val captureEditable = state.sessionReady && !state.captureBusy && !state.videoRecording &&
+        !state.videoStarting && !state.previewTransitioning
+
+    Column(modifier) {
+        if (ControlSection.entries.none { visible(it) }) {
+            Text(
+                "No settings match “$query”.",
+                style = CameraType.RowBody, color = CameraColors.LabelTertiary,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
+            )
         }
-        BasicTextField(value = query, onValueChange = { query = it.take(80) }, singleLine = true,
-            textStyle = CameraType.Value.copy(color = CameraColors.Label),
-            cursorBrush = androidx.compose.ui.graphics.SolidColor(CameraColors.Label),
-            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                .cameraGlass(RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 14.dp)
-                .semantics { contentDescription = "Search camera controls" },
-            decorationBox = { input -> Box { if (query.isEmpty()) Text("Search controls", style = CameraType.Value,
-                color = CameraColors.LabelTertiary); input() } })
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            for (item in ControlSection.entries) TogglePill(item.label, section == item && query.isBlank(),
-                { section = item; query = "" })
-        }
-        Spacer(Modifier.height(16.dp))
-        // Only this body scrolls; search and section navigation remain reachable.
-        Column(Modifier.weight(1f, fill = false).verticalScroll(bodyScroll).padding(bottom = 24.dp)) {
-            fun visible(item: ControlSection) = if (query.isBlank()) section == item else item.matches(query)
-            if (ControlSection.entries.none { visible(it) }) Text("No matching implemented controls.",
-                style = CameraType.Caption, color = CameraColors.LabelSecondary)
-            if (visible(ControlSection.Capture)) {
-                Text("Output", style = CameraType.Heading, color = CameraColors.Label)
-                Text(if (state.raw) "${state.photoWidth} × ${state.photoHeight} · RAW_SENSOR → DNG"
-                    else if (state.mode == CaptureMode.Video) "Native-aspect AVC · ${state.videoTargetFps} fps target"
-                    else if (state.bokehActive) "${state.photoSizeLabel} · optional portrait composite · JPEG 100"
-                    else "${state.photoSizeLabel} · original sensor JPEG · quality 100",
-                    style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                Spacer(Modifier.height(12.dp))
-                if (state.mode == CaptureMode.Video) VideoProfileSettings(state, actions)
-                if (state.mode == CaptureMode.Photo) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TogglePill(if (state.timerSeconds == 0) "TIMER OFF" else "${state.timerSeconds}s TIMER", state.timerSeconds > 0,
-                            actions::onTimerCycle, Modifier.weight(1f))
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        TogglePill("FLASH · ${state.flash.name.uppercase()}", state.flash != FlashMode.Off,
-                            actions::onFlashClick, Modifier.weight(1f))
-                        if (!state.raw) TogglePill("SIZE · ${state.photoSizeLabel}", state.resolution == Resolution.High,
-                            actions::onResolutionToggle, Modifier.weight(1f))
-                    }
-                    Text(if (!state.rawCapabilityChecked) "Checking RAW metadata…" else if (state.supportsRaw)
-                        "RAW advertised · ${state.rawSensorWidth} × ${state.rawSensorHeight}. Session support is checked when opened."
-                        else "No eligible RAW_SENSOR stream within the capture payload budget. JPEG remains available.",
-                        style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                    Text("RAW size and frame count: hold the top-left RAW button for 1 second. HDR merge and Ultra HDR export are not implemented yet.",
-                        style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                }
-                Spacer(Modifier.height(20.dp))
-            }
-            if (visible(ControlSection.Portrait)) {
-                BokehModelSettings(state, actions)
-                // ── Optional portrait depth ────────────────────────────────
-                AnimatedVisibility(
-                    visible = state.apertureVisible,
-                    enter = fadeIn(tween(200)) + slideInVertically(
-                        animationSpec = CameraMotion.slide<IntOffset>(),
-                        initialOffsetY = { -it / 3 },
-                    ),
-                    exit = fadeOut(tween(120)) + slideOutVertically(
-                        animationSpec = tween<IntOffset>(140),
-                        targetOffsetY = { -it / 4 },
-                    ),
-                ) {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = NotiIcons.Aperture,
-                                contentDescription = "Aperture",
-                                tint = CameraColors.LabelSecondary,
-                                modifier = Modifier.size(16.dp),
-                            )
-                            Spacer(Modifier.width(7.dp))
-                            Text("DEPTH EFFECT", style = CameraType.Section, color = CameraColors.LabelTertiary)
-                            Spacer(Modifier.weight(1f))
-                            Text(state.fStopLabel, style = CameraType.Value, color = CameraColors.Label)
-                        }
-                        IosSlider(
-                            value = state.apertureFraction,
-                            valueRange = 0f..1f,
-                            onValueChange = { actions.onApertureChanged(fStopForFraction(it)) },
-                            modifier = Modifier.padding(top = 2.dp),
+
+        // ── Capture ────────────────────────────────────────────────────────
+        if (visible(ControlSection.Capture)) {
+            SettingsGroup(if (photo) "Capture" else "Video") {
+                if (photo) {
+                    SettingsChoiceRow(
+                        icon = NotiIcons.Aspect,
+                        title = "Photo size",
+                        subtitle = if (state.raw) "Set by the RAW size below"
+                            else "Largest native JPEG · quality 100",
+                        options = listOf("12 MP", "50 MP"),
+                        selectedIndex = if (state.resolution == Resolution.High) 1 else 0,
+                        onSelect = { index ->
+                            val wantHigh = index == 1
+                            if ((state.resolution == Resolution.High) != wantHigh) actions.onResolutionToggle()
+                        },
+                        enabled = captureEditable && !state.raw,
+                        optionEnabled = { index -> index == 0 || state.supportsHighResolution },
+                    )
+                    SettingsDivider()
+                    SettingsSwitchRow(
+                        icon = NotiIcons.Report,
+                        title = "RAW capture",
+                        subtitle = "Separate DNG files · never merged",
+                        checked = state.raw,
+                        onToggle = actions::onRawToggle,
+                        enabled = captureEditable,
+                    )
+                    if (state.raw) {
+                        SettingsDivider()
+                        SettingsChoiceRow(
+                            icon = NotiIcons.Aspect,
+                            title = "RAW size",
+                            subtitle = if (!state.rawCapabilityChecked) "Checking RAW metadata…"
+                                else "${state.rawSensorWidth} × ${state.rawSensorHeight} sensor",
+                            options = listOf("12 MP", "50 MP"),
+                            selectedIndex = if (state.resolution == Resolution.High) 1 else 0,
+                            onSelect = { actions.onRawResolutionSelected(it == 1) },
+                            enabled = state.rawCapabilityChecked,
+                            optionEnabled = { index ->
+                                if (index == 0) state.rawStandardWidth > 0 else state.rawHighWidth > 0
+                            },
                         )
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            Text("1.4", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                            Spacer(Modifier.weight(1f))
-                            Text("2.8", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                            Spacer(Modifier.weight(1f))
-                            Text("5.6", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                            Spacer(Modifier.weight(1f))
-                            Text("11", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                            Spacer(Modifier.weight(1f))
-                            Text("16", style = CameraType.Caption, color = CameraColors.LabelQuaternary)
-                        }
-                        Spacer(Modifier.height(14.dp))
+                        SettingsDivider()
+                        SettingsChoiceRow(
+                            icon = NotiIcons.FrameRate,
+                            title = "RAW frames",
+                            subtitle = "Bounded burst · 128 MiB payload limit",
+                            options = (1..state.maxRawFrames.coerceAtLeast(1)).map { "$it" },
+                            selectedIndex = (state.rawFrames - 1).coerceAtLeast(0),
+                            onSelect = { actions.onRawFramesSelected(it + 1) },
+                            enabled = state.supportsRaw,
+                        )
+                    }
+                    SettingsDivider()
+                    SettingsRow(
+                        icon = NotiIcons.Timer,
+                        title = "Self-timer",
+                        subtitle = "Delay before the shutter fires",
+                        enabled = captureEditable,
+                        onClick = actions::onTimerCycle,
+                        trailing = { SettingsValue(if (state.timerSeconds == 0) "Off" else "${state.timerSeconds}s") },
+                    )
+                    SettingsDivider()
+                    SettingsRow(
+                        icon = when (state.flash) {
+                            FlashMode.Off -> NotiIcons.FlashOff
+                            FlashMode.Auto -> NotiIcons.FlashAuto
+                            FlashMode.On -> NotiIcons.FlashOn
+                        },
+                        title = "Flash",
+                        subtitle = "Tap to cycle off, auto, on",
+                        enabled = captureEditable && !state.raw,
+                        onClick = actions::onFlashClick,
+                        trailing = { SettingsValue(state.flash.name) },
+                    )
+                    SettingsNote(
+                        "RAW size and frame count: hold the top-left RAW button for 1 second. " +
+                            "HDR merge and Ultra HDR export are not implemented yet.",
+                    )
+                } else {
+                    VideoProfileSettings(state, actions)
+                }
+            }
+        }
+
+        // ── Portrait ───────────────────────────────────────────────────────
+        if (photo && visible(ControlSection.Portrait)) {
+            SettingsGroup("Portrait") {
+                BokehModelSettings(state, actions)
+                if (state.apertureVisible) {
+                    SettingsDivider()
+                    Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        Text("Aperture · ${state.fStopLabel}", style = CameraType.RowTitle, color = CameraColors.Label)
+                        IosSlider(
+                            value = state.apertureFraction, valueRange = 0f..1f,
+                            onValueChange = { actions.onApertureChanged(fStopForFraction(it)) },
+                        )
                     }
                 }
-
             }
-            if (visible(ControlSection.Aids)) {
-                TogglePill("GRID", state.grid, actions::onGridToggle, Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
-                TogglePill(label = "FRAMING GUIDE · ${state.framingGuide.label}", active = state.grid,
-                    onClick = actions::onFramingGuideCycle, modifier = Modifier.fillMaxWidth())
-                Text("Tap to cycle guides. GRID switches them off. Guides never appear in saved files.",
-                    style = CameraType.Caption, color = CameraColors.LabelSecondary)
+        }
 
-                Spacer(Modifier.height(22.dp))
-                Text("Viewfinder", style = CameraType.Heading, color = CameraColors.Label)
-                Text("${state.previewWidth} × ${state.previewHeight} · ${state.previewTargetFps} fps target · ${state.previewMeasuredFps.toInt()} rendered",
-                    style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                Text(state.previewFallback, style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                Text("Still resolution and original JPEG quality are independent of this preview.",
-                    style = CameraType.Caption, color = CameraColors.LabelSecondary)
-            }
-            if (visible(ControlSection.System)) {
-                Text("Shizuku camera backend", style = CameraType.Heading, color = CameraColors.Label)
-                Spacer(Modifier.height(6.dp))
-                Text("Report service UID, permissions and exposed camera streams. Shell access does not guarantee OEM-only modes.",
-                    style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                Spacer(Modifier.height(12.dp))
-                TogglePill(label = "CAMERA REPORT", active = false, onClick = actions::onCameraReport,
-                    modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = state.telemetry,
-                    style = CameraType.Telemetry,
-                    color = CameraColors.LabelTertiary,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+        // ── Viewfinder aids ────────────────────────────────────────────────
+        if (visible(ControlSection.Aids)) {
+            SettingsGroup("Viewfinder") {
+                SettingsSwitchRow(
+                    icon = NotiIcons.Grid,
+                    title = "Grid & guides",
+                    subtitle = "Composition overlay · never saved",
+                    checked = state.grid,
+                    onToggle = actions::onGridToggle,
+                )
+                SettingsDivider()
+                SettingsRow(
+                    icon = NotiIcons.Focus,
+                    title = "Framing guide",
+                    subtitle = "Tap to cycle the overlay shape",
+                    enabled = state.grid,
+                    onClick = actions::onFramingGuideCycle,
+                    trailing = { SettingsValue(state.framingGuide.label) },
+                )
+                SettingsDivider()
+                SettingsRow(
+                    icon = NotiIcons.Aspect,
+                    title = "Preview",
+                    subtitle = "${state.previewWidth} × ${state.previewHeight} · ${state.previewTargetFps} fps target",
+                    trailing = { SettingsValue("${state.previewMeasuredFps.toInt()} fps", showChevron = false) },
+                )
+                SettingsNote(
+                    "${state.previewFallback} Still resolution and original JPEG quality are independent of this preview.",
                 )
             }
         }
+
+        // ── System / diagnostics ───────────────────────────────────────────
+        if (visible(ControlSection.System)) {
+            SettingsGroup("System") {
+                SettingsRow(
+                    icon = NotiIcons.Backend,
+                    title = "Shizuku camera backend",
+                    subtitle = "Privileged Camera2 access · not root",
+                    trailing = {
+                        SettingsValue(if (state.sessionReady) "Connected" else "Waiting", showChevron = false)
+                    },
+                )
+                SettingsDivider()
+                SettingsRow(
+                    icon = NotiIcons.Report,
+                    title = "Camera report",
+                    subtitle = "Share capabilities, permissions and streams",
+                    onClick = actions::onCameraReport,
+                    trailing = { SettingsValue("", showChevron = true) },
+                )
+                if (state.telemetry.isNotBlank()) {
+                    SettingsDivider()
+                    Text(
+                        text = state.telemetry, style = CameraType.Telemetry,
+                        color = CameraColors.LabelQuaternary, maxLines = 3, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    )
+                }
+            }
+        }
     }
+}
+
+/** A quiet explanatory note inside a settings card. */
+@Composable
+private fun SettingsNote(text: String) {
+    Text(
+        text = text, style = CameraType.Caption, color = CameraColors.LabelTertiary,
+        modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 12.dp),
+    )
+    Spacer(Modifier.height(0.dp))
 }

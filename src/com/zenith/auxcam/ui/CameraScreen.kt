@@ -11,6 +11,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
@@ -31,9 +33,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -65,8 +65,8 @@ import com.zenith.auxcam.ui.components.LensBlend
 import com.zenith.auxcam.ui.components.BottomBar
 import com.zenith.auxcam.ui.components.CaptureControlRail
 import com.zenith.auxcam.ui.components.TogglePill
-import com.zenith.auxcam.ui.components.CameraSettings
 import com.zenith.auxcam.ui.components.MatteIconButton
+import com.zenith.auxcam.ui.components.SettingsPage
 import com.zenith.auxcam.ui.components.QuickApertureRow
 import com.zenith.auxcam.ui.components.TopBar
 import com.zenith.auxcam.ui.components.Viewfinder
@@ -256,18 +256,14 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
         }
         GalleryFlight(pulse = state.galleryPulse, thumbnail = state.lastThumbnail,
             from = shutterCenter, to = galleryCenter)
-    }
-    if (state.settingsOpen) {
-        ModalBottomSheet(
-            onDismissRequest = actions::onSettingsToggle,
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-            containerColor = CameraColors.MatteScrim,
-            contentColor = Color.White,
-            shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
+        // Full-screen settings page. An overlay: it never resizes the native
+        // preview, and system back (handled above) returns to the camera.
+        AnimatedVisibility(
+            visible = state.settingsOpen,
+            enter = slideInHorizontally(animationSpec = CameraMotion.slide()) { it } + fadeIn(tween(200)),
+            exit = slideOutHorizontally(animationSpec = tween(220)) { it } + fadeOut(tween(180)),
         ) {
-            CameraSettings(state = state, actions = actions,
-                modifier = Modifier.fillMaxWidth().heightIn(max = 560.dp)
-                    .padding(bottom = 16.dp))
+            SettingsPage(state = state, actions = actions, modifier = Modifier.fillMaxSize())
         }
     }
     if (state.galleryOpen) GalleryScreen(onClose = actions::onGalleryClose)

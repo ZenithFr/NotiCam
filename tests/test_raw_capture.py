@@ -92,7 +92,11 @@ class RawCaptureContracts(unittest.TestCase):
         sections = (SRC / "ui/components/ControlSection.kt").read_text()
         for label in ("Capture", "Portrait", "Aids", "System"):
             self.assertIn(f'{label}("{label}"', sections)
-        for required in ("BasicTextField", "Search camera controls", "BokehModelSettings(state, actions)", "actions::onCameraReport", "actions::onFramingGuideCycle", "actions::onTimerCycle"):
+        # Search lives in the full-screen page shell; the grouped controls stay in CameraSettings.
+        page = (SRC / "ui/components/SettingsPage.kt").read_text()
+        for required in ("BasicTextField", "Search settings", "fun SettingsPage("):
+            self.assertIn(required, page)
+        for required in ("BokehModelSettings(state, actions)", "actions::onCameraReport", "actions::onFramingGuideCycle", "actions::onTimerCycle"):
             self.assertIn(required, self.settings)
         self.assertNotIn(".border(", self.settings)
 
