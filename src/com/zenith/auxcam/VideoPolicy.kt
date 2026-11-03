@@ -20,6 +20,15 @@ object VideoPolicy {
     @JvmStatic fun fixedRate(lower: Int, upper: Int, fps: Int): Boolean = lower == fps && upper == fps
 
 
+    /** Validate the saved container, not just the recorder's requested profile.
+     * Capture-rate metadata is optional; contradictory metadata is not ignored.
+     * This is not a measurement of sustained sensor/encoder frame timing. */
+    @JvmStatic fun matchesRecordedOutput(expectedWidth: Int, expectedHeight: Int, expectedFps: Int,
+                                        width: Int, height: Int, captureFps: Double?): Boolean =
+        expectedWidth > 0 && expectedHeight > 0 && width > 0 && height > 0 && expectedFps in listOf(24, 30, 60) &&
+            CaptureOutput.matches(width, height, expectedWidth, expectedHeight) &&
+            (captureFps == null || (captureFps.isFinite() && kotlin.math.abs(captureFps - expectedFps) <= .1))
+
     @JvmStatic
     fun matchesSensor(width: Int, height: Int, sensorWidth: Int, sensorHeight: Int): Boolean {
         if (width <= 0 || height <= 0 || sensorWidth <= 0 || sensorHeight <= 0) return false

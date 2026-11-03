@@ -22,11 +22,18 @@ class VideoCapture(private val context: Context) {
     private var descriptor: ParcelFileDescriptor? = null
     private var uri: Uri? = null
     private var started = false
+    private var requestedWidth = 0
+    private var requestedHeight = 0
+    private var requestedFps = 0
     val surface: Surface get() = checkNotNull(recorder).surface
 
     @Suppress("DEPRECATION")
     fun prepare(width: Int, height: Int, audio: Boolean, orientation: Int, targetFps: Int = VideoPolicy.FPS, onFailure: () -> Unit, onLimit: () -> Unit) {
         check(recorder == null)
+        require(width > 0 && height > 0) { "Invalid video dimensions" }
+        requestedWidth = width
+        requestedHeight = height
+        requestedFps = targetFps
         require(targetFps in listOf(24, 30, 60)) { "Unsupported video rate" }
         val stamp = SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US).format(Date())
         val values = ContentValues().apply {
@@ -105,11 +112,19 @@ class VideoCapture(private val context: Context) {
                     metadata.setDataSource(context, destination)
                     val duration = metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0
                     check(duration > 0) { "Recorder returned an empty clip" }
+                    val width = metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                    val height = metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                    val captureFps = metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CAPTURE_FRAMERATE)?.toDoubleOrNull()
+                    // Positive duration alone does not establish the selected resolution/rate.
+                    // Reject a HAL/recorder substitute before making the pending row visible.
+                    check(VideoPolicy.matchesRecordedOutput(requestedWidth, requestedHeight, requestedFps, width, height, captureFps)) {
+                        "Recorder output does not match the requested profile"
+                    }
                     val complete = ContentValues().apply {
                         put(MediaStore.Video.Media.IS_PENDING, 0)
                         put(MediaStore.Video.Media.DURATION, duration)
-                        put(MediaStore.Video.Media.WIDTH, metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull())
-                        put(MediaStore.Video.Media.HEIGHT, metadata.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull())
+                        put(MediaStore.Video.Media.WIDTH, width)
+                        put(MediaStore.Video.Media.HEIGHT, height)
                     }
                     check(context.contentResolver.update(destination, complete, null, null) > 0)
                     return destination

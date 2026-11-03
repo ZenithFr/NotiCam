@@ -20,3 +20,9 @@ class AuditRegressions(unittest.TestCase):
     def test_raw_sharing_uses_the_container_mime_policy(self):
         gallery = (SRC / 'ui/GalleryScreen.kt').read_text()
         self.assertIn('type = CaptureOutput.shareMimeType(current.video, current.name)', gallery)
+
+    def test_recorded_profile_is_checked_before_publishing(self):
+        video = (SRC / 'VideoCapture.kt').read_text().split('fun finish(save:', 1)[1]
+        self.assertIn('METADATA_KEY_CAPTURE_FRAMERATE', video)
+        self.assertLess(video.index('VideoPolicy.matchesRecordedOutput('), video.index('IS_PENDING, 0'))
+        self.assertIn('contentResolver.delete(destination', video)
