@@ -53,7 +53,7 @@ fun CameraSettings(
                     SettingsChoiceRow(
                         icon = NotiIcons.Aspect,
                         title = "Photo size",
-                        subtitle = if (state.raw) "Set by the RAW size below"
+                        subtitle = if (state.raw) "Set by the open-gate readout below"
                             else "Largest native JPEG · quality 100",
                         options = listOf("12 MP", "50 MP"),
                         selectedIndex = if (state.resolution == Resolution.High) 1 else 0,
@@ -67,8 +67,8 @@ fun CameraSettings(
                     SettingsDivider()
                     SettingsSwitchRow(
                         icon = NotiIcons.Report,
-                        title = "RAW capture",
-                        subtitle = "Separate DNG files · never merged",
+                        title = "Open gate RAW",
+                        subtitle = "Full-sensor DNG readout · never merged",
                         checked = state.raw,
                         onToggle = actions::onRawToggle,
                         enabled = captureEditable,
@@ -77,10 +77,11 @@ fun CameraSettings(
                         SettingsDivider()
                         SettingsChoiceRow(
                             icon = NotiIcons.Aspect,
-                            title = "RAW size",
+                            title = "Sensor readout",
                             subtitle = if (!state.rawCapabilityChecked) "Checking RAW metadata…"
-                                else "${state.rawSensorWidth} × ${state.rawSensorHeight} sensor",
-                            options = listOf("12 MP", "50 MP"),
+                                else "${state.rawSensorWidth} × ${state.rawSensorHeight} · " +
+                                    (if (state.resolution == Resolution.High) "open gate, full field" else "binned, full field"),
+                            options = listOf("Binned", "Open gate"),
                             selectedIndex = if (state.resolution == Resolution.High) 1 else 0,
                             onSelect = { actions.onRawResolutionSelected(it == 1) },
                             enabled = state.rawCapabilityChecked,

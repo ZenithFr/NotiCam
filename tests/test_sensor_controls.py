@@ -14,7 +14,7 @@ class SensorControls(unittest.TestCase):
         self.assertIn('int awbMode) = 18;', aidl)
         self.assertIn('destroy() = 16777114;', aidl)
         controller = (SRC / 'CameraController.kt').read_text()
-        self.assertIn('.version(11)', controller)
+        self.assertIn('.version(12)', controller)
         callback = (SRC / 'IAuxCamCallback.aidl').read_text()
         self.assertIn('onSensorControlsResult(int token, in long[] selection, String error)', callback)
         self.assertIn('request == sensorControlToken', controller)
