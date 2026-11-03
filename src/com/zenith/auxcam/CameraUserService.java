@@ -390,7 +390,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         mRequestedZoom = mZoomRatio;
         mPreviewMaxFps = videoMode && recordingSurface != null ? previewMaxFps : (previewMaxFps >= 60 ? 60 : 30);
         mVideoRecordFps = previewMaxFps;
-        mHighResolutionStill = !videoMode && stillFormat == ImageFormat.JPEG && (long) stillW * stillH >= 45_000_000L;
+        mHighResolutionStill = !videoMode && (stillFormat == ImageFormat.JPEG || stillFormat == ImageFormat.YUV_420_888) && (long) stillW * stillH >= 45_000_000L;
 
         mColorW = colorW;
         mColorH = colorH;
@@ -404,12 +404,12 @@ public class CameraUserService extends IAuxCamService.Stub {
         mAfLocked = false;
         mManualFocusActive = false;
         mCurrentCameraId = "2".equals(colorPhysicalId) || "3".equals(colorPhysicalId) ? colorPhysicalId :
-                (videoMode || stillFormat == ImageFormat.JPEG || stillFormat == ImageFormat.RAW_SENSOR ? "0" : CAMERA_ID);
+                (videoMode || stillFormat == ImageFormat.JPEG || stillFormat == ImageFormat.RAW_SENSOR || stillFormat == ImageFormat.YUV_420_888 ? "0" : CAMERA_ID);
 
         if (mHighResolutionStill) {
             int[] size = getHighResolutionJpegSize(colorPhysicalId);
             if (size.length != 3 || Math.abs(size[0] - mStillW) > 32 || size[1] != mStillH) {
-                notifyError("Requested 50 MP JPEG size is not advertised by camera " + colorPhysicalId);
+                notifyError("Requested 50 MP still size is not advertised by camera " + colorPhysicalId);
                 return;
             }
             mStillW = size[0];
@@ -1374,8 +1374,8 @@ public class CameraUserService extends IAuxCamService.Stub {
             refreshRepeatingRequest();
             CaptureRequest.Builder stillBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE);
             stillBuilder.addTarget(mStillSurface);
-            stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl && !mManualExposureEnabled && mStillFormat != ImageFormat.JPEG);
-            if (mStillFormat == ImageFormat.JPEG) {
+            stillBuilder.set(CaptureRequest.CONTROL_ENABLE_ZSL, enableZsl && !mManualExposureEnabled && mStillFormat != ImageFormat.JPEG && !mHighResolutionStill);
+            if (mStillFormat == ImageFormat.JPEG || mStillFormat == ImageFormat.YUV_420_888) {
                 if (android.os.Build.VERSION.SDK_INT >= 31 && (mHighResolutionTarget == null || !"Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source))) {
                     stillBuilder.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
                 }
@@ -1384,8 +1384,10 @@ public class CameraUserService extends IAuxCamService.Stub {
                         stillBuilder.set(new CaptureRequest.Key<Integer>("com.nothing.camera.remosaic.enable", Integer.class), mRemosaicStatus == 1 ? 1 : 0);
                     } catch (Throwable ignored) {}
                 }
-                stillBuilder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
-                stillBuilder.set(CaptureRequest.JPEG_ORIENTATION, mSensorOrientation);
+                if (mStillFormat == ImageFormat.JPEG) {
+                    stillBuilder.set(CaptureRequest.JPEG_QUALITY, (byte) 100);
+                    stillBuilder.set(CaptureRequest.JPEG_ORIENTATION, mSensorOrientation);
+                }
             }
             stillBuilder.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO);
             if (mManualFocusActive) {

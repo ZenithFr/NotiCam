@@ -1077,8 +1077,8 @@ class CameraController(
             return
         }
         if (state.resolution == Resolution.High) {
-            Toast.makeText(activity, "50 MP stream unavailable. Returning to 12 MP.", Toast.LENGTH_LONG).show()
-            finishCapture("50 MP stream rejected")
+            Toast.makeText(activity, "8K (50 MP) stream unavailable. Returning to 4K.", Toast.LENGTH_LONG).show()
+            finishCapture("8K stream rejected")
             update { it.copy(resolution = Resolution.Standard, bokehEnabled = false, sessionReady = false) }
             rebuildStillSession("50 MP unavailable for this stream combination. Restoring 12 MP…")
             return
@@ -1705,23 +1705,54 @@ class CameraController(
             val vPixelStride = vPlane.pixelStride
 
             var destOffset = 0
-            for (r in 0 until height) {
-                yBuf.position(r * yRowStride)
-                yBuf.get(yuvBytes, destOffset, width)
-                destOffset += width
+            if (yRowStride == width) {
+                yBuf.position(0)
+                yBuf.get(yuvBytes, 0, width * height)
+                destOffset = width * height
+            } else {
+                for (r in 0 until height) {
+                    yBuf.position(r * yRowStride)
+                    yBuf.get(yuvBytes, destOffset, width)
+                    destOffset += width
+                }
             }
             val halfW = width / 2
             val halfH = height / 2
-            for (r in 0 until halfH) {
-                val rowStart = r * uRowStride
-                for (c in 0 until halfW) {
-                    yuvBytes[destOffset++] = uBuf.get(rowStart + c * uPixelStride)
+            if (uPixelStride == 1 && vPixelStride == 1 && uRowStride == halfW && vRowStride == halfW) {
+                uBuf.position(0)
+                uBuf.get(yuvBytes, destOffset, halfW * halfH)
+                destOffset += halfW * halfH
+                vBuf.position(0)
+                vBuf.get(yuvBytes, destOffset, halfW * halfH)
+            } else if (uPixelStride == 1 && vPixelStride == 1) {
+                for (r in 0 until halfH) {
+                    uBuf.position(r * uRowStride)
+                    uBuf.get(yuvBytes, destOffset, halfW)
+                    destOffset += halfW
                 }
-            }
-            for (r in 0 until halfH) {
-                val rowStart = r * vRowStride
-                for (c in 0 until halfW) {
-                    yuvBytes[destOffset++] = vBuf.get(rowStart + c * vPixelStride)
+                for (r in 0 until halfH) {
+                    vBuf.position(r * vRowStride)
+                    vBuf.get(yuvBytes, destOffset, halfW)
+                    destOffset += halfW
+                }
+            } else {
+                val rowBytes = ByteArray(uRowStride)
+                for (r in 0 until halfH) {
+                    uBuf.position(r * uRowStride)
+                    val toRead = minOf(uRowStride, uBuf.remaining())
+                    uBuf.get(rowBytes, 0, toRead)
+                    for (c in 0 until halfW) {
+                        yuvBytes[destOffset++] = rowBytes[c * uPixelStride]
+                    }
+                }
+                val vRowBytes = ByteArray(vRowStride)
+                for (r in 0 until halfH) {
+                    vBuf.position(r * vRowStride)
+                    val toRead = minOf(vRowStride, vBuf.remaining())
+                    vBuf.get(vRowBytes, 0, toRead)
+                    for (c in 0 until halfW) {
+                        yuvBytes[destOffset++] = vRowBytes[c * vPixelStride]
+                    }
                 }
             }
             io.execute { saveCameraYuv(yuvBytes, width, height, frozen.resolution == Resolution.High) }
@@ -2543,13 +2574,13 @@ class CameraController(
         }
         if (state.resolution == Resolution.High) {
             update { it.copy(resolution = Resolution.Standard) }
-            rebuildStillSession("Switching to 12 MP…")
+            rebuildStillSession("Switching to 4K…")
         } else if (!state.highResolutionChecked) {
             refreshHighResolutionCapability()
-            update { it.copy(status = "Checking 50 MP paths…") }
+            update { it.copy(status = "Checking 8K paths…") }
         } else if (!state.supportsHighResolution) {
             refreshHighResolutionCapability()
-            Toast.makeText(activity, "50 MP is not supported on this lens.", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "8K (50 MP) is not supported on this lens.", Toast.LENGTH_SHORT).show()
         } else {
             // Full-resolution remosaic is supported on 1x ("0") and 2x telephoto ("3").
             val targetLens = if (currentLens == "3") "3" else "0"
@@ -2558,8 +2589,8 @@ class CameraController(
             onTele = targetLens == "3"
             lastSentZoom = targetZoom
             update { it.copy(resolution = Resolution.High, zoom = targetZoom, bokehEnabled = false, raw = false) }
-            try { service?.setZoom(targetZoom) } catch (e: RemoteException) { Log.w(TAG, "50 MP zoom reset", e) }
-            rebuildStillSession("Opening native 50 MP capture…")
+            try { service?.setZoom(targetZoom) } catch (e: RemoteException) { Log.w(TAG, "8K zoom reset", e) }
+            rebuildStillSession("Opening native 8K capture…")
         }
         haptic()
     }

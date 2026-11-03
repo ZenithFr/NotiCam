@@ -12,10 +12,10 @@ enum class CaptureMode(val label: String) {
 /** Flash request state, mapped 1:1 onto `CONTROL_AE_MODE`. */
 enum class FlashMode { Off, Auto, On }
 
-/** Output resolution. `High` is the 50 MP binned-off mode of the CMF Phone 2 Pro. */
+/** Output resolution. `High` is the 8K (50 MP) remosaic mode of the CMF Phone 2 Pro; `Standard` is 4K. */
 enum class Resolution(val label: String, val longEdge: Int) {
-    Standard("12MP", 4080),
-    High("50MP", 8160);
+    Standard("4K", 4080),
+    High("8K", 8160);
 
     fun next(): Resolution = if (this == Standard) High else Standard
 }
@@ -190,7 +190,8 @@ data class CameraUiState(
     val photoSizeLabel: String
         get() {
             val pixels = photoWidth.toLong() * photoHeight
-            return if (pixels in 11_000_000L..14_000_000L) "12 MP"
+            return if (pixels in 11_000_000L..14_000_000L) "4K"
+                else if (pixels >= 45_000_000L) "8K"
                 else String.format(java.util.Locale.US, "%.0f MP", pixels.toDouble() / 1_000_000)
         }
 

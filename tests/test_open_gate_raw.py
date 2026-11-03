@@ -95,6 +95,21 @@ class OpenGateRaw(unittest.TestCase):
         self.assertIn("receiveCameraYuv", self.controller)
         self.assertIn("saveCameraYuv", self.controller)
 
+    def test_yuv_high_resolution_remosaic_enabled(self):
+        service = (SRC / "CameraUserService.java").read_text()
+        self.assertIn("(stillFormat == ImageFormat.JPEG || stillFormat == ImageFormat.YUV_420_888) && (long) stillW * stillH >= 45_000_000L", service)
+        self.assertIn("fmt == 35 || fmt == ImageFormat.YUV_420_888", (SRC / "CameraCapabilities.java").read_text())
+
+    def test_4k_8k_picture_resolution_toggle(self):
+        settings = (SRC / "ui/components/CameraSettings.kt").read_text()
+        state = (SRC / "CameraUiState.kt").read_text()
+        controls = (SRC / "ui/components/Controls.kt").read_text()
+        self.assertIn('title = "Picture resolution"', settings)
+        self.assertIn('options = listOf("4K", "8K")', settings)
+        self.assertIn('Standard("4K", 4080)', state)
+        self.assertIn('High("8K", 8160)', state)
+        self.assertIn('val resPrefix = if (state.resolution == Resolution.High) "8K" else "4K"', controls)
+
 
 if __name__ == "__main__":
     unittest.main()

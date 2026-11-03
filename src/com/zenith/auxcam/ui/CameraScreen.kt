@@ -137,9 +137,9 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                         label = when {
                             state.videoRecording -> String.format(java.util.Locale.US, "● %02d:%02d", state.videoElapsedSeconds / 60, state.videoElapsedSeconds % 60)
                             state.mode == CaptureMode.Video -> if (state.videoWidth > 0) "VIDEO  ·  ${state.videoWidth} × ${state.videoHeight}" else "VIDEO  ·  NATIVE FRAME"
-                            state.raw -> "${if (state.resolution == Resolution.High) "50" else "12"} MP RAW  ·  ${String.format(java.util.Locale.US, "%.1f×", state.zoom)}"
+                            state.raw -> "${if (state.resolution == Resolution.High) "Open Gate" else "Binned"} RAW  ·  ${String.format(java.util.Locale.US, "%.1f×", state.zoom)}"
                             state.bokehActive -> "PORTRAIT  ${state.fStopLabel}"
-                            state.resolution == Resolution.High -> if (state.zoom >= 2f) "50 MP  ·  2×" else "50 MP  ·  1×"
+                            state.resolution == Resolution.High -> if (state.zoom >= 2f) "8K  ·  2×" else "8K  ·  1×"
                             else -> "${state.photoSizeLabel}  ·  ${String.format(java.util.Locale.US, "%.1f×", state.zoom)}"
                         },
                         modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),

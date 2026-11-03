@@ -78,11 +78,11 @@ fun CameraSettings(
                     SettingsDivider()
                     SettingsChoiceRow(
                         icon = NotiIcons.Aspect,
-                        title = "Photo size",
-                        subtitle = if (state.raw) "Set by the open-gate readout below"
-                            else if (state.captureFormat == CaptureFormat.Yuv) "Uncompressed YUV 4:2:0 frame"
-                            else "Largest native JPEG · quality 100",
-                        options = listOf("12 MP", "50 MP"),
+                        title = "Picture resolution",
+                        subtitle = if (state.raw) "RAW sensor readout: 4K full sensor (${state.rawSensorWidth}×${state.rawSensorHeight})"
+                            else if (state.captureFormat == CaptureFormat.Yuv) (if (state.resolution == Resolution.High) "8K uncompressed YUV 4:2:0 (${state.highResolutionWidth}×${state.highResolutionHeight})" else "4K uncompressed YUV 4:2:0 (${state.photoWidth}×${state.photoHeight})")
+                            else (if (state.resolution == Resolution.High) "8K full-sensor remosaic JPEG (50 MP)" else "4K native JPEG (12 MP)"),
+                        options = listOf("4K", "8K"),
                         selectedIndex = if (state.resolution == Resolution.High) 1 else 0,
                         onSelect = { index ->
                             val wantHigh = index == 1

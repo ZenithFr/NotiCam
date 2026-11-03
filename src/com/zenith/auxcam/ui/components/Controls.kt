@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.zenith.auxcam.CameraActions
 import com.zenith.auxcam.CameraController
+import com.zenith.auxcam.CaptureFormat
 import com.zenith.auxcam.CameraUiState
 import com.zenith.auxcam.CaptureMode
 import com.zenith.auxcam.FlashMode
@@ -644,7 +645,10 @@ fun TopBar(
         Row(Modifier.width(if (state.mode == CaptureMode.Video) 128.dp else 80.dp).heightIn(min = CameraSpacing.touch), verticalAlignment = Alignment.CenterVertically) {
             val photo = state.mode == CaptureMode.Photo
             val label = if (photo) {
-                if (state.raw) "${if (state.resolution == Resolution.High) "50" else "12"} RAW" else if (state.resolution == Resolution.High) "50 MP" else state.photoSizeLabel
+                val resPrefix = if (state.resolution == Resolution.High) "8K" else "4K"
+                if (state.raw) "$resPrefix RAW"
+                else if (state.captureFormat == CaptureFormat.Yuv) "$resPrefix YUV"
+                else resPrefix
             } else when {
                 state.videoQuality == com.zenith.auxcam.VideoPolicy.UHD -> "4K"
                 else -> "1080"
