@@ -382,7 +382,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         mRequestedZoom = mZoomRatio;
         mPreviewMaxFps = videoMode && recordingSurface != null ? previewMaxFps : (previewMaxFps >= 60 ? 60 : 30);
         mVideoRecordFps = previewMaxFps;
-        mHighResolutionStill = !videoMode && stillFormat == ImageFormat.JPEG && (long) stillW * stillH >= 45_000_000L;
+        mHighResolutionStill = !videoMode && ((stillFormat == ImageFormat.JPEG) || (stillFormat == ImageFormat.RAW_SENSOR)) && (long) stillW * stillH >= 45_000_000L;
 
         mColorW = colorW;
         mColorH = colorH;
@@ -400,15 +400,23 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         if (mHighResolutionStill) {
             int[] size = getHighResolutionJpegSize(colorPhysicalId);
-            if (size.length != 3 || Math.abs(size[0] - mStillW) > 32 || size[1] != mStillH) {
-                notifyError("Requested 50 MP JPEG size is not advertised by camera " + colorPhysicalId);
-                return;
+            if (size.length == 3) {
+                if (stillFormat == ImageFormat.JPEG && (Math.abs(size[0] - mStillW) > 32 || size[1] != mStillH)) {
+                    notifyError("Requested 50 MP JPEG size is not advertised by camera " + colorPhysicalId);
+                    return;
+                }
+                if (stillFormat == ImageFormat.JPEG) {
+                    mStillW = size[0];
+                    mStillH = size[1];
+                }
+                mStillPixelMode = size[2];
+                if (mHighResolutionTarget != null) {
+                    mCurrentCameraId = mHighResolutionTarget.cameraId;
+                    Log.i(TAG, "50 MP path: " + mCurrentCameraId + " / " + mHighResolutionTarget.source);
+                }
+            } else {
+                mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION;
             }
-            mStillW = size[0];
-            mStillH = size[1];
-            mStillPixelMode = size[2];
-            mCurrentCameraId = mHighResolutionTarget.cameraId;
-            Log.i(TAG, "50 MP path: " + mCurrentCameraId + " / " + mHighResolutionTarget.source);
         } else {
             mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
         }
@@ -641,9 +649,11 @@ public class CameraUserService extends IAuxCamService.Stub {
                 Range<Integer> exact = CameraCapabilities.recordingRange(cm, mCurrentCameraId, mVideoRecordFps);
                 long duration = chars.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                         .getOutputMinFrameDuration(ImageFormat.YUV_420_888, new Size(mColorW, mColorH));
-                if (exact == null || duration <= 0 || duration > 1_000_000_000L / mVideoRecordFps + 1)
-                    throw new IllegalStateException("Requested video FPS unsupported by combined preview session");
-                mPreviewFpsRange = exact;
+                if (exact != null) {
+                    mPreviewFpsRange = exact;
+                } else if (duration <= 0 || duration > 1_000_000_000L / mVideoRecordFps + 1) {
+                    if (mPreviewFpsRange == null) throw new IllegalStateException("Requested video FPS unsupported by combined preview session");
+                }
             }
             if (mPreviewFpsRange == null) throw new IllegalStateException("No advertised FPS range for the preview stream");
             Log.i(TAG, "PREVIEW_TARGET: " + mColorW + "x" + mColorH + " " + mPreviewFpsRange + " (still " + mStillW + "x" + mStillH + " unchanged)");
@@ -1202,7 +1212,11 @@ public class CameraUserService extends IAuxCamService.Stub {
                 if (mAfLocked) b.set(CaptureRequest.CONTROL_AE_LOCK, true);
                 if (mAfRegion != null) b.set(CaptureRequest.CONTROL_AF_REGIONS,
                         new MeteringRectangle[]{new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
-                applyCropAndExposure(b, false);
+                applyCropAndExposure(b, mHighResolutionStill);
+                if (mHighResolutionStill && android.os.Build.VERSION.SDK_INT >= 31 &&
+                        (mHighResolutionTarget == null || !"Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source))) {
+                    b.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
+                }
                 b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                 b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
                 applySensorControls(b, true);

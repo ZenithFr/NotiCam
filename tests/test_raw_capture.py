@@ -80,7 +80,7 @@ class RawCaptureContracts(unittest.TestCase):
 
     def test_raw_ui_exposes_only_supported_counts_and_truthful_sequence_semantics(self):
         chooser = (SRC / "ui/components/RawCaptureButton.kt").read_text()
-        for required in ("1..state.maxRawFrames", "currentActions.onRawFramesSelected(count)", "state.rawCapabilityChecked", "state.supportsRaw", "not HDR/merged", "tween(3000"):
+        for required in ("1..state.maxRawFrames", "currentActions.onRawFramesSelected(count)", "state.rawCapabilityChecked", "state.supportsRaw", "not HDR/merged", "tween(1000"):
             self.assertIn(required, chooser)
         self.assertNotIn("16-bit DNG", self.settings)
         screen = (SRC / "ui/CameraScreen.kt").read_text()

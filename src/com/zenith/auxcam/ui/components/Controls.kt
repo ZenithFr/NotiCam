@@ -648,42 +648,46 @@ fun TopBar(
                 else -> "1080"
             }
             Column(Modifier.weight(1f).heightIn(min = CameraSpacing.touch)
-                .cameraGlass(RoundedCornerShape(CameraSpacing.controlRadius))
+                .clip(RoundedCornerShape(CameraSpacing.controlRadius))
+                .background(Color.White)
                 .clickable(enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.videoStarting,
                     role = Role.Button, onClick = actions::onResolutionToggle)
                 .padding(horizontal = 8.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                Text(label, style = CameraType.Value, color = CameraColors.Label,
+                Text(label, style = CameraType.Value, color = Color.Black,
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
-            if (!photo) Text("${state.videoTargetFps} fps", style = CameraType.Telemetry,
-                color = CameraColors.LabelSecondary, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.heightIn(min = CameraSpacing.touch).clickable(
-                    enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.videoStarting,
-                    role = Role.Button,
-                    onClick = {
-                        val rates = if (state.videoQuality == com.zenith.auxcam.VideoPolicy.HD) listOf(24, 30, 60) else listOf(24, 30)
-                        actions.onVideoRateSelected(rates[(rates.indexOf(state.videoTargetFps) + 1) % rates.size])
-                    }).padding(horizontal = 8.dp, vertical = 16.dp))
+            if (!photo) {
+                Spacer(Modifier.width(4.dp))
+                Box(Modifier.heightIn(min = CameraSpacing.touch)
+                    .clip(RoundedCornerShape(CameraSpacing.controlRadius))
+                    .background(Color.White)
+                    .clickable(
+                        enabled = state.sessionReady && !state.captureBusy && !state.videoRecording && !state.videoStarting,
+                        role = Role.Button,
+                        onClick = {
+                            val rates = if (state.videoQuality == com.zenith.auxcam.VideoPolicy.HD) listOf(24, 30, 60) else listOf(24, 30)
+                            actions.onVideoRateSelected(rates[(rates.indexOf(state.videoTargetFps) + 1) % rates.size])
+                        }
+                    ).padding(horizontal = 8.dp, vertical = 8.dp),
+                    contentAlignment = Alignment.Center) {
+                    Text("${state.videoTargetFps} fps", style = CameraType.Telemetry,
+                        color = Color.Black, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
         }
-        MatteIconButton(
-            icon = when (state.flash) {
-                FlashMode.Off -> NotiIcons.FlashOff
-                FlashMode.Auto -> NotiIcons.FlashAuto
-                FlashMode.On -> NotiIcons.FlashOn
-            },
-            contentDescription = "Flash: ${state.flash.name}",
-            onClick = actions::onFlashClick,
-            enabled = state.mode == CaptureMode.Photo && !state.raw && state.sessionReady && !state.captureBusy,
-            selected = state.flash != FlashMode.Off,
-        )
-        MatteIconButton(
-            icon = if (state.settingsOpen) NotiIcons.Close else NotiIcons.Sliders,
-            contentDescription = "Camera controls",
-            onClick = actions::onSettingsToggle,
-            selected = state.settingsOpen,
-            enabled = !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
-        )
+        Spacer(Modifier.width(8.dp))
+        Box(Modifier.size(CameraSpacing.touch), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(36.dp).clip(CircleShape).background(if (state.settingsOpen) CameraColors.Accent else Color.White)
+                .clickable(enabled = !state.videoRecording && !state.videoStarting && !state.captureBusy && !state.previewTransitioning,
+                    role = Role.Button, onClick = actions::onSettingsToggle),
+                contentAlignment = Alignment.Center) {
+                Icon(if (state.settingsOpen) NotiIcons.Close else NotiIcons.Sliders,
+                    contentDescription = "Camera controls",
+                    tint = if (state.settingsOpen) Color.White else Color.Black,
+                    modifier = Modifier.size(18.dp))
+            }
+        }
     }
 }
 

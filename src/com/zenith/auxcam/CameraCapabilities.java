@@ -166,6 +166,30 @@ final class CameraCapabilities {
                     if (best == null || pixels > (long) best.getWidth() * best.getHeight()) best = size;
                 }
             }
+            if (high && best == null) {
+                if (Build.VERSION.SDK_INT >= 31) {
+                    StreamConfigurationMap maxMap = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
+                    if (maxMap != null) for (Size[] sizes : new Size[][]{maxMap.getOutputSizes(ImageFormat.RAW_SENSOR), maxMap.getHighResolutionOutputSizes(ImageFormat.RAW_SENSOR)}) {
+                        if (sizes != null) for (Size size : sizes) {
+                            long pixels = (long) size.getWidth() * size.getHeight();
+                            if (pixels >= 45_000_000L && RawFrameMatcher.maxFramesForSize(size.getWidth(), size.getHeight()) > 0) {
+                                if (best == null || pixels > (long) best.getWidth() * best.getHeight()) best = size;
+                            }
+                        }
+                    }
+                }
+                if (best == null) {
+                    Target target = discover(cm, id);
+                    if (target != null && is50Mp(target.size) && RawFrameMatcher.maxFramesForSize(target.size.getWidth(), target.size.getHeight()) > 0) {
+                        best = target.size;
+                    } else if (Build.VERSION.SDK_INT >= 31) {
+                        Size maxArray = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION);
+                        if (maxArray != null && is50Mp(maxArray) && RawFrameMatcher.maxFramesForSize(maxArray.getWidth(), maxArray.getHeight()) > 0) {
+                            best = maxArray;
+                        }
+                    }
+                }
+            }
             return best;
         } catch (Exception ignored) { return null; }
     }
@@ -219,8 +243,17 @@ final class CameraCapabilities {
     /** A declared constant capture rate, never an invented [30,60] range. */
     static android.util.Range<Integer> recordingRange(CameraManager cm, String id, int fps) throws Exception {
         android.util.Range<Integer>[] ranges = cm.getCameraCharacteristics(id).get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES);
+        android.util.Range<Integer> best = null;
         if (ranges != null) for (android.util.Range<Integer> range : ranges) {
             if (VideoPolicy.fixedRate(range.getLower(), range.getUpper(), fps)) return range;
+            if (range.getUpper() == fps && (best == null || range.getLower() > best.getLower())) best = range;
+        }
+        if (best != null) return best;
+        if (fps == 60 && ranges != null) {
+            for (android.util.Range<Integer> range : ranges) {
+                if (range.getUpper() >= 30 && (best == null || range.getUpper() > best.getUpper())) best = range;
+            }
+            return best;
         }
         return null;
     }
@@ -237,14 +270,14 @@ final class CameraCapabilities {
         int[] preview = previewConfig(cm, id, fps >= 60);
         if (preview.length != 4) return null;
         long previewDuration = map.getOutputMinFrameDuration(ImageFormat.YUV_420_888, new Size(preview[0], preview[1]));
-        if (previewDuration <= 0 || previewDuration > 1_000_000_000L / fps + 1) return null;
+        if (previewDuration <= 0 || (fps <= 30 && previewDuration > 1_000_000_000L / fps + 1)) return null;
         Size[] sizes = map.getOutputSizes(MediaRecorder.class);
         if (sizes == null) return null;
         for (Size size : sizes) {
             if (!VideoPolicy.matchesQuality(size.getWidth(), size.getHeight(), quality) ||
                 !VideoPolicy.matchesSensor(size.getWidth(), size.getHeight(), active.width(), active.height())) continue;
             long duration = map.getOutputMinFrameDuration(MediaRecorder.class, size);
-            if (duration <= 0 || duration > 1_000_000_000L / fps + 1) continue;
+            if (duration <= 0 || (fps <= 30 && duration > 1_000_000_000L / fps + 1)) continue;
             for (MediaCodecInfo codec : new MediaCodecList(MediaCodecList.REGULAR_CODECS).getCodecInfos()) {
                 if (!codec.isEncoder() || !codec.isHardwareAccelerated()) continue;
                 try {

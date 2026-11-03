@@ -43,6 +43,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.BlurredEdgeTreatment
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -177,7 +179,6 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                     }
                     Box(
                         Modifier.align(Alignment.BottomCenter).padding(bottom = 16.dp)
-                            .cameraGlass(RoundedCornerShape(24.dp)).padding(horizontal = 2.dp)
                             .pointerInput(Unit) {
                                 detectHorizontalDragGestures(
                                     onDragStart = { actions.onZoomDragStart() },
@@ -186,8 +187,19 @@ fun CameraScreen(state: CameraUiState, actions: CameraActions, modifier: Modifie
                                 ) { change, amount -> change.consume(); actions.onZoomDrag(amount) }
                             },
                     ) {
-                        ZoomChips(zoom = state.zoom, onSelect = actions::onZoomSelected,
-                            stops = DeviceProfile.ZOOM_STOPS, enabled = state.sessionReady && !state.captureBusy && !state.videoRecording)
+                        Box(
+                            Modifier.matchParentSize()
+                                .clip(RoundedCornerShape(24.dp))
+                                .blur(20.dp, edgeTreatment = BlurredEdgeTreatment.Rectangle)
+                                .background(Color.Black.copy(alpha = 0.45f))
+                        )
+                        Box(
+                            Modifier.clip(RoundedCornerShape(24.dp))
+                                .cameraGlass(RoundedCornerShape(24.dp)).padding(horizontal = 2.dp)
+                        ) {
+                            ZoomChips(zoom = state.zoom, onSelect = actions::onZoomSelected,
+                                stops = DeviceProfile.ZOOM_STOPS, enabled = state.sessionReady && !state.captureBusy && !state.videoRecording)
+                        }
                     }
                     androidx.compose.animation.AnimatedVisibility(
                         visible = state.zoomActive,

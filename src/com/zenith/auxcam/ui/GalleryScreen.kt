@@ -180,7 +180,7 @@ fun GalleryScreen(onClose: () -> Unit) {
                             }
                         }
                     }
-                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp),
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 2.dp, bottom = 22.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                         GalleryButton(NotiIcons.Share, "Share", {
                             try {

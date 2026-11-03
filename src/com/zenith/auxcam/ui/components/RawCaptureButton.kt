@@ -4,6 +4,9 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -45,7 +48,7 @@ fun RawCaptureButton(state: CameraUiState, actions: CameraActions) {
         Box(Modifier.size(CameraSpacing.touch)
             .semantics {
                 role = Role.Button
-                contentDescription = "RAW ${if (state.raw) "on" else "off"}. Hold three seconds for size and frame count"
+                contentDescription = "RAW ${if (state.raw) "on" else "off"}. Hold 1 second for size and frame count"
                 selected = state.raw
                 if (!enabled) disabled()
                 onClick { if (enabled) currentActions.onRawToggle(); enabled }
@@ -57,7 +60,7 @@ fun RawCaptureButton(state: CameraUiState, actions: CameraActions) {
                         var revealed = false
                         val hold = launch {
                             progress.snapTo(0f)
-                            progress.animateTo(1f, tween(3000, easing = LinearEasing))
+                            progress.animateTo(1f, tween(1000, easing = LinearEasing))
                             revealed = true
                             expanded = true
                             haptics.select()
@@ -70,9 +73,9 @@ fun RawCaptureButton(state: CameraUiState, actions: CameraActions) {
                     }
                 })
             }, contentAlignment = Alignment.Center) {
-            Box(Modifier.size(36.dp).cameraGlass(CircleShape, if (state.raw) CameraColors.Accent else CameraColors.ControlSurface),
+            Box(Modifier.size(36.dp).clip(CircleShape).background(if (state.raw) CameraColors.Accent else Color.White),
                 contentAlignment = Alignment.Center) {
-                Text("RAW", style = CameraType.Telemetry, color = CameraColors.Label.copy(alpha = if (enabled) .9f else .4f))
+                Text("RAW", style = CameraType.Telemetry, color = if (state.raw) Color.White else Color.Black)
             }
             if (progress.value > 0f) Canvas(Modifier.size(42.dp)) {
                 drawArc(CameraColors.Label, -90f, 360f * progress.value, false, style = Stroke(2.dp.toPx()))

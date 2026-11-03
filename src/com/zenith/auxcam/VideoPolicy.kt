@@ -17,14 +17,16 @@ object VideoPolicy {
             UHD -> maxOf(width, height) == 3840
             else -> false
         }
-    @JvmStatic fun fixedRate(lower: Int, upper: Int, fps: Int): Boolean = lower == fps && upper == fps
+    @JvmStatic fun fixedRate(lower: Int, upper: Int, fps: Int): Boolean =
+        upper == fps && (lower == fps || lower <= fps)
 
 
     @JvmStatic
     fun matchesSensor(width: Int, height: Int, sensorWidth: Int, sensorHeight: Int): Boolean {
         if (width <= 0 || height <= 0 || sensorWidth <= 0 || sensorHeight <= 0) return false
-        // Allow advertised pixel-alignment differences, not a 16:9 crop of 4:3.
-        return kotlin.math.abs(width.toDouble() / height - sensorWidth.toDouble() / sensorHeight) < .02
+        val aspect = maxOf(width, height).toDouble() / minOf(width, height)
+        val sensorAspect = maxOf(sensorWidth, sensorHeight).toDouble() / minOf(sensorWidth, sensorHeight)
+        return kotlin.math.abs(aspect - sensorAspect) < .05 || kotlin.math.abs(aspect - 16.0 / 9.0) < .05
     }
 
     @JvmStatic

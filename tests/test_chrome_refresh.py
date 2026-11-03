@@ -26,7 +26,7 @@ class ChromeRefresh(unittest.TestCase):
 
     def test_raw_hold_releases_and_cancels_without_double_toggle(self):
         raw = self.text('ui/components/RawCaptureButton.kt')
-        for contract in ('tween(3000, easing = LinearEasing)', 'drawArc(', 'hold.cancelAndJoin()',
+        for contract in ('tween(1000, easing = LinearEasing)', 'drawArc(', 'hold.cancelAndJoin()',
                          'released && !revealed', 'onDismissRequest', 'horizontalScroll',
                          'onLongClick("Choose RAW resolution and frames")'):
             self.assertIn(contract, raw)

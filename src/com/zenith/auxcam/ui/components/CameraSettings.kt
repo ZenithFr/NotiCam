@@ -95,7 +95,7 @@ fun CameraSettings(state: CameraUiState, actions: CameraActions, modifier: Modif
                         "RAW advertised · ${state.rawSensorWidth} × ${state.rawSensorHeight}. Session support is checked when opened."
                         else "No eligible RAW_SENSOR stream within the capture payload budget. JPEG remains available.",
                         style = CameraType.Caption, color = CameraColors.LabelSecondary)
-                    Text("RAW size and frame count: hold the top-left RAW button for 3 seconds. HDR merge and Ultra HDR export are not implemented yet.",
+                    Text("RAW size and frame count: hold the top-left RAW button for 1 second. HDR merge and Ultra HDR export are not implemented yet.",
                         style = CameraType.Caption, color = CameraColors.LabelSecondary)
                 }
                 Spacer(Modifier.height(20.dp))
