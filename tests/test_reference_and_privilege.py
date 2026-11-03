@@ -13,7 +13,8 @@ class ReferenceAndPrivilege(unittest.TestCase):
         self.assertIn('val Accent = Color.White', theme)
         self.assertIn('primary = CameraColors.Accent', theme)
         self.assertIn('if (selected) CameraColors.Accent else CameraColors.ControlSurface', controls)
-        self.assertIn('if (selected) CameraColors.Label else CameraColors.LabelSecondary', controls)
+        # A white selection takes dark (OnLight) text so it stays readable.
+        self.assertIn('if (selected) CameraColors.OnLight else CameraColors.LabelSecondary', controls)
         self.assertIn('role = Role.Button', controls)
         self.assertIn('selected = active', controls)
         self.assertNotIn('text = label.uppercase()', controls)

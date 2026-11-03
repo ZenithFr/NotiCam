@@ -7,16 +7,16 @@ SRC = ROOT / 'src/com/zenith/auxcam'
 class ChromeRefresh(unittest.TestCase):
     def text(self, path): return (SRC / path).read_text()
 
-    def test_top_left_is_raw_not_title_and_mode_is_right_of_shutter(self):
+    def test_top_left_is_raw_not_title_and_mode_switch_is_labeled(self):
         controls = self.text('ui/components/Controls.kt')
-        top = controls.split('fun TopBar(', 1)[1].split('fun BottomBar(', 1)[0]
+        top = controls.split('fun TopBar(', 1)[1].split('fun ModeSwitch(', 1)[0]
         self.assertNotIn('Text("NotiCam"', top)
         self.assertNotIn('state.status', top)
         self.assertIn('RawCaptureButton(state, actions)', top)
         bottom = controls.split('fun BottomBar(', 1)[1]
         self.assertNotIn('ModeCarousel(', controls)
-        self.assertGreater(bottom.index('NotiIcons.Video'), bottom.index('ShutterButton('))
-        self.assertIn('!state.videoRecording && !state.videoStarting', bottom)
+        self.assertIn('ModeSwitch(state, actions', bottom)
+        self.assertIn('!state.videoRecording && !state.videoStarting', controls)
 
     def test_badge_timeout_does_not_hide_live_recording_duration(self):
         screen = self.text('ui/CameraScreen.kt')

@@ -279,4 +279,94 @@ object NotiIcons {
             circle(12f, 12f, 2f)
         }
     }.build()
+
+    /** Chevron: a settings row opens a deeper choice. */
+    val ChevronRight: ImageVector = builder("ChevronRight").apply {
+        strokePath(width = 1.8f) { moveTo(9.5f, 5.5f); lineTo(16f, 12f); lineTo(9.5f, 18.5f) }
+    }.build()
+
+    /** Magnifier: settings search. */
+    val Search: ImageVector = builder("Search").apply {
+        strokePath(width = 1.7f) { circle(10.5f, 10.5f, 6.5f) }
+        strokePath(width = 1.7f) { moveTo(15.3f, 15.3f); lineTo(20.5f, 20.5f) }
+    }.build()
+
+    /** Lowercase i in a ring: contextual help / info. */
+    val Info: ImageVector = builder("Info").apply {
+        strokePath(width = 1.6f) { circle(12f, 12f, 8.6f) }
+        strokePath(width = 1.7f) { moveTo(12f, 11f); lineTo(12f, 16.4f) }
+        fillPath { circle(12f, 7.8f, 1.05f) }
+    }.build()
+
+    /** Document with lines: the shareable camera capability report. */
+    val Report: ImageVector = builder("Report").apply {
+        strokePath(width = 1.6f) {
+            moveTo(6f, 3f); lineTo(14f, 3f); lineTo(19f, 8f); lineTo(19f, 21f); lineTo(6f, 21f); close()
+            moveTo(14f, 3f); lineTo(14f, 8f); lineTo(19f, 8f)
+        }
+        strokePath(width = 1.5f) {
+            moveTo(9f, 12.4f); lineTo(16f, 12.4f)
+            moveTo(9f, 15.6f); lineTo(16f, 15.6f)
+        }
+    }.build()
+
+    /** Stacked service blocks: the Shizuku camera backend. */
+    val Backend: ImageVector = builder("Backend").apply {
+        strokePath(width = 1.6f) {
+            moveTo(4f, 4.5f); lineTo(20f, 4.5f); lineTo(20f, 9.5f); lineTo(4f, 9.5f); close()
+            moveTo(4f, 14.5f); lineTo(20f, 14.5f); lineTo(20f, 19.5f); lineTo(4f, 19.5f); close()
+        }
+        fillPath { circle(7.2f, 7f, 1f); circle(7.2f, 17f, 1f) }
+    }.build()
+
+    /** Frame with a diagonal: output resolution / aspect. */
+    val Aspect: ImageVector = builder("Aspect").apply {
+        strokePath(width = 1.6f) {
+            moveTo(3.5f, 6f); lineTo(20.5f, 6f); lineTo(20.5f, 18f); lineTo(3.5f, 18f); close()
+        }
+        strokePath(width = 1.4f) { moveTo(7f, 15f); lineTo(12.5f, 9.5f) }
+        fillPath { circle(15.7f, 9.6f, 1.2f) }
+    }.build()
+
+    /** Clapper / frames-per-second: video frame rate. */
+    val FrameRate: ImageVector = builder("FrameRate").apply {
+        strokePath(width = 1.6f) {
+            moveTo(3.5f, 8f); lineTo(20.5f, 8f); lineTo(20.5f, 19f); lineTo(3.5f, 19f); close()
+            moveTo(3.5f, 8f); lineTo(6f, 4f); lineTo(20.5f, 4f); lineTo(20.5f, 8f)
+        }
+        strokePath(width = 1.4f) { moveTo(8.2f, 4.4f); lineTo(6.4f, 7.8f); moveTo(13f, 4.4f); lineTo(11.2f, 7.8f); moveTo(17.8f, 4.4f); lineTo(16f, 7.8f) }
+    }.build()
+
+    /** Circular arrow: reset a control to auto. */
+    val Reset: ImageVector = builder("Reset").apply {
+        strokePath(width = 1.7f) {
+            moveTo(19f, 12f)
+            curveTo(19f, 15.9f, 15.9f, 19f, 12f, 19f)
+            curveTo(8.1f, 19f, 5f, 15.9f, 5f, 12f)
+            curveTo(5f, 8.1f, 8.1f, 5f, 12f, 5f)
+            curveTo(14.2f, 5f, 16.1f, 6f, 17.3f, 7.6f)
+        }
+        strokePath(width = 1.7f) { moveTo(17.5f, 3.6f); lineTo(17.5f, 7.8f); lineTo(13.3f, 7.8f) }
+    }.build()
+
+    /** Checkmark: confirmed / selected state. */
+    val Check: ImageVector = builder("Check").apply {
+        strokePath(width = 2f) { moveTo(5f, 12.5f); lineTo(10f, 17.5f); lineTo(19f, 6.5f) }
+    }.build()
+
+    /** Gear: opens the full settings page. Body ring, centre hole, eight teeth. */
+    val Settings: ImageVector = builder("Settings").apply {
+        strokePath(width = 1.7f) { circle(12f, 12f, 5.6f) }
+        strokePath(width = 1.7f) { circle(12f, 12f, 2.3f) }
+        strokePath(width = 2.3f) {
+            moveTo(17.6f, 12f); lineTo(20.6f, 12f)
+            moveTo(15.96f, 15.96f); lineTo(18.08f, 18.08f)
+            moveTo(12f, 17.6f); lineTo(12f, 20.6f)
+            moveTo(8.04f, 15.96f); lineTo(5.92f, 18.08f)
+            moveTo(6.4f, 12f); lineTo(3.4f, 12f)
+            moveTo(8.04f, 8.04f); lineTo(5.92f, 5.92f)
+            moveTo(12f, 6.4f); lineTo(12f, 3.4f)
+            moveTo(15.96f, 8.04f); lineTo(18.08f, 5.92f)
+        }
+    }.build()
 }

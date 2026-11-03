@@ -19,8 +19,9 @@ class UiContracts(unittest.TestCase):
         controller = (ROOT / 'src/com/zenith/auxcam/CameraController.kt').read_text()
         controls = (UI / 'components/Controls.kt').read_text()
         self.assertNotIn('onSwitchLens', controller + controls)
-        self.assertIn('Switch to Video', controls)
-        self.assertIn('NotiIcons.Video else NotiIcons.Photo', controls)
+        # Mode is a labeled Photo/Video switch, not an icon-only toggle or lens cycle.
+        self.assertIn('fun ModeSwitch(', controls)
+        self.assertIn('CaptureMode.Video, CaptureMode.Photo', controls)
         self.assertIn('override fun onZoomSelected', controller)
         self.assertIn('ZoomChips(zoom = state.zoom', (UI / 'CameraScreen.kt').read_text())
 

@@ -72,7 +72,9 @@ fun RawCaptureButton(state: CameraUiState, actions: CameraActions) {
             }, contentAlignment = Alignment.Center) {
             Box(Modifier.size(36.dp).cameraGlass(CircleShape, if (state.raw) CameraColors.Accent else CameraColors.ControlSurface),
                 contentAlignment = Alignment.Center) {
-                Text("RAW", style = CameraType.Telemetry, color = CameraColors.Label.copy(alpha = if (enabled) .9f else .4f))
+                Text("RAW", style = CameraType.Telemetry,
+                    color = (if (state.raw) CameraColors.OnLight else CameraColors.Label)
+                        .copy(alpha = if (enabled) .9f else .4f))
             }
             if (progress.value > 0f) Canvas(Modifier.size(42.dp)) {
                 drawArc(CameraColors.Label, -90f, 360f * progress.value, false, style = Stroke(2.dp.toPx()))
