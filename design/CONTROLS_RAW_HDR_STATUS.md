@@ -29,23 +29,33 @@
   advertised sensor capabilities and successful HAL acceptance.** Preview exposure
   remains capped to the live frame period without shortening the saved still.
 
-## RAW gesture and genuine resolution choices
+## Open gate RAW gesture and genuine readout choices
 
-- Tap top-left RAW to toggle. A hold draws a filling progress ring for **3 s**;
-  completion reveals a sideways chooser for **12 MP / 50 MP** and frame count.
-  Early release toggles once, cancelled gestures do neither, and a completed
-  hold does not also toggle. Accessibility has a direct labelled long-click.
-- Unsupported sizes are disabled. Selecting a size enables RAW in that native
-  class. Counts are bounded by the actual selected frame dimensions and the
-  existing 128 MiB acquired-payload budget: a 50 MP RAW frame permits only **one**
-  frame under this budget; ordinary 12 MP permits up to four. These are separate
-  DNGs, not merging/HDR. The payload limit is not total app/HAL memory usage.
-- New appended AIDL IDs **23–25**: RAW class query, temperature control and
-  lens-specific JPEG capability query. Earlier IDs 0–22 and destroy remain intact;
-  sidecar version **11** retires old clients/services.
-- RAW selection uses advertised RAW_SENSOR normal/slow output sizes in default
-  sensor pixel mode. **Maximum-resolution-map-only RAW is not implemented**, nor
-  is any OEM unlock/upscale. Device support for native 50 MP RAW is unverified.
+- RAW is now **Open gate RAW**: the full-sensor Bayer readout written as a DNG at
+  the full field of view (no digital crop). Tap top-left RAW to toggle; it defaults
+  to the open-gate (full-sensor) readout when advertised. A hold draws a filling
+  progress ring for **3 s**; completion reveals a sideways chooser for
+  **Binned / Open gate** and frame count. Early release toggles once, cancelled
+  gestures do neither, and a completed hold does not also toggle. Accessibility
+  has a direct labelled long-click. Digital zoom is locked while RAW is on.
+- Unsupported readouts are disabled. Counts are bounded by the actual selected
+  frame dimensions and the existing 128 MiB acquired-payload budget: a 50 MP RAW
+  frame permits only **one** frame under this budget; ordinary 12 MP permits up to
+  four. These are separate DNGs, not merging/HDR. The payload limit is not total
+  app/HAL memory usage.
+- AIDL IDs **23–25** are unchanged (RAW class query, temperature control,
+  lens-specific JPEG capability query); `getRawConfiguration` still returns
+  `{width, height}`. Sidecar version **12** retires old clients/services so Shizuku
+  redeploys the open-gate service dex.
+- Open-gate discovery searches the default **and** the maximum-resolution
+  (`SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION`, API 31+) RAW_SENSOR maps.
+  When the full-sensor size lives only in the maximum-resolution map, the session
+  declares `SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION` via
+  `OutputConfiguration.addSensorPixelModeUsed`, sets it on each burst request, and
+  uses the maximum active-array crop domain. `rawPixelMode()` returns that mode
+  only for a genuinely advertised size — no OEM unlock/upscale is invented.
+  **On-device capture of native 50 MP open-gate RAW is still pending hardware
+  verification** (see `design/LOCAL_AGENT_OPEN_GATE.md`).
 - Removed guessed JPEG capability dimensions and the hard-coded telephoto size
   from client reader selection. Lens-specific metadata is now required, including
   preview discovery. A RAW high-resolution preview does not borrow a JPEG sensor

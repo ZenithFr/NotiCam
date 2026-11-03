@@ -139,7 +139,8 @@ final class CameraCapabilities {
         return null;
     }
 
-    /** Default-pixel-mode RAW only. Maximum-resolution RAW needs a distinct session path. */
+    /** Largest advertised RAW frame. Open gate (high) prefers the full-sensor
+     * maximum-resolution pixel mode when the HAL exposes it; binned class otherwise. */
     static Size rawSize(CameraManager cm, String lensId) {
         Size high = rawSize(cm, lensId, true);
         return high != null ? high : rawSize(cm, lensId, false);
@@ -166,8 +167,41 @@ final class CameraCapabilities {
                     if (best == null || pixels > (long) best.getWidth() * best.getHeight()) best = size;
                 }
             }
+            // Open gate: on a quad-bayer sensor the full-sensor RAW is frequently
+            // advertised only in the maximum-resolution stream map (remosaic readout).
+            // Prefer it when larger than the default-mode best. The capture session must
+            // then declare SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION and use the maximum
+            // active-array coordinate domain; rawPixelMode() below reports that need.
+            if (high && Build.VERSION.SDK_INT >= 31) {
+                StreamConfigurationMap max = c.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
+                if (max != null) for (Size[] sizes : new Size[][]{max.getOutputSizes(ImageFormat.RAW_SENSOR), max.getHighResolutionOutputSizes(ImageFormat.RAW_SENSOR)}) {
+                    if (sizes != null) for (Size size : sizes) {
+                        long pixels = (long) size.getWidth() * size.getHeight();
+                        if (pixels < 45_000_000L) continue;
+                        if (RawFrameMatcher.maxFramesForSize(size.getWidth(), size.getHeight()) == 0) continue;
+                        if (best == null || pixels > (long) best.getWidth() * best.getHeight()) best = size;
+                    }
+                }
+            }
             return best;
         } catch (Exception ignored) { return null; }
+    }
+
+    /** Pixel mode needed to capture an exact advertised RAW size. Returns
+     * MAXIMUM_RESOLUTION only when that size is genuinely advertised in the
+     * maximum-resolution map; never guesses a remosaic/upscale substitute. */
+    static int rawPixelMode(CameraManager cm, String lensId, int width, int height) {
+        if (Build.VERSION.SDK_INT < 31 || width <= 0 || height <= 0) return CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
+        try {
+            String id = "2".equals(lensId) || "3".equals(lensId) ? lensId : "0";
+            StreamConfigurationMap max = cm.getCameraCharacteristics(id)
+                    .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION);
+            if (max != null) for (Size[] sizes : new Size[][]{max.getOutputSizes(ImageFormat.RAW_SENSOR), max.getHighResolutionOutputSizes(ImageFormat.RAW_SENSOR)}) {
+                if (sizes != null) for (Size size : sizes)
+                    if (size.getWidth() == width && size.getHeight() == height) return CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION;
+            }
+        } catch (Exception ignored) { }
+        return CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
     }
     /** Normal Camera2 session, never constrained high-speed (which would drop full-quality stills).
      * Keep the sensor's full 4:3 field, capped at 1440x1080 / 1080 sensor lines.
