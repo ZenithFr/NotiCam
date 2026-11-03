@@ -34,11 +34,14 @@ def main():
         for key in totals:
             totals[key] += int(suite.get(key, '0'))
     emit('notice', 'Actual Android JVM test results', totals)
-    if totals['tests'] < 124 or totals['failures'] or totals['errors']:
+    if totals['tests'] - totals['skipped'] < 129 or totals['failures'] or totals['errors']:
         raise ValueError(f'Incomplete/failing Android test suite: {totals}')
 
     lint_errors = []
-    for report in sorted((ROOT / 'build/reports').glob('lint-results-*.xml')):
+    for variant in ('debug', 'release'):
+        report = ROOT / f'build/reports/lint-results-{variant}.xml'
+        if not report.is_file():
+            raise ValueError(f'Missing {variant} lint report')
         issues = ET.parse(report).getroot().findall('issue')
         serious = [item for item in issues if item.get('severity') in ('Error', 'Fatal')]
         emit('notice', report.name, f'{len(serious)} errors; {len(issues) - len(serious)} other findings')
@@ -46,6 +49,11 @@ def main():
             locations = ', '.join(f"{item.get('file')}:{item.get('line', '?')}" for item in issue.findall('location'))
             emit('error', issue.get('id', 'lint'), issue.get('message', '') + '\n' + locations)
         lint_errors.extend(serious)
+        if variant == 'debug':
+            nonfatal = [item for item in issues if item not in serious]
+            summary = '\n'.join(f"{item.get('id')}: {item.get('message')}" for item in nonfatal)
+            if summary:
+                emit('notice', 'Nonfatal lint findings for review', summary[:30000])
 
     shaders = [f'assets/shaders/{p.stem}.spv' for p in (ROOT / 'jni/shaders').glob('*.comp')]
     for variant in ('debug', 'release'):
