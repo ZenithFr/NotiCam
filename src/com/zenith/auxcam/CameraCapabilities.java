@@ -183,18 +183,6 @@ final class CameraCapabilities {
                     }
                 }
             }
-            // Fallback: discover() → pixel array (for HALs that don't advertise in stream map)
-            if (high && best == null) {
-                Target target = discover(cm, id);
-                if (target != null && is50Mp(target.size) && RawFrameMatcher.maxFramesForSize(target.size.getWidth(), target.size.getHeight()) > 0) {
-                    best = target.size;
-                } else if (Build.VERSION.SDK_INT >= 31) {
-                    Size maxArray = c.get(CameraCharacteristics.SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION);
-                    if (maxArray != null && is50Mp(maxArray) && RawFrameMatcher.maxFramesForSize(maxArray.getWidth(), maxArray.getHeight()) > 0) {
-                        best = maxArray;
-                    }
-                }
-            }
             return best;
         } catch (Exception ignored) { return null; }
     }

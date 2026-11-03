@@ -390,7 +390,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         mRequestedZoom = mZoomRatio;
         mPreviewMaxFps = videoMode && recordingSurface != null ? previewMaxFps : (previewMaxFps >= 60 ? 60 : 30);
         mVideoRecordFps = previewMaxFps;
-        mHighResolutionStill = !videoMode && ((stillFormat == ImageFormat.JPEG) || (stillFormat == ImageFormat.RAW_SENSOR)) && (long) stillW * stillH >= 45_000_000L;
+        mHighResolutionStill = !videoMode && stillFormat == ImageFormat.JPEG && (long) stillW * stillH >= 45_000_000L;
 
         mColorW = colorW;
         mColorH = colorH;
@@ -408,22 +408,9 @@ public class CameraUserService extends IAuxCamService.Stub {
 
         if (mHighResolutionStill) {
             int[] size = getHighResolutionJpegSize(colorPhysicalId);
-            if (size.length == 3) {
-                if (stillFormat == ImageFormat.JPEG && (Math.abs(size[0] - mStillW) > 32 || size[1] != mStillH)) {
-                    notifyError("Requested 50 MP JPEG size is not advertised by camera " + colorPhysicalId);
-                    return;
-                }
-                if (stillFormat == ImageFormat.JPEG) {
-                    mStillW = size[0];
-                    mStillH = size[1];
-                }
-                mStillPixelMode = size[2];
-                if (mHighResolutionTarget != null) {
-                    mCurrentCameraId = mHighResolutionTarget.cameraId;
-                    Log.i(TAG, "50 MP path: " + mCurrentCameraId + " / " + mHighResolutionTarget.source);
-                }
-            } else {
-                mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION;
+            if (size.length != 3 || Math.abs(size[0] - mStillW) > 32 || size[1] != mStillH) {
+                notifyError("Requested 50 MP JPEG size is not advertised by camera " + colorPhysicalId);
+                return;
             }
             mStillW = size[0];
             mStillH = size[1];
