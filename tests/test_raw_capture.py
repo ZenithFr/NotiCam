@@ -19,7 +19,8 @@ class RawCaptureContracts(unittest.TestCase):
         for name, number in (("getRawSensorSize", 19), ("triggerRawBurst", 20), ("cancelRawCapture", 21)):
             self.assertRegex(aidl, rf"\b{name}\([^;]+\)\s*=\s*{number}\s*;")
         self.assertIn("onRawCaptureFinished", (SRC / "IAuxCamCallback.aidl").read_text())
-        self.assertIn("version(11)", self.controller)
+        # Bumped so Shizuku redeploys the open-gate RAW user service instead of a cached dex.
+        self.assertIn("version(12)", self.controller)
         self.assertIn("finishRawCapture(request, savedCount, error)", self.controller)
 
     def test_raw_capability_requires_both_flag_and_bounded_advertised_stream(self):

@@ -109,7 +109,7 @@ class MediaFeatures(unittest.TestCase):
         self.assertEqual([int(code) for _, code in methods[:-1]], list(range(26)))
         self.assertEqual(methods[-1], ('destroy', '16777114'))
         controller = (SRC / 'CameraController.kt').read_text()
-        self.assertIn('.version(11)', controller)
+        self.assertIn('.version(12)', controller)
         self.assertIn('.daemon(false)', controller)
         self.assertIn('.tag("noticam-', controller)
         self.assertIn('exitingService?.destroy()', controller)

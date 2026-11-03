@@ -134,6 +134,8 @@ public class CameraUserService extends IAuxCamService.Stub {
     private int mStillFormat = ImageFormat.YUV_420_888;
     private int mSensorOrientation = 90;
     private int mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
+    /** Open gate RAW: full-sensor readout, no digital crop, DNG at the advertised RAW size. */
+    private boolean mRawOpenGate = false;
 
     private final class AfResetRunnable implements Runnable {
         @Override
@@ -366,6 +368,12 @@ public class CameraUserService extends IAuxCamService.Stub {
                 closeSessionOnCameraThread();
                 notifyError("RAW size not advertised or exceeds capture payload budget"); return;
             }
+            // Open gate RAW always reads the full sensor field; the pixel mode (default
+            // binned vs maximum-resolution remosaic) is derived from the advertised map.
+            mRawOpenGate = true;
+            mStillPixelMode = CameraCapabilities.rawPixelMode(cm, colorPhysicalId, stillW, stillH);
+            Log.i(TAG, "OPEN_GATE_RAW config still=" + stillW + "x" + stillH +
+                    " pixelMode=" + mStillPixelMode + " lens=" + colorPhysicalId);
             try {
                 // Validate before allocating a reader or opening the camera.
                 mRawImageReader = ImageReader.newInstance(stillW, stillH, ImageFormat.RAW_SENSOR, RawFrameMatcher.maxFramesForSize(stillW, stillH));
@@ -417,7 +425,13 @@ public class CameraUserService extends IAuxCamService.Stub {
             } else {
                 mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION;
             }
-        } else {
+            mStillW = size[0];
+            mStillH = size[1];
+            mStillPixelMode = size[2];
+            mCurrentCameraId = mHighResolutionTarget.cameraId;
+            Log.i(TAG, "50 MP path: " + mCurrentCameraId + " / " + mHighResolutionTarget.source);
+        } else if (stillFormat != ImageFormat.RAW_SENSOR) {
+            // RAW keeps the pixel mode derived from its advertised stream map above.
             mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
         }
         mPreviewFpsRange = null;
@@ -573,8 +587,12 @@ public class CameraUserService extends IAuxCamService.Stub {
                 if (mRecordingSurface != null) outputs.add(new OutputConfiguration(mRecordingSurface));
             } else {
                 OutputConfiguration stillConfig = new OutputConfiguration(mStillSurface);
-                if (mHighResolutionStill && android.os.Build.VERSION.SDK_INT >= 31 &&
-                        (mHighResolutionTarget == null || !"Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source))) {
+                boolean nothingVendorJpeg = mHighResolutionStill && mHighResolutionTarget != null &&
+                        "Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source);
+                if (android.os.Build.VERSION.SDK_INT >= 31 &&
+                        mStillPixelMode == CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION && !nothingVendorJpeg) {
+                    // Declare the maximum-resolution pixel mode for open-gate RAW and the
+                    // standard-path 50 MP JPEG so the HAL accepts the mixed-mode session.
                     stillConfig.addSensorPixelModeUsed(mStillPixelMode);
                 }
                 if (!mVideoMode && !mHighResolutionStill && CAMERA_ID.equals(mCurrentCameraId) && mDepthSurface != null) outputs.add(new OutputConfiguration(mDepthSurface));
@@ -704,6 +722,12 @@ public class CameraUserService extends IAuxCamService.Stub {
             mCropRegion = null;
             return;
         }
+        if (mRawOpenGate) {
+            // Open gate keeps the full active array for the preview so the viewfinder
+            // matches the uncropped full-sensor DNG. Digital zoom is disabled in RAW.
+            mCropRegion = new Rect(mActiveArray);
+            return;
+        }
         float z = CameraZoom.digitalRatio(mZoomRatio, mCurrentCameraId, mMaxDigitalZoom);
         int w = Math.round(mActiveArray.width() / z);
         int h = Math.round(mActiveArray.height() / z);
@@ -740,10 +764,14 @@ public class CameraUserService extends IAuxCamService.Stub {
                 }
             }
             if (fullResolutionStill) {
-                // Maximum-resolution mode has a different sensor coordinate
-                // domain. Only set SCALER_CROP_REGION if mMaximumActiveArray is explicitly known.
-                if (mMaximumActiveArray != null) {
-                    b.set(CaptureRequest.SCALER_CROP_REGION, mMaximumActiveArray);
+                // Full-field still. Maximum-resolution pixel mode uses a different sensor
+                // coordinate domain; default mode (including binned open-gate RAW) uses the
+                // regular active array. Only set a crop region that is explicitly known.
+                boolean maxRes = android.os.Build.VERSION.SDK_INT >= 31 &&
+                        mStillPixelMode == CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION;
+                Rect full = maxRes ? mMaximumActiveArray : mActiveArray;
+                if (full != null) {
+                    b.set(CaptureRequest.SCALER_CROP_REGION, full);
                 }
             } else if (mCropRegion != null) {
                 b.set(CaptureRequest.SCALER_CROP_REGION, mCropRegion);
@@ -1218,11 +1246,13 @@ public class CameraUserService extends IAuxCamService.Stub {
                 if (mAfLocked) b.set(CaptureRequest.CONTROL_AE_LOCK, true);
                 if (mAfRegion != null) b.set(CaptureRequest.CONTROL_AF_REGIONS,
                         new MeteringRectangle[]{new MeteringRectangle(mAfRegion, MeteringRectangle.METERING_WEIGHT_MAX)});
-                applyCropAndExposure(b, mHighResolutionStill);
-                if (mHighResolutionStill && android.os.Build.VERSION.SDK_INT >= 31 &&
-                        (mHighResolutionTarget == null || !"Nothing camera 50 MP stream map".equals(mHighResolutionTarget.source))) {
+                // Open gate: full-sensor field, and the maximum-resolution pixel mode when
+                // the advertised RAW size lives in the maximum-resolution stream map.
+                if (android.os.Build.VERSION.SDK_INT >= 31 &&
+                        mStillPixelMode == CaptureRequest.SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION) {
                     b.set(CaptureRequest.SENSOR_PIXEL_MODE, mStillPixelMode);
                 }
+                applyCropAndExposure(b, mRawOpenGate);
                 b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
                 b.set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF);
                 applySensorControls(b, true);
@@ -1575,6 +1605,7 @@ public class CameraUserService extends IAuxCamService.Stub {
         Surface[] surfaces = {mColorSurface, mDepthSurface, mStillSurface, mRecordingSurface};
         mColorSurface = null; mDepthSurface = null; mStillSurface = null; mRecordingSurface = null;
         mAfRegion = null; mCropRegion = null;
+        mRawOpenGate = false; mStillPixelMode = CaptureRequest.SENSOR_PIXEL_MODE_DEFAULT;
         mActiveArray = null; mMaximumActiveArray = null; mCompensationRange = null;
         mPreviewFpsRange = null; mRotateAndCropModes = null; mNoiseModes = null; mEdgeModes = null;
         // Each step is independent: session.close throwing must not leak camera.

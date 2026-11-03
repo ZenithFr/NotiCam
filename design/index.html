@@ -240,7 +240,7 @@
       </div>
 
       <div class="toolbar">
-        <button class="round glass rawbtn" id="rawToggle" aria-pressed="false" aria-label="Toggle RAW">RAW</button>
+        <button class="round glass rawbtn" id="rawToggle" aria-pressed="false" aria-label="Toggle open gate RAW">RAW</button>
         <button class="glass format" id="resolution" aria-label="Switch photo resolution">12 MP</button>
         <button class="round glass" id="flashMode" aria-label="Cycle flash">
           <svg viewBox="0 0 24 24"><path d="m14 2-8 12h6l-2 8 8-13h-6z" /><path id="flashSlash" d="M3 3 21 21" /></svg>
@@ -302,7 +302,7 @@
         </div>
         <div class="settings-body" id="settingsBody">
 
-          <div class="sgroup" data-section="capture" data-terms="capture photo video flash format raw dng timer jpeg resolution quality size frame rate">
+          <div class="sgroup" data-section="capture" data-terms="capture photo video flash format raw open gate dng timer jpeg resolution quality size frame rate readout sensor">
             <h3 id="captureTitle">Capture</h3>
             <div class="scard">
               <div data-photo-only>
@@ -313,7 +313,7 @@
                 <div class="sdivider"></div>
                 <button class="srow click" id="rawRow" aria-pressed="false">
                   <svg viewBox="0 0 24 24"><path d="M6 3h8l5 5v13H6z" /><path d="M14 3v5h5M9 12.4h7M9 15.6h7" /></svg>
-                  <div class="txt"><b>RAW capture</b><span>Separate DNG files · never merged</span></div>
+                  <div class="txt"><b>Open gate RAW</b><span>Full-sensor DNG readout · never merged</span></div>
                   <span class="switch" id="rawSwitch" aria-hidden="true"></span>
                 </button>
                 <div class="sdivider"></div>
@@ -328,7 +328,7 @@
                   <div class="txt"><b>Flash</b><span>Tap to cycle off, auto, on</span></div>
                   <span class="val"><span id="flashValue">Off</span><svg viewBox="0 0 24 24"><path d="m9.5 5.5 6.5 6.5-6.5 6.5" /></svg></span>
                 </button>
-                <p class="snote">RAW size and frame count: hold the top-left RAW button for 3 seconds. HDR merge and Ultra HDR export are not implemented yet.</p>
+                <p class="snote">Open-gate readout and frame count: hold the top-left RAW button for 3 seconds. Open gate captures the full sensor field; binned is the smaller native readout. HDR merge and Ultra HDR export are not implemented yet.</p>
               </div>
               <div data-video-only hidden>
                 <div class="schoice">
@@ -499,7 +499,7 @@
         $("aperture").style.display = bokeh && !capturing ? "flex" : "none";
         $("badge").classList.toggle("visible", bokeh || high || recording || raw);
         if (recording) $("badge").textContent = `● ${videoTime()}`;
-        else if (raw) $("badge").textContent = `${high ? "50" : "12"} MP RAW`;
+        else if (raw) $("badge").textContent = `OPEN GATE RAW · ${high ? "50" : "12"} MP`;
         else if (bokeh || high) $("badge").textContent = bokeh ? `PORTRAIT  ƒ ${Number($("fstop").value).toFixed(1)}` : "50 MP · 1×";
         const stops = [0.6, 1, 2];
         let lower = zoom < 1 ? 0 : 1;
@@ -535,11 +535,12 @@
         render();
       };
       $("resolution").onclick = () => {
+        if (raw) { high = !high; zoom = 1; toast(high ? "Open gate readout (simulated)" : "Binned readout (simulated)"); render(); return; }
         high = !high;
         if (high) { bokeh = false; zoom = 1; toast("50 MP main-camera path — simulated in this preview"); }
         render();
       };
-      $("rawToggle").onclick = () => { raw = !raw; if (raw) bokeh = false; render(); };
+      $("rawToggle").onclick = () => { raw = !raw; if (raw) { bokeh = false; high = true; zoom = 1; toast("Open gate RAW — full sensor (simulated)"); } render(); };
       let zoomHandoff;
       const lensForZoom = (value) => (value < 1 ? "wide" : value >= 2 ? "tele" : "main");
       function previewZoomHandoff(from, to) {
@@ -563,6 +564,7 @@
         animation.finished.then(clean, clean);
       }
       function setZoom(value) {
+        if (raw) { toast("Open gate RAW keeps the full sensor field"); return; }
         previewZoomHandoff(zoom, value);
         zoom = value;
         if (high && zoom !== 1) { high = false; toast("Zoom returns to 12 MP"); }
@@ -595,7 +597,7 @@
       }
       $("settingsSearch").oninput = filterSettings;
       $("gridRow").onclick = () => { grid = !grid; render(); };
-      $("rawRow").onclick = () => { raw = !raw; if (raw) bokeh = false; render(); };
+      $("rawRow").onclick = () => { raw = !raw; if (raw) { bokeh = false; high = true; zoom = 1; toast("Open gate RAW — full sensor (simulated)"); } render(); };
       $("timerRow").onclick = () => { timer = timer === 0 ? 3 : timer === 3 ? 10 : 0; render(); };
       $("flashRow").onclick = () => { flash = (flash + 1) % 3; syncFlash(); render(); };
       $("guideRow").onclick = () => { guide = (guide + 1) % guides.length; if (!grid) grid = true; render(); };

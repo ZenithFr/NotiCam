@@ -714,7 +714,7 @@ class CameraController(
         )
             .daemon(false)
             .tag("noticam-${android.os.Process.myPid()}-${System.identityHashCode(this)}")
-            .version(11)
+            .version(12)
             .processNameSuffix("auxcam_privileged")
         serviceArgs = args
         try { Shizuku.bindUserService(args, this) }
@@ -2160,6 +2160,12 @@ class CameraController(
 
     private fun applyZoom(requested: Float, force: Boolean) {
         if (!requested.isFinite() || state.bokehChecksRunning || state.captureBusy || state.videoRecording || state.videoStarting || !foreground || disposed) return
+        if (state.raw) {
+            // Open gate RAW captures the full sensor field; a digital crop would defeat it.
+            val msg = "Open gate RAW keeps the full sensor field"
+            if (state.status != msg) update { it.copy(status = msg) }
+            return
+        }
         val zoom = requested.coerceIn(DeviceProfile.ZOOM_STOPS.first(), DeviceProfile.ZOOM_STOPS.last())
         if (zoomHandoffPending) { queuedZoom = zoom; return }
         if (!state.sessionReady) return
@@ -2398,7 +2404,11 @@ class CameraController(
         check(!high || CaptureOutput.is50MpSize(width, height)) { "50 MP was not advertised by this camera" }
         update { it.copy(photoWidth = width, photoHeight = height) }
         val reader = if (raw) {
-            ImageReader.newInstance(width, height, ImageFormat.RAW_SENSOR, 2)
+            // The service owns the real RAW reader; this client surface only needs the
+            // advertised dimensions. Size the queue to the payload budget so a 50 MP
+            // open-gate frame never allocates two ~100 MiB buffers up front.
+            ImageReader.newInstance(width, height, ImageFormat.RAW_SENSOR,
+                RawFrameMatcher.maxFramesForSize(width, height).coerceAtLeast(1))
         } else if (!bokeh) ImageReader.newInstance(width, height, ImageFormat.JPEG, 2)
         else ImageReader.newInstance(width, height, ImageFormat.YUV_420_888, 2, HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE)
         return reader.also { it.setOnImageAvailableListener(::onStillImage, stillHandler) }
@@ -2510,17 +2520,18 @@ class CameraController(
         val width = if (high) state.rawHighWidth else state.rawStandardWidth
         val height = if (high) state.rawHighHeight else state.rawStandardHeight
         if (!state.rawCapabilityChecked || RawFrameMatcher.maxFramesForSize(width, height) == 0) {
-            Toast.makeText(activity, "${if (high) "50" else "12"} MP RAW is not advertised for this lens", Toast.LENGTH_SHORT).show()
+            Toast.makeText(activity, "${if (high) "Open-gate" else "Binned"} RAW is not advertised for this lens", Toast.LENGTH_SHORT).show()
             return
         }
         if (state.raw && (state.resolution == Resolution.High) == high) return
-        val nativeZoom = if (!high) state.zoom else when (currentLens) { "3" -> 2f; "2" -> .6f; else -> 1f }
+        // Open gate reads the full sensor field: lock to the lens' native (uncropped) zoom.
+        val nativeZoom = when (currentLens) { "3" -> 2f; "2" -> .6f; else -> 1f }
         lastSentZoom = nativeZoom
         try { service?.setZoom(nativeZoom) } catch (_: RemoteException) { }
         try { service?.setFlashMode(0) } catch (_: RemoteException) { }
         update { it.copy(raw = true, resolution = if (high) Resolution.High else Resolution.Standard,
             rawSensorWidth = width, rawSensorHeight = height, rawFrames = 1, zoom = nativeZoom, flash = FlashMode.Off, bokehEnabled = false) }
-        rebuildStillSession("Opening native ${if (high) "50" else "12"} MP RAW…")
+        rebuildStillSession(if (high) "Opening open-gate RAW (full sensor)…" else "Opening binned RAW…")
         haptic()
     }
 
@@ -2548,8 +2559,18 @@ class CameraController(
         }
         if (newRaw) {
             try { service?.setFlashMode(0) } catch (_: Exception) { }
-            update { it.copy(raw = true, flash = FlashMode.Off, bokehEnabled = false) }
-            rebuildStillSession("Enabling advertised RAW (DNG) capture…")
+            // Open gate by default: prefer the full-sensor readout, falling back to the
+            // native binned class only when no full-sensor RAW stream is advertised.
+            val openGate = state.rawHighWidth > 0 && state.rawHighHeight > 0
+            val width = if (openGate) state.rawHighWidth else state.rawStandardWidth
+            val height = if (openGate) state.rawHighHeight else state.rawStandardHeight
+            val nativeZoom = when (currentLens) { "3" -> 2f; "2" -> .6f; else -> 1f }
+            lastSentZoom = nativeZoom
+            try { service?.setZoom(nativeZoom) } catch (_: RemoteException) { }
+            update { it.copy(raw = true, resolution = if (openGate) Resolution.High else Resolution.Standard,
+                rawSensorWidth = width, rawSensorHeight = height, rawFrames = 1, zoom = nativeZoom,
+                flash = FlashMode.Off, bokehEnabled = false) }
+            rebuildStillSession(if (openGate) "Enabling open-gate RAW (full sensor)…" else "Enabling binned RAW (DNG)…")
         } else {
             update { it.copy(raw = false, resolution = if (it.resolution == Resolution.High && it.highResolutionChecked && it.supportsHighResolution)
                 Resolution.High else Resolution.Standard) }

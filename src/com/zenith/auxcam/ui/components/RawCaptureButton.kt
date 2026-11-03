@@ -48,7 +48,7 @@ fun RawCaptureButton(state: CameraUiState, actions: CameraActions) {
         Box(Modifier.size(CameraSpacing.touch)
             .semantics {
                 role = Role.Button
-                contentDescription = "RAW ${if (state.raw) "on" else "off"}. Hold 1 second for size and frame count"
+                contentDescription = "Open gate RAW ${if (state.raw) "on" else "off"}. Hold 1 second for readout and frame count"
                 selected = state.raw
                 if (!enabled) disabled()
                 onClick { if (enabled) currentActions.onRawToggle(); enabled }
@@ -85,12 +85,12 @@ fun RawCaptureButton(state: CameraUiState, actions: CameraActions) {
             offset = IntOffset(0, with(LocalDensity.current) { 48.dp.roundToPx() }),
             onDismissRequest = { expanded = false }, properties = PopupProperties(focusable = true)) {
             Column(Modifier.widthIn(max = 320.dp).cameraGlass(RoundedCornerShape(16.dp)).padding(10.dp)) {
-                Text("RAW · native sensor output", style = CameraType.Caption, color = CameraColors.Label)
+                Text("Open gate RAW · full-sensor readout", style = CameraType.Caption, color = CameraColors.Label)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TogglePill("12 MP", state.raw && state.resolution == Resolution.Standard,
+                    TogglePill("Binned", state.raw && state.resolution == Resolution.Standard,
                         { currentActions.onRawResolutionSelected(false); expanded = false },
                         enabled = state.rawCapabilityChecked && state.rawStandardWidth > 0)
-                    TogglePill("50 MP", state.raw && state.resolution == Resolution.High,
+                    TogglePill("Open gate", state.raw && state.resolution == Resolution.High,
                         { currentActions.onRawResolutionSelected(true); expanded = false },
                         enabled = state.rawCapabilityChecked && state.rawHighWidth > 0)
                 }
@@ -99,7 +99,7 @@ fun RawCaptureButton(state: CameraUiState, actions: CameraActions) {
                         state.rawFrames == count, { currentActions.onRawFramesSelected(count); expanded = false },
                         enabled = state.raw && state.supportsRaw)
                 }
-                Text("Separate DNGs · not HDR/merged. Missing sizes are disabled. 128 MiB RAW payload limit.",
+                Text("Full-sensor DNGs · not HDR/merged. Open gate uses the maximum-resolution readout when advertised; unavailable readouts are disabled. 128 MiB RAW payload limit.",
                     style = CameraType.Caption, color = CameraColors.LabelSecondary)
             }
         }

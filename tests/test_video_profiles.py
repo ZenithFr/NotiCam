@@ -49,7 +49,7 @@ class VideoProfiles(unittest.TestCase):
 
     def test_new_query_appends_transaction_and_restarts_old_sidecar(self):
         self.assertIn('getVideoConfiguration(String lensId, int quality, int fps) = 22', (SRC / 'IAuxCamService.aidl').read_text())
-        self.assertIn('.version(11)', (SRC / 'CameraController.kt').read_text())
+        self.assertIn('.version(12)', (SRC / 'CameraController.kt').read_text())
 
     def test_no_synthetic_npu_worker_runs_in_sharp_preview(self):
         self.assertFalse((ROOT / 'jni/src/NpuWorker.cpp').exists())

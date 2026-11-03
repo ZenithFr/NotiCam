@@ -7,8 +7,12 @@ part of the default capture path today.
 
 ## Latest controls / RAW / HDR status
 
-The top-left title is replaced by RAW; hold it for **3 seconds** for native
-12/50 MP choices and bounded frame counts. Photo/Video is a labeled two-option
+The top-left title is replaced by **Open gate RAW**: tap to capture the
+full-sensor DNG readout (no digital crop), hold for **3 seconds** for the
+Binned / Open gate readout choice and bounded frame counts. Open gate uses the
+maximum-resolution sensor pixel mode when the HAL advertises it (this is the fix
+for 50 MP RAW); on-device capture is pending hardware verification — see
+[the local-agent hand-off](design/LOCAL_AGENT_OPEN_GATE.md). Photo/Video is a labeled two-option
 switch with a travelling selection pill, and the gear opens a full-screen,
 searchable Settings page (grouped rows, switches and segmented choices) instead
 of the old bottom sheet. ISO/SHUTTER snap to stops, 50 MP no longer has an
