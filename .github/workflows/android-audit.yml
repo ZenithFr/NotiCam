@@ -31,6 +31,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '8.9'
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
       - uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: '12266719'
@@ -71,6 +72,19 @@ jobs:
           gradle --no-daemon --stacktrace --console=plain assembleDebug 2>&1 | tee build/audit/apk.log || status=$?
           if [ "$status" -ne 0 ]; then python3 tools/ci_annotations.py build/audit/apk.log; fi
           exit "$status"
+      - name: Release APK and release lint
+        id: release
+        continue-on-error: true
+        run: |
+          status=0
+          gradle --no-daemon --stacktrace --console=plain assembleRelease lintRelease 2>&1 | tee build/audit/release.log || status=$?
+          if [ "$status" -ne 0 ]; then python3 tools/ci_annotations.py build/audit/release.log; fi
+          exit "$status"
+      - name: Verify actual test counts and APK contents
+        if: always()
+        id: outputs
+        continue-on-error: true
+        run: python3 tools/audit_android_outputs.py
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@v5
@@ -83,6 +97,7 @@ jobs:
             build/reports/
             build/test-results/
             build/outputs/apk/debug/*.apk
+            build/outputs/apk/release/*.apk
       - name: Require every check to pass
         if: always()
         env:
@@ -90,6 +105,9 @@ jobs:
           UNIT: ${{ steps.unit.outcome }}
           LINT: ${{ steps.lint.outcome }}
           APK: ${{ steps.apk.outcome }}
+          RELEASE: ${{ steps.release.outcome }}
+          OUTPUTS: ${{ steps.outputs.outcome }}
         run: |
           printf 'Portable: %s\nUnit: %s\nLint: %s\nAPK: %s\n' "$PORTABLE" "$UNIT" "$LINT" "$APK" | tee -a "$GITHUB_STEP_SUMMARY"
-          test "$PORTABLE" = success && test "$UNIT" = success && test "$LINT" = success && test "$APK" = success
+          printf 'Release: %s\nOutput verification: %s\n' "$RELEASE" "$OUTPUTS" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$PORTABLE" = success && test "$UNIT" = success && test "$LINT" = success && test "$APK" = success && test "$RELEASE" = success && test "$OUTPUTS" = success
